@@ -10,7 +10,7 @@ import {
   Modal,
   TextInput,
 } from 'react-native';
-import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useGardenStore } from '../../src/store/useGardenStore';
 import { Colors, PLANT_EMOJIS, HEALTH_COLORS, HEALTH_LABELS, ACTION_LABELS } from '../../src/constants';
 import { formatDate, nextWateringDate } from '../../src/services/careRules';
@@ -45,11 +45,13 @@ export default function PlantDetailScreen() {
     );
   }
 
-  const logs = logsForPlant(plant.id);
-  const emoji = PLANT_EMOJIS[plant.type] ?? '🌱';
-  const healthColor = HEALTH_COLORS[plant.health_status];
-  const healthLabel = HEALTH_LABELS[plant.health_status];
-  const nextWater = nextWateringDate(plant);
+  // Assign to non-nullable const so TypeScript narrows correctly inside closures
+  const p = plant;
+  const logs = logsForPlant(p.id);
+  const emoji = PLANT_EMOJIS[p.type] ?? '🌱';
+  const healthColor = HEALTH_COLORS[p.health_status];
+  const healthLabel = HEALTH_LABELS[p.health_status];
+  const nextWater = nextWateringDate(p);
   const isOverdue = nextWater !== null && nextWater <= new Date();
 
   function handleAction(action: CareAction) {
@@ -63,12 +65,12 @@ export default function PlantDetailScreen() {
     const now = new Date().toISOString();
 
     if (pendingAction === 'watered') {
-      updatePlant(plant.id, { last_watered_at: now });
+      updatePlant(p.id, { last_watered_at: now });
     }
 
     addCareLog({
       id: `log-${Date.now()}`,
-      plant_id: plant.id,
+      plant_id: p.id,
       user_id: 'local',
       action: pendingAction,
       notes: noteInput.trim() || null,
@@ -81,13 +83,13 @@ export default function PlantDetailScreen() {
   }
 
   function handleDeletePlant() {
-    Alert.alert('Pflanze löschen', `"${plant.name}" wirklich löschen?`, [
+    Alert.alert('Pflanze löschen', `"${p.name}" wirklich löschen?`, [
       { text: 'Abbrechen', style: 'cancel' },
       {
         text: 'Löschen',
         style: 'destructive',
         onPress: () => {
-          deletePlant(plant.id);
+          deletePlant(p.id);
           recomputeSuggestions();
           router.back();
         },
@@ -96,15 +98,15 @@ export default function PlantDetailScreen() {
   }
 
   function setHealthStatus(status: HealthStatus) {
-    updatePlant(plant.id, { health_status: status });
+    updatePlant(p.id, { health_status: status });
     setShowHealthModal(false);
   }
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
       {/* Header photo */}
-      {plant.photo_url ? (
-        <Image source={{ uri: plant.photo_url }} style={styles.photo} />
+      {p.photo_url ? (
+        <Image source={{ uri: p.photo_url }} style={styles.photo} />
       ) : (
         <View style={styles.emojiHero}>
           <Text style={styles.emojiHeroText}>{emoji}</Text>
@@ -114,8 +116,8 @@ export default function PlantDetailScreen() {
       {/* Name & health */}
       <View style={styles.nameRow}>
         <View style={styles.nameBlock}>
-          <Text style={styles.name}>{plant.name}</Text>
-          {plant.species ? <Text style={styles.species}>{plant.species}</Text> : null}
+          <Text style={styles.name}>{p.name}</Text>
+          {p.species ? <Text style={styles.species}>{p.species}</Text> : null}
         </View>
         <TouchableOpacity
           style={[styles.healthBadge, { backgroundColor: healthColor + '20' }]}
@@ -131,7 +133,7 @@ export default function PlantDetailScreen() {
       <View style={styles.infoGrid}>
         <View style={styles.infoCard}>
           <Text style={styles.infoEmoji}>💧</Text>
-          <Text style={styles.infoValue}>{formatDate(plant.last_watered_at)}</Text>
+          <Text style={styles.infoValue}>{formatDate(p.last_watered_at)}</Text>
           <Text style={styles.infoLabel}>Zuletzt gegossen</Text>
         </View>
         <View style={[styles.infoCard, isOverdue && styles.infoCardWarning]}>
@@ -143,16 +145,16 @@ export default function PlantDetailScreen() {
         </View>
         <View style={styles.infoCard}>
           <Text style={styles.infoEmoji}>🔄</Text>
-          <Text style={styles.infoValue}>alle {plant.watering_interval_days}d</Text>
+          <Text style={styles.infoValue}>alle {p.watering_interval_days}d</Text>
           <Text style={styles.infoLabel}>Intervall</Text>
         </View>
       </View>
 
       {/* Care notes */}
-      {plant.care_notes ? (
+      {p.care_notes ? (
         <View style={styles.notesCard}>
           <Text style={styles.notesTitle}>Pflegehinweise</Text>
-          <Text style={styles.notesText}>{plant.care_notes}</Text>
+          <Text style={styles.notesText}>{p.care_notes}</Text>
         </View>
       ) : null}
 
@@ -207,7 +209,7 @@ export default function PlantDetailScreen() {
                 key={status}
                 style={[
                   styles.healthOption,
-                  plant.health_status === status && {
+                  p.health_status === status && {
                     backgroundColor: HEALTH_COLORS[status] + '15',
                     borderColor: HEALTH_COLORS[status],
                   },

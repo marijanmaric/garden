@@ -7,7 +7,6 @@ import {
   TextInput,
   ScrollView,
   Alert,
-  Switch,
 } from 'react-native';
 import { useGardenStore } from '../../src/store/useGardenStore';
 import { supabase, isSupabaseConfigured } from '../../src/lib/supabase';
