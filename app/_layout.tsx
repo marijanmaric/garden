@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useGardenStore } from '../src/store/useGardenStore';
@@ -8,6 +8,11 @@ export default function RootLayout() {
   const { session, setSession } = useGardenStore();
   const segments = useSegments();
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -21,13 +26,14 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    if (!mounted) return;
     const inAuth = segments[0] === '(auth)';
     if (!session && !inAuth) {
       router.replace('/(auth)/login');
     } else if (session && inAuth) {
       router.replace('/(tabs)');
     }
-  }, [session, segments]);
+  }, [session, segments, mounted]);
 
   return (
     <>
