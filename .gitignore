@@ -5,3 +5,5 @@ web-build/
 .env
 *.local
 .DS_Store
+.claude/.env.local
+.claude/settings.local.json
