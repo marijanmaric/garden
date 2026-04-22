@@ -149,7 +149,10 @@ export default function GardenScreen() {
 
       {/* New garden modal */}
       <Modal visible={showNewGarden} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Neuen Garten anlegen</Text>
             <TextInput
@@ -172,7 +175,7 @@ export default function GardenScreen() {
               </TouchableOpacity>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* Cell plant detail modal */}
