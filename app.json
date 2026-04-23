@@ -9,7 +9,10 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.yourcompany.gartenapp"
+      "bundleIdentifier": "com.yourcompany.gartenapp",
+      "infoPlist": {
+        "NSCameraUsageDescription": "GartenApp benötigt Kamerazugriff, um Pflanzen zu identifizieren und deinen Garten zu scannen."
+      }
     },
     "android": {
       "adaptiveIcon": {
