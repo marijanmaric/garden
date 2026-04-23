@@ -133,6 +133,46 @@ export default function ProfileScreen() {
         </View>
       </View>
 
+      {/* Anthropic API */}
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>GARTEN-KI (SCAN)</Text>
+        <View style={styles.card}>
+          <Text style={styles.rowTitle}>Anthropic API-Key</Text>
+          <Text style={styles.rowSub}>
+            Für automatische Pflanzenerkennung per Foto · console.anthropic.com
+          </Text>
+          <View style={styles.apiKeyRow}>
+            <TextInput
+              style={styles.apiKeyInput}
+              value={anthropicInput}
+              onChangeText={setAnthropicInput}
+              placeholder="sk-ant-…"
+              secureTextEntry={!anthropicVisible}
+              autoCapitalize="none"
+              placeholderTextColor={Colors.textSecondary}
+            />
+            <TouchableOpacity
+              style={styles.eyeBtn}
+              onPress={() => setAnthropicVisible((v) => !v)}
+            >
+              <Text>{anthropicVisible ? '🙈' : '👁️'}</Text>
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity style={styles.saveBtn} onPress={saveAnthropicKey} activeOpacity={0.8}>
+            <Text style={styles.saveBtnText}>Speichern</Text>
+          </TouchableOpacity>
+          {anthropicApiKey ? (
+            <View style={styles.keyOkBadge}>
+              <Text style={styles.keyOkText}>✅ API-Key gesetzt</Text>
+            </View>
+          ) : (
+            <View style={styles.keyMissingBadge}>
+              <Text style={styles.keyMissingText}>⚠️ Kein Key – Garten-Scan deaktiviert</Text>
+            </View>
+          )}
+        </View>
+      </View>
+
       {/* Weather info */}
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>WETTER</Text>
