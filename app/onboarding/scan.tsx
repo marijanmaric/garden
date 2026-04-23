@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
+import { requestCameraPermission } from '../../src/utils/permissions';
 import { useGardenStore } from '../../src/store/useGardenStore';
 import { analyzeGardenPhotos, GardenAnalysisResult } from '../../src/services/gardenAnalysis';
 import { Colors, ZONE_COLORS, ZONE_EMOJIS, ZONE_TYPE_LABELS } from '../../src/constants';
