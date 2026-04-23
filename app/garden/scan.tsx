@@ -31,6 +31,10 @@ export default function GardenScanScreen() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
 
   async function pickImage(fromCamera: boolean) {
+    if (fromCamera) {
+      const granted = await requestCameraPermission();
+      if (!granted) return;
+    }
     const fn = fromCamera
       ? ImagePicker.launchCameraAsync
       : ImagePicker.launchImageLibraryAsync;
