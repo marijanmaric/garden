@@ -42,6 +42,8 @@ export default function OnboardingScanScreen() {
 
   async function pickPhoto() {
     if (photos.length >= MAX_PHOTOS) return;
+    const granted = await requestCameraPermission();
+    if (!granted) return;
     const res = await ImagePicker.launchCameraAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.7,
