@@ -4,75 +4,66 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  TextInput,
+  ScrollView,
   Modal,
   Alert,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
+  Dimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useGardenStore } from '../../src/store/useGardenStore';
-import { GardenGrid } from '../../src/components/GardenGrid';
 import { EmptyState } from '../../src/components/EmptyState';
-import { Colors, PLANT_EMOJIS, HEALTH_COLORS } from '../../src/constants';
-import { Plant } from '../../src/types';
+import { Colors, ZONE_COLORS, ZONE_EMOJIS, ZONE_TYPE_LABELS } from '../../src/constants';
+import { GardenZone } from '../../src/types';
+
+const CANVAS_W = Dimensions.get('window').width - 32;
+const CANVAS_H = CANVAS_W * 0.65;
 
 export default function GardenScreen() {
   const router = useRouter();
-  const { gardens, activeGardenId, activeGarden, addGarden, setActiveGarden, plants, plantsForGarden } =
-    useGardenStore();
+  const {
+    gardens,
+    activeGardenId,
+    activeGarden,
+    setActiveGarden,
+    zonesForGarden,
+    deleteZone,
+    plants,
+  } = useGardenStore();
 
-  const [showNewGarden, setShowNewGarden] = useState(false);
-  const [newGardenName, setNewGardenName] = useState('');
-  const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
-  const [cellPlant, setCellPlant] = useState<Plant | null>(null);
-  const [showCellModal, setShowCellModal] = useState(false);
+  const [selectedZone, setSelectedZone] = useState<GardenZone | null>(null);
 
   const garden = activeGarden();
-  const gardenPlants = garden ? plantsForGarden(garden.id) : [];
+  const zones = garden ? zonesForGarden(garden.id) : [];
 
-  function handleCreateGarden() {
-    if (!newGardenName.trim()) {
-      Alert.alert('Fehler', 'Bitte Gartenname eingeben');
-      return;
-    }
-    const g = {
-      id: `garden-${Date.now()}`,
-      user_id: 'local',
-      name: newGardenName.trim(),
-      location_lat: null,
-      location_lon: null,
-      grid_rows: 10,
-      grid_cols: 10,
-      created_at: new Date().toISOString(),
-    };
-    addGarden(g);
-    setNewGardenName('');
-    setShowNewGarden(false);
+  function handleDeleteZone(zone: GardenZone) {
+    Alert.alert('Zone löschen', `"${zone.name}" wirklich löschen?`, [
+      { text: 'Abbrechen', style: 'cancel' },
+      {
+        text: 'Löschen',
+        style: 'destructive',
+        onPress: () => {
+          deleteZone(zone.id);
+          setSelectedZone(null);
+        },
+      },
+    ]);
   }
 
-  function handleCellPress(x: number, y: number, plant?: Plant) {
-    setSelectedCell({ x, y });
-    if (plant) {
-      setCellPlant(plant);
-      setShowCellModal(true);
-    } else {
-      // Empty cell – navigate to add plant with pre-selected position
-      router.push({ pathname: '/plant/add', params: { gridX: x, gridY: y, gardenId: garden?.id } });
-    }
-  }
+  const gardenPlants = garden
+    ? plants.filter((p) => p.garden_id === garden.id)
+    : [];
 
   return (
     <View style={styles.root}>
+      {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>Gartenplan</Text>
         <TouchableOpacity
-          style={styles.addBtn}
-          onPress={() => setShowNewGarden(true)}
+          style={styles.scanBtn}
+          onPress={() => router.push('/onboarding/scan')}
           activeOpacity={0.8}
         >
-          <Text style={styles.addBtnText}>+ Garten</Text>
+          <Text style={styles.scanBtnText}>📸 Neu scannen</Text>
         </TouchableOpacity>
       </View>
 
@@ -89,9 +80,7 @@ export default function GardenScreen() {
               style={[styles.gardenTab, g.id === activeGardenId && styles.gardenTabActive]}
               onPress={() => setActiveGarden(g.id)}
             >
-              <Text
-                style={[styles.gardenTabText, g.id === activeGardenId && styles.gardenTabTextActive]}
-              >
+              <Text style={[styles.gardenTabText, g.id === activeGardenId && styles.gardenTabTextActive]}>
                 {g.name}
               </Text>
             </TouchableOpacity>
@@ -103,111 +92,138 @@ export default function GardenScreen() {
         <EmptyState
           emoji="🏡"
           title="Noch kein Garten"
-          subtitle="Erstelle deinen ersten digitalen Garten und platziere deine Pflanzen auf dem Plan."
-          actionLabel="Garten anlegen"
-          onAction={() => setShowNewGarden(true)}
+          subtitle="Scanne deinen Garten mit der Kamera und die KI erstellt automatisch eine digitale Karte."
+          actionLabel="Garten scannen"
+          onAction={() => router.push('/onboarding/scan')}
         />
       ) : (
-        <>
-          <View style={styles.gridInfo}>
-            <Text style={styles.gridInfoText}>
-              🌱 {gardenPlants.length} Pflanze{gardenPlants.length !== 1 ? 'n' : ''} ·{' '}
-              {garden.grid_rows}×{garden.grid_cols} Felder
+        <ScrollView showsVerticalScrollIndicator={false}>
+          {/* Stats row */}
+          <View style={styles.statsRow}>
+            <Text style={styles.statsText}>
+              🗺️ {zones.length} Zone{zones.length !== 1 ? 'n' : ''} ·{' '}
+              🌱 {gardenPlants.length} Pflanze{gardenPlants.length !== 1 ? 'n' : ''}
             </Text>
             <TouchableOpacity onPress={() => router.push('/plant/add')} activeOpacity={0.8}>
               <Text style={styles.addPlantLink}>+ Pflanze</Text>
             </TouchableOpacity>
           </View>
 
-          <View style={styles.gridContainer}>
-            <GardenGrid
-              garden={garden}
-              plants={gardenPlants}
-              onCellPress={handleCellPress}
-              selectedCell={selectedCell}
-            />
+          {/* Garden map canvas */}
+          <View style={[styles.canvas, { height: CANVAS_H }]}>
+            {zones.length === 0 ? (
+              <View style={styles.emptyCanvas}>
+                <Text style={styles.emptyCanvasText}>Noch keine Zonen · Garten scannen</Text>
+              </View>
+            ) : (
+              zones.map((zone) => (
+                <TouchableOpacity
+                  key={zone.id}
+                  style={[
+                    styles.zone,
+                    {
+                      left: `${zone.x}%`,
+                      top: `${zone.y}%`,
+                      width: `${zone.width}%`,
+                      height: `${zone.height}%`,
+                      backgroundColor: ZONE_COLORS[zone.type] + 'BB',
+                      borderColor: ZONE_COLORS[zone.type],
+                    },
+                    selectedZone?.id === zone.id && styles.zoneSelected,
+                  ]}
+                  onPress={() => setSelectedZone(zone)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={styles.zoneEmoji}>{ZONE_EMOJIS[zone.type]}</Text>
+                  <Text style={styles.zoneName} numberOfLines={2}>{zone.name}</Text>
+                </TouchableOpacity>
+              ))
+            )}
           </View>
 
-          <View style={styles.legend}>
-            <Text style={styles.legendTitle}>Legende</Text>
-            <View style={styles.legendItems}>
-              {gardenPlants.slice(0, 6).map((p) => (
-                <View key={p.id} style={styles.legendItem}>
-                  <Text style={styles.legendEmoji}>{PLANT_EMOJIS[p.type] ?? '🌱'}</Text>
-                  <Text style={styles.legendName} numberOfLines={1}>
-                    {p.name}
-                  </Text>
-                  <View
-                    style={[styles.legendDot, { backgroundColor: HEALTH_COLORS[p.health_status] }]}
-                  />
-                </View>
+          {/* Zone list */}
+          {zones.length > 0 && (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Gartenzonen</Text>
+              {zones.map((zone) => (
+                <TouchableOpacity
+                  key={zone.id}
+                  style={styles.zoneCard}
+                  onPress={() => setSelectedZone(zone)}
+                  activeOpacity={0.8}
+                >
+                  <View style={[styles.zoneCardBar, { backgroundColor: ZONE_COLORS[zone.type] }]} />
+                  <View style={styles.zoneCardContent}>
+                    <Text style={styles.zoneCardEmoji}>{ZONE_EMOJIS[zone.type]}</Text>
+                    <View style={styles.zoneCardInfo}>
+                      <Text style={styles.zoneCardName}>{zone.name}</Text>
+                      <Text style={styles.zoneCardType}>{ZONE_TYPE_LABELS[zone.type]}</Text>
+                      {zone.detected_plants.length > 0 && (
+                        <Text style={styles.zoneCardPlants} numberOfLines={1}>
+                          🌱 {zone.detected_plants.join(', ')}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                </TouchableOpacity>
               ))}
             </View>
-          </View>
-        </>
+          )}
+
+          {zones.length === 0 && (
+            <TouchableOpacity
+              style={styles.rescanPrompt}
+              onPress={() => router.push('/onboarding/scan')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.rescanPromptEmoji}>📸</Text>
+              <Text style={styles.rescanPromptText}>
+                Jetzt Garten scannen und Zonen automatisch erkennen lassen
+              </Text>
+            </TouchableOpacity>
+          )}
+        </ScrollView>
       )}
 
-      {/* New garden modal */}
-      <Modal visible={showNewGarden} transparent animationType="slide">
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Neuen Garten anlegen</Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="z.B. Hintergarten, Balkon, Gewächshaus…"
-              value={newGardenName}
-              onChangeText={setNewGardenName}
-              autoFocus
-              placeholderTextColor={Colors.textSecondary}
-            />
-            <View style={styles.modalBtns}>
-              <TouchableOpacity
-                style={styles.modalCancelBtn}
-                onPress={() => setShowNewGarden(false)}
-              >
-                <Text style={styles.modalCancelText}>Abbrechen</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalConfirmBtn} onPress={handleCreateGarden}>
-                <Text style={styles.modalConfirmText}>Anlegen</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Cell plant detail modal */}
-      <Modal visible={showCellModal} transparent animationType="fade">
+      {/* Zone detail modal */}
+      <Modal visible={!!selectedZone} transparent animationType="slide">
         <TouchableOpacity
           style={styles.modalOverlay}
-          onPress={() => setShowCellModal(false)}
+          onPress={() => setSelectedZone(null)}
           activeOpacity={1}
         >
           <View style={styles.modalCard}>
-            {cellPlant && (
+            {selectedZone && (
               <>
-                <Text style={styles.cellModalEmoji}>{PLANT_EMOJIS[cellPlant.type] ?? '🌱'}</Text>
-                <Text style={styles.modalTitle}>{cellPlant.name}</Text>
-                {cellPlant.species ? (
-                  <Text style={styles.cellModalSpecies}>{cellPlant.species}</Text>
+                <Text style={styles.modalEmoji}>{ZONE_EMOJIS[selectedZone.type]}</Text>
+                <Text style={styles.modalTitle}>{selectedZone.name}</Text>
+                <Text style={styles.modalType}>{ZONE_TYPE_LABELS[selectedZone.type]}</Text>
+
+                {selectedZone.description ? (
+                  <Text style={styles.modalDesc}>{selectedZone.description}</Text>
                 ) : null}
+
+                {selectedZone.detected_plants.length > 0 && (
+                  <View style={styles.modalPlants}>
+                    <Text style={styles.modalPlantsTitle}>Erkannte Pflanzen</Text>
+                    {selectedZone.detected_plants.map((p, i) => (
+                      <Text key={i} style={styles.modalPlantItem}>🌱 {p}</Text>
+                    ))}
+                  </View>
+                )}
+
                 <View style={styles.modalBtns}>
                   <TouchableOpacity
                     style={styles.modalCancelBtn}
-                    onPress={() => setShowCellModal(false)}
+                    onPress={() => setSelectedZone(null)}
                   >
                     <Text style={styles.modalCancelText}>Schließen</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={styles.modalConfirmBtn}
-                    onPress={() => {
-                      setShowCellModal(false);
-                      router.push(`/plant/${cellPlant.id}`);
-                    }}
+                    style={styles.modalDeleteBtn}
+                    onPress={() => handleDeleteZone(selectedZone)}
                   >
-                    <Text style={styles.modalConfirmText}>Details</Text>
+                    <Text style={styles.modalDeleteText}>Löschen</Text>
                   </TouchableOpacity>
                 </View>
               </>
@@ -220,186 +236,100 @@ export default function GardenScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
+  root: { flex: 1, backgroundColor: Colors.background },
+
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 16,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 20, paddingTop: 60, paddingBottom: 16,
   },
-  title: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: Colors.textPrimary,
+  title: { fontSize: 26, fontWeight: '800', color: Colors.textPrimary },
+  scanBtn: {
+    backgroundColor: Colors.primary, borderRadius: 20,
+    paddingHorizontal: 14, paddingVertical: 7,
   },
-  addBtn: {
-    backgroundColor: Colors.primary,
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-  },
-  addBtnText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 13,
-  },
-  gardenTabs: {
-    paddingHorizontal: 16,
-    gap: 8,
-    marginBottom: 12,
-  },
+  scanBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
+
+  gardenTabs: { paddingHorizontal: 16, gap: 8, marginBottom: 12 },
   gardenTab: {
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    backgroundColor: Colors.surface,
-    borderWidth: 1.5,
-    borderColor: Colors.border,
+    borderRadius: 20, paddingHorizontal: 16, paddingVertical: 7,
+    backgroundColor: Colors.surface, borderWidth: 1.5, borderColor: Colors.border,
   },
-  gardenTabActive: {
-    backgroundColor: Colors.primary,
-    borderColor: Colors.primary,
+  gardenTabActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  gardenTabText: { fontSize: 13, fontWeight: '600', color: Colors.textSecondary },
+  gardenTabTextActive: { color: '#fff' },
+
+  statsRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: 16, marginBottom: 10,
   },
-  gardenTabText: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: Colors.textSecondary,
+  statsText: { fontSize: 13, color: Colors.textSecondary },
+  addPlantLink: { fontSize: 13, color: Colors.primary, fontWeight: '700' },
+
+  canvas: {
+    marginHorizontal: 16, backgroundColor: '#E8F5E9',
+    borderRadius: 16, overflow: 'hidden',
+    borderWidth: 1.5, borderColor: Colors.border,
+    marginBottom: 20, position: 'relative',
   },
-  gardenTabTextActive: {
-    color: '#fff',
+  emptyCanvas: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  emptyCanvasText: { color: Colors.textSecondary, fontSize: 13 },
+
+  zone: {
+    position: 'absolute', borderWidth: 1.5, borderRadius: 8,
+    alignItems: 'center', justifyContent: 'center', padding: 4,
   },
-  gridInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    marginBottom: 8,
+  zoneSelected: { borderWidth: 3, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 4, elevation: 4 },
+  zoneEmoji: { fontSize: 20 },
+  zoneName: { fontSize: 9, color: '#fff', fontWeight: '700', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.4)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
+
+  section: { paddingHorizontal: 16, marginBottom: 24 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: Colors.textPrimary, marginBottom: 10 },
+
+  zoneCard: {
+    flexDirection: 'row', backgroundColor: Colors.surface,
+    borderRadius: 14, marginBottom: 8, overflow: 'hidden',
+    borderWidth: 1, borderColor: Colors.border,
   },
-  gridInfoText: {
-    fontSize: 13,
-    color: Colors.textSecondary,
+  zoneCardBar: { width: 5 },
+  zoneCardContent: { flex: 1, flexDirection: 'row', alignItems: 'center', padding: 14, gap: 12 },
+  zoneCardEmoji: { fontSize: 30 },
+  zoneCardInfo: { flex: 1, gap: 2 },
+  zoneCardName: { fontSize: 15, fontWeight: '700', color: Colors.textPrimary },
+  zoneCardType: { fontSize: 12, color: Colors.textSecondary },
+  zoneCardPlants: { fontSize: 12, color: Colors.primary, marginTop: 2 },
+
+  rescanPrompt: {
+    marginHorizontal: 16, marginBottom: 24,
+    backgroundColor: Colors.primary + '15', borderRadius: 14,
+    padding: 20, alignItems: 'center', gap: 10,
+    borderWidth: 1.5, borderColor: Colors.primary + '40', borderStyle: 'dashed',
   },
-  addPlantLink: {
-    fontSize: 13,
-    color: Colors.primary,
-    fontWeight: '700',
-  },
-  gridContainer: {
-    flex: 1,
-    paddingHorizontal: 16,
-  },
-  legend: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-    backgroundColor: Colors.surface,
-  },
-  legendTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: Colors.textSecondary,
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  legendItems: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  legendItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: Colors.background,
-    borderRadius: 20,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-  },
-  legendEmoji: {
-    fontSize: 14,
-  },
-  legendName: {
-    fontSize: 12,
-    color: Colors.textPrimary,
-    maxWidth: 70,
-  },
-  legendDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
+  rescanPromptEmoji: { fontSize: 40 },
+  rescanPromptText: { fontSize: 14, color: Colors.primary, fontWeight: '600', textAlign: 'center' },
+
   modalOverlay: {
-    flex: 1,
-    backgroundColor: Colors.overlay,
-    justifyContent: 'flex-end',
+    flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end',
   },
   modalCard: {
-    backgroundColor: Colors.surface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 28,
-    gap: 16,
+    backgroundColor: Colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    padding: 28, gap: 8,
   },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: Colors.textPrimary,
-    textAlign: 'center',
-  },
-  modalInput: {
-    borderWidth: 1.5,
-    borderColor: Colors.border,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 15,
-    color: Colors.textPrimary,
-    backgroundColor: Colors.background,
-  },
-  modalBtns: {
-    flexDirection: 'row',
-    gap: 12,
-  },
+  modalEmoji: { fontSize: 52, textAlign: 'center' },
+  modalTitle: { fontSize: 20, fontWeight: '700', color: Colors.textPrimary, textAlign: 'center' },
+  modalType: { fontSize: 13, color: Colors.textSecondary, textAlign: 'center', marginBottom: 4 },
+  modalDesc: { fontSize: 14, color: Colors.textPrimary, lineHeight: 20 },
+  modalPlants: { gap: 4 },
+  modalPlantsTitle: { fontSize: 12, fontWeight: '700', color: Colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  modalPlantItem: { fontSize: 14, color: Colors.textPrimary },
+  modalBtns: { flexDirection: 'row', gap: 12, marginTop: 8 },
   modalCancelBtn: {
-    flex: 1,
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: Colors.border,
+    flex: 1, borderRadius: 12, paddingVertical: 12, alignItems: 'center',
+    borderWidth: 1.5, borderColor: Colors.border,
   },
-  modalCancelText: {
-    color: Colors.textSecondary,
-    fontWeight: '600',
-    fontSize: 15,
+  modalCancelText: { color: Colors.textSecondary, fontWeight: '600', fontSize: 15 },
+  modalDeleteBtn: {
+    flex: 1, borderRadius: 12, paddingVertical: 12, alignItems: 'center',
+    borderWidth: 1.5, borderColor: Colors.danger,
   },
-  modalConfirmBtn: {
-    flex: 1,
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    backgroundColor: Colors.primary,
-  },
-  modalConfirmText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 15,
-  },
-  cellModalEmoji: {
-    fontSize: 48,
-    textAlign: 'center',
-  },
-  cellModalSpecies: {
-    fontSize: 13,
-    color: Colors.textSecondary,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
+  modalDeleteText: { color: Colors.danger, fontWeight: '700', fontSize: 15 },
 });
