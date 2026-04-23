@@ -55,6 +55,15 @@ export default function RootLayout() {
             headerBackTitle: 'Zurück',
           }}
         />
+        <Stack.Screen
+          name="garden/scan"
+          options={{
+            presentation: 'modal',
+            headerShown: true,
+            headerTitle: 'Garten scannen',
+            headerTintColor: '#2D6A4F',
+          }}
+        />
       </Stack>
     </>
   );
