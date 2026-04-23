@@ -46,6 +46,16 @@ interface GardenStore {
   setPlantIdApiKey: (key: string) => void;
   anthropicApiKey: string;
   setAnthropicApiKey: (key: string) => void;
+  openAiApiKey: string;
+  setOpenAiApiKey: (key: string) => void;
+
+  // Zones
+  zones: GardenZone[];
+  addZone: (zone: GardenZone) => void;
+  updateZone: (id: string, updates: Partial<GardenZone>) => void;
+  deleteZone: (id: string) => void;
+  zonesForGarden: (gardenId: string) => GardenZone[];
+  setZones: (zones: GardenZone[]) => void;
 
   // Care suggestions (derived, not persisted)
   careSuggestions: CareSuggestion[];
