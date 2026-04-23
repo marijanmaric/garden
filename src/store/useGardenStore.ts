@@ -44,6 +44,8 @@ interface GardenStore {
   // API keys
   plantIdApiKey: string;
   setPlantIdApiKey: (key: string) => void;
+  anthropicApiKey: string;
+  setAnthropicApiKey: (key: string) => void;
 
   // Care suggestions (derived, not persisted)
   careSuggestions: CareSuggestion[];
