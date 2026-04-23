@@ -43,6 +43,10 @@ export default function AddPlantScreen() {
   const gridY = params.gridY ? parseInt(params.gridY) : null;
 
   async function pickImage(fromCamera: boolean) {
+    if (fromCamera) {
+      const granted = await requestCameraPermission();
+      if (!granted) return;
+    }
     const fn = fromCamera
       ? ImagePicker.launchCameraAsync
       : ImagePicker.launchImageLibraryAsync;
