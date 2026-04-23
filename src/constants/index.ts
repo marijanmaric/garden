@@ -109,3 +109,39 @@ export const WMO_EMOJI: Record<number, string> = {
   96: '⛈️',
   99: '⛈️',
 };
+
+export const ZONE_COLORS: Record<ZoneType, string> = {
+  raised_bed:      '#A0522D',
+  flower_bed:      '#FF85A1',
+  lawn:            '#7CBA5E',
+  tree:            '#2D6A4F',
+  vegetable_patch: '#8FB339',
+  fruit:           '#E07B39',
+  shrub:           '#52796F',
+  path:            '#B5967A',
+  other:           '#74A7D2',
+};
+
+export const ZONE_EMOJIS: Record<ZoneType, string> = {
+  raised_bed:      '🪴',
+  flower_bed:      '🌸',
+  lawn:            '🌿',
+  tree:            '🌳',
+  vegetable_patch: '🥦',
+  fruit:           '🍎',
+  shrub:           '🌲',
+  path:            '🪨',
+  other:           '🌱',
+};
+
+export const ZONE_TYPE_LABELS: Record<ZoneType, string> = {
+  raised_bed:      'Hochbeet',
+  flower_bed:      'Blumenbeet',
+  lawn:            'Rasen',
+  tree:            'Baum',
+  vegetable_patch: 'Gemüsebeet',
+  fruit:           'Obstpflanze',
+  shrub:           'Strauch',
+  path:            'Weg',
+  other:           'Sonstiges',
+};
