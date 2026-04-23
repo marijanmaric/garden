@@ -11,7 +11,8 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.yourcompany.gartenapp",
       "infoPlist": {
-        "NSCameraUsageDescription": "GartenApp benötigt Kamerazugriff, um Pflanzen zu identifizieren und deinen Garten zu scannen."
+        "NSCameraUsageDescription": "GartenApp benötigt Kamerazugriff, um Pflanzen zu identifizieren und deinen Garten zu scannen.",
+        "NSMicrophoneUsageDescription": "GartenApp benötigt Mikrofonzugriff für Videoaufnahmen im Garten-Scan."
       }
     },
     "android": {
