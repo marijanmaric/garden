@@ -141,9 +141,46 @@ export default function ProfileScreen() {
         </View>
       </View>
 
+      {/* OpenAI API */}
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>GARTEN-KI (FOTO-SCAN)</Text>
+        <View style={styles.card}>
+          <Text style={styles.rowTitle}>OpenAI API-Key</Text>
+          <Text style={styles.rowSub}>
+            Für automatische Gartenerkennung aus Fotos (GPT-4o Vision) · platform.openai.com
+          </Text>
+          <View style={styles.apiKeyRow}>
+            <TextInput
+              style={styles.apiKeyInput}
+              value={openAiInput}
+              onChangeText={setOpenAiInput}
+              placeholder="sk-…"
+              secureTextEntry={!openAiVisible}
+              autoCapitalize="none"
+              placeholderTextColor={Colors.textSecondary}
+            />
+            <TouchableOpacity style={styles.eyeBtn} onPress={() => setOpenAiVisible((v) => !v)}>
+              <Text>{openAiVisible ? '🙈' : '👁️'}</Text>
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity style={styles.saveBtn} onPress={saveOpenAiKey} activeOpacity={0.8}>
+            <Text style={styles.saveBtnText}>Speichern</Text>
+          </TouchableOpacity>
+          {openAiApiKey ? (
+            <View style={styles.keyOkBadge}>
+              <Text style={styles.keyOkText}>✅ API-Key gesetzt</Text>
+            </View>
+          ) : (
+            <View style={styles.keyMissingBadge}>
+              <Text style={styles.keyMissingText}>⚠️ Kein Key – Garten-Scan deaktiviert</Text>
+            </View>
+          )}
+        </View>
+      </View>
+
       {/* Anthropic API */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>GARTEN-KI (SCAN)</Text>
+        <Text style={styles.sectionLabel}>PFLANZEN-KI (GESUNDHEITSCHECK)</Text>
         <View style={styles.card}>
           <Text style={styles.rowTitle}>Anthropic API-Key</Text>
           <Text style={styles.rowSub}>
