@@ -116,8 +116,17 @@ export default function HomeScreen() {
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={Colors.primary} />}
     >
       <View style={styles.header}>
-        <Text style={styles.greeting}>Guten Tag 🌿</Text>
-        <Text style={styles.gardenName}>{garden?.name ?? 'Kein Garten'}</Text>
+        <View>
+          <Text style={styles.greeting}>Guten Tag 🌿</Text>
+          <Text style={styles.gardenName}>{garden?.name ?? 'Kein Garten'}</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.scanBtn}
+          onPress={() => router.push('/garden/scan')}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.scanBtnText}>📸 Garten scannen</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Quick stats */}
