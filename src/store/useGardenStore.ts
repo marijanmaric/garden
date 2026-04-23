@@ -133,6 +133,7 @@ export const useGardenStore = create<GardenStore>()(
         locationLat: state.locationLat,
         locationLon: state.locationLon,
         plantIdApiKey: state.plantIdApiKey,
+        anthropicApiKey: state.anthropicApiKey,
         weather: state.weather,
         weatherLastFetched: state.weatherLastFetched,
       }),
