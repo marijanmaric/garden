@@ -29,19 +29,19 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
 
   async function handleDemoMode() {
-    // Create a local demo garden and bypass auth
-    const garden = {
-      id: 'demo-garden-1',
-      user_id: 'demo-user',
-      name: 'Mein Garten',
-      location_lat: 52.52,
-      location_lon: 13.41,
-      grid_rows: 10,
-      grid_cols: 10,
-      created_at: new Date().toISOString(),
-    };
-    addGarden(garden);
-    // Set a mock session object so navigation proceeds
+    const { gardens } = useGardenStore.getState();
+    if (gardens.length === 0) {
+      addGarden({
+        id: `garden-${Date.now()}`,
+        user_id: 'demo-user',
+        name: 'Mein Garten',
+        location_lat: 52.52,
+        location_lon: 13.41,
+        grid_rows: 10,
+        grid_cols: 10,
+        created_at: new Date().toISOString(),
+      });
+    }
     setSession({ user: { id: 'demo-user', email: 'demo@example.com' } } as any);
     router.replace('/(tabs)');
   }
