@@ -206,8 +206,22 @@ const styles = StyleSheet.create({
     paddingBottom: 32,
   },
   header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
     paddingHorizontal: 20,
     marginBottom: 16,
+  },
+  scanBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  scanBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
   greeting: {
     fontSize: 14,
