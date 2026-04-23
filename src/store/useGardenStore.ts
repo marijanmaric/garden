@@ -123,6 +123,18 @@ export const useGardenStore = create<GardenStore>()(
       setPlantIdApiKey: (key) => set({ plantIdApiKey: key }),
       anthropicApiKey: '',
       setAnthropicApiKey: (key) => set({ anthropicApiKey: key }),
+      openAiApiKey: '',
+      setOpenAiApiKey: (key) => set({ openAiApiKey: key }),
+
+      zones: [],
+      addZone: (zone) => set((s) => ({ zones: [...s.zones, zone] })),
+      updateZone: (id, updates) =>
+        set((s) => ({
+          zones: s.zones.map((z) => (z.id === id ? { ...z, ...updates } : z)),
+        })),
+      deleteZone: (id) => set((s) => ({ zones: s.zones.filter((z) => z.id !== id) })),
+      zonesForGarden: (gardenId) => get().zones.filter((z) => z.garden_id === gardenId),
+      setZones: (zones) => set({ zones }),
 
       careSuggestions: [],
       recomputeSuggestions: () => {
