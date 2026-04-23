@@ -1,4 +1,4 @@
-import { PlantType } from '../types';
+import { PlantType, ZoneType } from '../types';
 
 export const Colors = {
   primary: '#2D6A4F',
