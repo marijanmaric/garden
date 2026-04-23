@@ -64,6 +64,14 @@ export default function RootLayout() {
             headerTintColor: '#2D6A4F',
           }}
         />
+        <Stack.Screen
+          name="onboarding/scan"
+          options={{
+            headerShown: true,
+            headerTitle: 'Garten einrichten',
+            headerTintColor: '#2D6A4F',
+          }}
+        />
       </Stack>
     </>
   );
