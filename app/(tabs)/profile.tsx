@@ -17,12 +17,15 @@ export default function ProfileScreen() {
     session, setSession,
     plantIdApiKey, setPlantIdApiKey,
     anthropicApiKey, setAnthropicApiKey,
+    openAiApiKey, setOpenAiApiKey,
     gardens, plants,
   } = useGardenStore();
   const [apiKeyInput, setApiKeyInput] = useState(plantIdApiKey);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [anthropicInput, setAnthropicInput] = useState(anthropicApiKey);
   const [anthropicVisible, setAnthropicVisible] = useState(false);
+  const [openAiInput, setOpenAiInput] = useState(openAiApiKey);
+  const [openAiVisible, setOpenAiVisible] = useState(false);
 
   async function handleSignOut() {
     Alert.alert('Abmelden', 'Wirklich abmelden?', [
@@ -46,6 +49,11 @@ export default function ProfileScreen() {
   function saveAnthropicKey() {
     setAnthropicApiKey(anthropicInput.trim());
     Alert.alert('Gespeichert ✅', 'Anthropic API-Key wurde gespeichert.');
+  }
+
+  function saveOpenAiKey() {
+    setOpenAiApiKey(openAiInput.trim());
+    Alert.alert('Gespeichert ✅', 'OpenAI API-Key wurde gespeichert.');
   }
 
   return (
