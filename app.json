@@ -32,7 +32,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "GartenApp benötigt Kamerazugriff, um Pflanzen zu identifizieren."
+          "cameraPermission": "GartenApp benötigt Kamerazugriff, um Pflanzen zu identifizieren und deinen Garten zu scannen.",
+          "microphonePermission": "GartenApp benötigt Mikrofonzugriff für Videoaufnahmen im Garten-Scan."
         }
       ],
       [
