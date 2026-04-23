@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Session } from '@supabase/supabase-js';
-import { Garden, Plant, CareLog, WeatherData, CareSuggestion } from '../types';
+import { Garden, Plant, CareLog, WeatherData, CareSuggestion, GardenZone } from '../types';
 import { generateCareSuggestions } from '../services/careRules';
 
 interface GardenStore {
