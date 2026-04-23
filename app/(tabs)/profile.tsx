@@ -13,10 +13,16 @@ import { supabase, isSupabaseConfigured } from '../../src/lib/supabase';
 import { Colors } from '../../src/constants';
 
 export default function ProfileScreen() {
-  const { session, setSession, plantIdApiKey, setPlantIdApiKey, gardens, plants } =
-    useGardenStore();
+  const {
+    session, setSession,
+    plantIdApiKey, setPlantIdApiKey,
+    anthropicApiKey, setAnthropicApiKey,
+    gardens, plants,
+  } = useGardenStore();
   const [apiKeyInput, setApiKeyInput] = useState(plantIdApiKey);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [anthropicInput, setAnthropicInput] = useState(anthropicApiKey);
+  const [anthropicVisible, setAnthropicVisible] = useState(false);
 
   async function handleSignOut() {
     Alert.alert('Abmelden', 'Wirklich abmelden?', [
@@ -35,6 +41,11 @@ export default function ProfileScreen() {
   function saveApiKey() {
     setPlantIdApiKey(apiKeyInput.trim());
     Alert.alert('Gespeichert ✅', 'Plant.id API-Key wurde gespeichert.');
+  }
+
+  function saveAnthropicKey() {
+    setAnthropicApiKey(anthropicInput.trim());
+    Alert.alert('Gespeichert ✅', 'Anthropic API-Key wurde gespeichert.');
   }
 
   return (
