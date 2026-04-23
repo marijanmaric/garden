@@ -111,6 +111,8 @@ export const useGardenStore = create<GardenStore>()(
 
       plantIdApiKey: '',
       setPlantIdApiKey: (key) => set({ plantIdApiKey: key }),
+      anthropicApiKey: '',
+      setAnthropicApiKey: (key) => set({ anthropicApiKey: key }),
 
       careSuggestions: [],
       recomputeSuggestions: () => {
