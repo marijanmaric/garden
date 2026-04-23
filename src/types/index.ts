@@ -85,3 +85,28 @@ export interface PlantIdResult {
   wiki_description?: string;
   watering?: string;
 }
+
+export type ZoneType =
+  | 'raised_bed'
+  | 'flower_bed'
+  | 'lawn'
+  | 'tree'
+  | 'vegetable_patch'
+  | 'fruit'
+  | 'shrub'
+  | 'path'
+  | 'other';
+
+export interface GardenZone {
+  id: string;
+  garden_id: string;
+  name: string;
+  type: ZoneType;
+  x: number;       // 0–100 percent of canvas width
+  y: number;       // 0–100 percent of canvas height
+  width: number;   // 0–100 percent
+  height: number;  // 0–100 percent
+  detected_plants: string[];
+  description: string | null;
+  created_at: string;
+}
