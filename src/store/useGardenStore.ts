@@ -156,6 +156,8 @@ export const useGardenStore = create<GardenStore>()(
         locationLon: state.locationLon,
         plantIdApiKey: state.plantIdApiKey,
         anthropicApiKey: state.anthropicApiKey,
+        openAiApiKey: state.openAiApiKey,
+        zones: state.zones,
         weather: state.weather,
         weatherLastFetched: state.weatherLastFetched,
       }),
