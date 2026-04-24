@@ -526,14 +526,22 @@ const styles = StyleSheet.create({
   scanBtn: { backgroundColor: Colors.primary, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 6 },
   scanBtnText: { color: '#fff', fontWeight: '700', fontSize: 12 },
 
-  gardenTabs: { paddingHorizontal: 16, gap: 8, marginBottom: 6 },
+  gardenTabs: { paddingHorizontal: 16, gap: 8, marginBottom: 6, alignItems: 'center' },
   gardenTab: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
     borderRadius: 16, paddingHorizontal: 14, paddingVertical: 6,
     backgroundColor: Colors.surface, borderWidth: 1.5, borderColor: Colors.border,
   },
   gardenTabActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
   gardenTabText: { fontSize: 13, fontWeight: '600', color: Colors.textSecondary },
   gardenTabTextActive: { color: '#fff' },
+  gardenTabGear: { fontSize: 12 },
+  gardenTabAdd: {
+    borderRadius: 16, paddingHorizontal: 14, paddingVertical: 6,
+    backgroundColor: Colors.surface, borderWidth: 1.5, borderColor: Colors.border,
+    borderStyle: 'dashed',
+  },
+  gardenTabAddText: { fontSize: 16, color: Colors.primary, fontWeight: '700' },
 
   toolbar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 6, gap: 6 },
   toolBtn: {
