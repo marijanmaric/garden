@@ -299,6 +299,53 @@ export default function GardenScreen() {
         </ScrollView>
       )}
 
+      {/* ── Element detail sheet ── */}
+      <Modal
+        visible={detailElement !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setDetailElement(null)}
+      >
+        <View style={styles.detailOverlay}>
+          <View style={styles.detailCard}>
+            {detailElement && (() => {
+              const el = ELEMENT_BY_ID.get(detailElement.elementId);
+              const care = el ? CATEGORY_CARE[el.category] : null;
+              return (
+                <>
+                  <Text style={styles.detailEmoji}>{el?.emoji ?? '🌿'}</Text>
+                  <Text style={styles.detailName}>{el?.name ?? 'Element'}</Text>
+                  {care && (
+                    <View style={styles.detailCareBox}>
+                      {care.sunlight !== '—' && (
+                        <Text style={styles.detailCareRow}>{care.sunlight}</Text>
+                      )}
+                      {care.soil !== '—' && (
+                        <Text style={styles.detailCareRow}>{care.soil}</Text>
+                      )}
+                      {el?.wateringDays && (
+                        <Text style={styles.detailCareRow}>💧 Alle {el.wateringDays} Tage gießen</Text>
+                      )}
+                      <Text style={styles.detailTip}>💡 {care.tip}</Text>
+                    </View>
+                  )}
+                  <TouchableOpacity
+                    style={styles.detailRemoveBtn}
+                    onPress={() => { removeElement(detailElement.id); setDetailElement(null); }}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.detailRemoveBtnText}>🗑️ Entfernen</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.detailCloseBtn} onPress={() => setDetailElement(null)} activeOpacity={0.8}>
+                    <Text style={styles.detailCloseBtnText}>Schließen</Text>
+                  </TouchableOpacity>
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+
       {/* ── Element library panel ── */}
       <Animated.View style={[styles.panel, { transform: [{ translateY: panelAnim }] }]}>
         {/* Handle */}
