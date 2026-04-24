@@ -238,14 +238,16 @@ export default function GardenScreen() {
 
       {/* ── Canvas ── */}
       {!garden ? (
-        <View style={{ flex: 1 }}>
-          <EmptyState
-            emoji="🏡"
-            title="Noch kein Garten"
-            subtitle="Scanne deinen Garten mit der Kamera oder starte direkt mit dem Editor."
-            actionLabel="Garten scannen"
-            onAction={() => router.push('/onboarding/scan')}
-          />
+        <View style={styles.emptyScreen}>
+          <Text style={styles.emptyEmoji}>🏡</Text>
+          <Text style={styles.emptyTitle}>Noch kein Garten</Text>
+          <Text style={styles.emptySub}>Scanne deinen Garten oder starte direkt mit dem Editor.</Text>
+          <TouchableOpacity style={styles.emptyBtn} onPress={() => router.push('/onboarding/scan')} activeOpacity={0.8}>
+            <Text style={styles.emptyBtnText}>📸 Garten scannen</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.emptyBtnOutline} onPress={createBlankGarden} activeOpacity={0.8}>
+            <Text style={styles.emptyBtnOutlineText}>✏️ Leeren Garten anlegen</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <ScrollView
