@@ -14,6 +14,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { requestCameraPermission } from '../../src/utils/permissions';
+import { generateId } from '../../src/utils/generateId';
 import { useGardenStore } from '../../src/store/useGardenStore';
 import { identifyPlant, imageUriToBase64Prefix } from '../../src/services/plantId';
 import { Colors, PLANT_EMOJIS, PLANT_TYPE_LABELS } from '../../src/constants';
