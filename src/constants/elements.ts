@@ -57,11 +57,54 @@ const flowers: GardenElement[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BÄUME / TREES  (30 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const trees: GardenElement[] = [
+  // Obstbäume
+  { id: 'apfelbaum',      name: 'Apfelbaum',       emoji: '🍎', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 7 },
+  { id: 'birnbaum',       name: 'Birnbaum',        emoji: '🍐', category: 'tree', size: 2, tileColor: '#F1F8E9', wateringDays: 7 },
+  { id: 'kirschbaum',     name: 'Kirschbaum',      emoji: '🍒', category: 'tree', size: 2, tileColor: '#FCE4EC', wateringDays: 7 },
+  { id: 'pflaumenbaum',   name: 'Pflaumenbaum',    emoji: '🫐', category: 'tree', size: 2, tileColor: '#EDE7F6', wateringDays: 7 },
+  { id: 'pfirsichbaum',   name: 'Pfirsichbaum',    emoji: '🍑', category: 'tree', size: 2, tileColor: '#FFF3E0', wateringDays: 5 },
+  { id: 'aprikosenbaum',  name: 'Aprikosenbaum',   emoji: '🍊', category: 'tree', size: 2, tileColor: '#FFF3E0', wateringDays: 5 },
+  { id: 'quittenbaum',    name: 'Quittenbaum',     emoji: '🍋', category: 'tree', size: 2, tileColor: '#FFFDE7', wateringDays: 7 },
+  { id: 'maulbeerbaum',   name: 'Maulbeerbaum',    emoji: '🫐', category: 'tree', size: 2, tileColor: '#EDE7F6', wateringDays: 5 },
+  // Nussbäume
+  { id: 'walnussbaum',    name: 'Walnussbaum',     emoji: '🌰', category: 'tree', size: 3, tileColor: '#EFEBE9', wateringDays: 10 },
+  { id: 'haselnuss',      name: 'Haselnussstrauch', emoji: '🌰', category: 'tree', size: 2, tileColor: '#EFEBE9', wateringDays: 7 },
+  { id: 'kastanie',       name: 'Kastanie',        emoji: '🌰', category: 'tree', size: 3, tileColor: '#EFEBE9', wateringDays: 10 },
+  // Zierbäume & Laubbäume
+  { id: 'magnolienbaum',  name: 'Magnolie',        emoji: '🌸', category: 'tree', size: 2, tileColor: '#FCE4EC', wateringDays: 5 },
+  { id: 'ahornbaum',      name: 'Ahorn',           emoji: '🍁', category: 'tree', size: 2, tileColor: '#FFF3E0', wateringDays: 7 },
+  { id: 'lindenbaum',     name: 'Linde',           emoji: '🌳', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 10 },
+  { id: 'birkenbaum',     name: 'Birke',           emoji: '🌲', category: 'tree', size: 2, tileColor: '#F1F8E9', wateringDays: 7 },
+  { id: 'eichenbaum',     name: 'Eiche',           emoji: '🌳', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 14 },
+  { id: 'eschenbaum',     name: 'Esche',           emoji: '🌳', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 14 },
+  { id: 'holunderstrauch', name: 'Holunder',       emoji: '🌳', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 5 },
+  { id: 'weissdorn',      name: 'Weißdorn',        emoji: '🌳', category: 'tree', size: 2, tileColor: '#F1F8E9', wateringDays: 7 },
+  // Nadelbäume
+  { id: 'kieferbaum',     name: 'Kiefer',          emoji: '🌲', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 14 },
+  { id: 'fichtenbaum',    name: 'Fichte',          emoji: '🎄', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 14 },
+  { id: 'laerchenbaum',   name: 'Lärche',          emoji: '🌲', category: 'tree', size: 3, tileColor: '#E8F5E9', wateringDays: 10 },
+  { id: 'eibenbaum',      name: 'Eibe',            emoji: '🌲', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 10 },
+  { id: 'lebensbaum',     name: 'Lebensbaum',      emoji: '🌲', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 7 },
+  // Mediterrane Bäume
+  { id: 'olivenbaum',     name: 'Olivenbaum',      emoji: '🫒', category: 'tree', size: 2, tileColor: '#F1F8E9', wateringDays: 10 },
+  { id: 'zitronenbaum',   name: 'Zitronenbaum',    emoji: '🍋', category: 'tree', size: 2, tileColor: '#FFFDE7', wateringDays: 4 },
+  { id: 'orangenbaum',    name: 'Orangenbaum',     emoji: '🍊', category: 'tree', size: 2, tileColor: '#FFF3E0', wateringDays: 4 },
+  { id: 'feigenbaum',     name: 'Feigenbaum',      emoji: '🌳', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 5 },
+  // Solitärgehölze
+  { id: 'bambus',         name: 'Bambus',          emoji: '🎋', category: 'tree', size: 2, tileColor: '#F1F8E9', wateringDays: 3 },
+  { id: 'palme',          name: 'Palme',           emoji: '🌴', category: 'tree', size: 2, tileColor: '#E8F5E9', wateringDays: 4 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 export const GARDEN_ELEMENTS: GardenElement[] = [
   ...flowers,
-  // trees, vegetables, fruits, herbs, structures, water, landscape, accessory — added in later steps
+  ...trees,
+  // vegetables, fruits, herbs, structures, water, landscape, accessory — added in later steps
 ];
 
 export const ELEMENT_CATEGORIES: { id: ElementCategory; label: string; emoji: string }[] = [
