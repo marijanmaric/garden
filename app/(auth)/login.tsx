@@ -33,7 +33,7 @@ export default function LoginScreen() {
     const { gardens } = useGardenStore.getState();
     if (gardens.length === 0) {
       addGarden({
-        id: `garden-${Date.now()}`,
+        id: generateId('garden'),
         user_id: 'demo-user',
         name: 'Mein Garten',
         location_lat: 52.52,
