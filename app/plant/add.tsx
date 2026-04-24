@@ -112,7 +112,7 @@ export default function AddPlantScreen() {
 
     const days = parseInt(wateringDays);
     const plant = {
-      id: `plant-${Date.now()}`,
+      id: generateId('plant'),
       garden_id: gardenId,
       user_id: 'local',
       name: name.trim(),
