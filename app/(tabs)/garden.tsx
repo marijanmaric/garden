@@ -61,6 +61,7 @@ export default function GardenScreen() {
   const [panelOpen, setPanelOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [activeCategory, setActiveCategory] = useState<ElementCategory | null>(null);
+  const [detailElement, setDetailElement] = useState<PlacedElement | null>(null);
   const panelAnim = useRef(new Animated.Value(PANEL_COLLAPSED)).current;
 
   const garden = activeGarden();
