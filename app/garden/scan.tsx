@@ -13,6 +13,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { requestCameraPermission } from '../../src/utils/permissions';
+import { generateId } from '../../src/utils/generateId';
 import { useGardenStore } from '../../src/store/useGardenStore';
 import { scanGardenPhoto, DetectedPlant } from '../../src/services/gardenScan';
 import { Colors, PLANT_EMOJIS } from '../../src/constants';
