@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Session } from '@supabase/supabase-js';
-import { Garden, Plant, CareLog, WeatherData, CareSuggestion, GardenZone } from '../types';
+import { Garden, Plant, CareLog, WeatherData, CareSuggestion, GardenZone, PlacedElement } from '../types';
 import { generateCareSuggestions } from '../services/careRules';
+
+const HISTORY_LIMIT = 50;
 
 interface GardenStore {
   // Auth
@@ -60,6 +62,29 @@ interface GardenStore {
   // Care suggestions (derived, not persisted)
   careSuggestions: CareSuggestion[];
   recomputeSuggestions: () => void;
+
+  // ── Garden Designer ────────────────────────────────────────────────────────
+  placedElements: PlacedElement[];
+  // history stacks are in-memory only (not persisted)
+  _undoStack: PlacedElement[][];
+  _redoStack: PlacedElement[][];
+  designerZoom: number;
+  designerViewMode: 'top' | 'perspective';
+  selectedElementId: string | null;
+
+  placeElement: (el: PlacedElement) => void;
+  removeElement: (uid: string) => void;
+  clearDesigner: (gardenId: string) => void;
+  placedForGarden: (gardenId: string) => PlacedElement[];
+
+  designerUndo: () => void;
+  designerRedo: () => void;
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+
+  setDesignerZoom: (zoom: number) => void;
+  setDesignerViewMode: (mode: 'top' | 'perspective') => void;
+  setSelectedElementId: (id: string | null) => void;
 }
 
 export const useGardenStore = create<GardenStore>()(
@@ -143,6 +168,92 @@ export const useGardenStore = create<GardenStore>()(
         const suggestions = generateCareSuggestions(gardenPlants, weather);
         set({ careSuggestions: suggestions });
       },
+
+      // ── Garden Designer ──────────────────────────────────────────────────
+      placedElements: [],
+      _undoStack: [],
+      _redoStack: [],
+      designerZoom: 1,
+      designerViewMode: 'top',
+      selectedElementId: null,
+
+      placedForGarden: (gardenId) =>
+        get().placedElements.filter((e) => e.gardenId === gardenId),
+
+      placeElement: (el) =>
+        set((s) => {
+          const snapshot = s.placedElements.filter((e) => e.gardenId === el.gardenId);
+          return {
+            placedElements: [...s.placedElements, el],
+            _undoStack: [...s._undoStack.slice(-HISTORY_LIMIT + 1), snapshot],
+            _redoStack: [],
+          };
+        }),
+
+      removeElement: (uid) =>
+        set((s) => {
+          const target = s.placedElements.find((e) => e.uid === uid);
+          if (!target) return {};
+          const snapshot = s.placedElements.filter((e) => e.gardenId === target.gardenId);
+          return {
+            placedElements: s.placedElements.filter((e) => e.uid !== uid),
+            _undoStack: [...s._undoStack.slice(-HISTORY_LIMIT + 1), snapshot],
+            _redoStack: [],
+          };
+        }),
+
+      clearDesigner: (gardenId) =>
+        set((s) => {
+          const snapshot = s.placedElements.filter((e) => e.gardenId === gardenId);
+          return {
+            placedElements: s.placedElements.filter((e) => e.gardenId !== gardenId),
+            _undoStack: [...s._undoStack.slice(-HISTORY_LIMIT + 1), snapshot],
+            _redoStack: [],
+          };
+        }),
+
+      designerUndo: () =>
+        set((s) => {
+          if (s._undoStack.length === 0) return {};
+          const prev = s._undoStack[s._undoStack.length - 1];
+          const gardenId = prev[0]?.gardenId ?? s._undoStack.flat()[0]?.gardenId;
+          const current = gardenId
+            ? s.placedElements.filter((e) => e.gardenId === gardenId)
+            : [];
+          const others = gardenId
+            ? s.placedElements.filter((e) => e.gardenId !== gardenId)
+            : s.placedElements;
+          return {
+            placedElements: [...others, ...prev],
+            _undoStack: s._undoStack.slice(0, -1),
+            _redoStack: [...s._redoStack.slice(-HISTORY_LIMIT + 1), current],
+          };
+        }),
+
+      designerRedo: () =>
+        set((s) => {
+          if (s._redoStack.length === 0) return {};
+          const next = s._redoStack[s._redoStack.length - 1];
+          const gardenId = next[0]?.gardenId ?? s._redoStack.flat()[0]?.gardenId;
+          const current = gardenId
+            ? s.placedElements.filter((e) => e.gardenId === gardenId)
+            : [];
+          const others = gardenId
+            ? s.placedElements.filter((e) => e.gardenId !== gardenId)
+            : s.placedElements;
+          return {
+            placedElements: [...others, ...next],
+            _redoStack: s._redoStack.slice(0, -1),
+            _undoStack: [...s._undoStack.slice(-HISTORY_LIMIT + 1), current],
+          };
+        }),
+
+      canUndo: () => get()._undoStack.length > 0,
+      canRedo: () => get()._redoStack.length > 0,
+
+      setDesignerZoom: (zoom) => set({ designerZoom: zoom }),
+      setDesignerViewMode: (mode) => set({ designerViewMode: mode }),
+      setSelectedElementId: (id) => set({ selectedElementId: id }),
     }),
     {
       name: 'garden-store',
@@ -161,6 +272,16 @@ export const useGardenStore = create<GardenStore>()(
         state.plants = dedup(state.plants);
         state.zones = dedup(state.zones);
         state.careLogs = dedup(state.careLogs);
+        // Dedup placed elements by uid
+        const seen = new Set<string>();
+        state.placedElements = state.placedElements.filter((e) => {
+          if (seen.has(e.uid)) return false;
+          seen.add(e.uid);
+          return true;
+        });
+        // History stacks are never persisted — reset on rehydration
+        state._undoStack = [];
+        state._redoStack = [];
       },
       partialize: (state) => ({
         gardens: state.gardens,
@@ -175,6 +296,10 @@ export const useGardenStore = create<GardenStore>()(
         zones: state.zones,
         weather: state.weather,
         weatherLastFetched: state.weatherLastFetched,
+        placedElements: state.placedElements,
+        designerZoom: state.designerZoom,
+        designerViewMode: state.designerViewMode,
+        // selectedElementId, _undoStack, _redoStack intentionally NOT persisted
       }),
     }
   )
