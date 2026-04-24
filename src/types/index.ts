@@ -1,3 +1,33 @@
+export type ElementCategory =
+  | 'flower'
+  | 'tree'
+  | 'vegetable'
+  | 'fruit'
+  | 'herb'
+  | 'structure'
+  | 'water'
+  | 'landscape'
+  | 'accessory';
+
+export interface GardenElement {
+  id: string;
+  name: string;
+  emoji: string;
+  category: ElementCategory;
+  size: 1 | 2 | 3;
+  tileColor: string;
+  wateringDays?: number;
+}
+
+export interface PlacedElement {
+  id: string;
+  elementId: string;
+  x: number;
+  y: number;
+  gardenId: string;
+  placedAt: string;
+}
+
 export type HealthStatus = 'healthy' | 'needs_attention' | 'sick';
 export type CareAction = 'watered' | 'pruned' | 'fertilized' | 'health_check';
 export type Priority = 'high' | 'medium' | 'low';
