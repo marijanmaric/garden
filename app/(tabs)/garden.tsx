@@ -514,4 +514,49 @@ const styles = StyleSheet.create({
   elementEmoji: { fontSize: 26, marginBottom: 3 },
   elementName: { fontSize: 9, fontWeight: '600', color: Colors.textPrimary, textAlign: 'center' },
   noResults: { textAlign: 'center', color: Colors.textSecondary, fontSize: 14, marginTop: 24 },
+
+  // Empty state
+  emptyScreen: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 12 },
+  emptyEmoji: { fontSize: 64 },
+  emptyTitle: { fontSize: 22, fontWeight: '800', color: Colors.textPrimary, textAlign: 'center' },
+  emptySub: { fontSize: 14, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
+  emptyBtn: {
+    marginTop: 8, backgroundColor: Colors.primary, borderRadius: 14,
+    paddingVertical: 13, paddingHorizontal: 28, alignItems: 'center',
+  },
+  emptyBtnText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  emptyBtnOutline: {
+    borderWidth: 1.5, borderColor: Colors.primary, borderRadius: 14,
+    paddingVertical: 13, paddingHorizontal: 28, alignItems: 'center',
+  },
+  emptyBtnOutlineText: { color: Colors.primary, fontSize: 15, fontWeight: '700' },
+
+  // Detail sheet
+  detailOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end',
+  },
+  detailCard: {
+    backgroundColor: Colors.surface, borderTopLeftRadius: 28, borderTopRightRadius: 28,
+    padding: 28, paddingBottom: 40, alignItems: 'center',
+  },
+  detailEmoji: { fontSize: 72, marginBottom: 8 },
+  detailName: { fontSize: 22, fontWeight: '800', color: Colors.textPrimary, marginBottom: 16, textAlign: 'center' },
+  detailCareBox: {
+    width: '100%', backgroundColor: Colors.background, borderRadius: 14,
+    padding: 16, gap: 8, marginBottom: 20,
+  },
+  detailCareRow: { fontSize: 14, color: Colors.textPrimary, fontWeight: '600' },
+  detailTip: { fontSize: 13, color: Colors.textSecondary, lineHeight: 18, marginTop: 4 },
+  detailRemoveBtn: {
+    width: '100%', backgroundColor: '#FF3B3010', borderRadius: 13,
+    paddingVertical: 13, alignItems: 'center', marginBottom: 10,
+    borderWidth: 1.5, borderColor: '#FF3B30',
+  },
+  detailRemoveBtnText: { color: '#FF3B30', fontSize: 15, fontWeight: '700' },
+  detailCloseBtn: {
+    width: '100%', backgroundColor: Colors.surface, borderRadius: 13,
+    paddingVertical: 13, alignItems: 'center',
+    borderWidth: 1.5, borderColor: Colors.border,
+  },
+  detailCloseBtnText: { color: Colors.textSecondary, fontSize: 15, fontWeight: '600' },
 });
