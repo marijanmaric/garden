@@ -51,6 +51,7 @@ export default function GardenScreen() {
   const router = useRouter();
   const {
     gardens, activeGardenId, activeGarden, setActiveGarden, addGarden,
+    updateGarden, deleteGarden,
     placedForGarden, placeElement, removeElement, clearDesigner,
     designerUndo, designerRedo, canUndo, canRedo,
     designerZoom, setDesignerZoom,
