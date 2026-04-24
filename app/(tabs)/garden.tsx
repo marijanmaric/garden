@@ -609,6 +609,14 @@ const styles = StyleSheet.create({
   elementName: { fontSize: 9, fontWeight: '600', color: Colors.textPrimary, textAlign: 'center' },
   noResults: { textAlign: 'center', color: Colors.textSecondary, fontSize: 14, marginTop: 24 },
 
+  // Garden sheet
+  gardenSheetInputRow: { width: '100%', marginBottom: 12 },
+  gardenSheetInput: {
+    backgroundColor: Colors.background, borderWidth: 1.5, borderColor: Colors.border,
+    borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11,
+    fontSize: 16, color: Colors.textPrimary, fontWeight: '600',
+  },
+
   // Empty state
   emptyScreen: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 12 },
   emptyEmoji: { fontSize: 64 },
