@@ -14,6 +14,7 @@ import {
 import { useRouter } from 'expo-router';
 import { supabase, isSupabaseConfigured } from '../../src/lib/supabase';
 import { useGardenStore } from '../../src/store/useGardenStore';
+import { generateId } from '../../src/utils/generateId';
 import { Colors } from '../../src/constants';
 
 type Mode = 'login' | 'register';
