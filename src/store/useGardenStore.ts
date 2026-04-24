@@ -17,6 +17,8 @@ interface GardenStore {
   activeGardenId: string | null;
   setGardens: (gardens: Garden[]) => void;
   addGarden: (garden: Garden) => void;
+  updateGarden: (id: string, updates: Partial<Garden>) => void;
+  deleteGarden: (id: string) => void;
   setActiveGarden: (id: string) => void;
   activeGarden: () => Garden | null;
 
