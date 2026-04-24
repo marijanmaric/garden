@@ -151,13 +151,50 @@ const vegetables: GardenElement[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OBST & BEEREN / FRUITS  (25 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const fruits: GardenElement[] = [
+  // Klassische Beeren
+  { id: 'erdbeere',        name: 'Erdbeere',         emoji: '🍓', category: 'fruit', size: 1, tileColor: '#FFEBEE', wateringDays: 1 },
+  { id: 'himbeere',        name: 'Himbeere',         emoji: '🫐', category: 'fruit', size: 1, tileColor: '#FCE4EC', wateringDays: 2 },
+  { id: 'brombeere',       name: 'Brombeere',        emoji: '🫐', category: 'fruit', size: 1, tileColor: '#EDE7F6', wateringDays: 2 },
+  { id: 'heidelbeere',     name: 'Heidelbeere',      emoji: '🫐', category: 'fruit', size: 1, tileColor: '#E8EAF6', wateringDays: 3 },
+  { id: 'rote-johannisbeere', name: 'Rote Johannisbeere', emoji: '🍒', category: 'fruit', size: 1, tileColor: '#FFEBEE', wateringDays: 3 },
+  { id: 'schwarze-johannisbeere', name: 'Schwarze Johannisbeere', emoji: '🫐', category: 'fruit', size: 1, tileColor: '#EDE7F6', wateringDays: 3 },
+  { id: 'stachelbeere',    name: 'Stachelbeere',     emoji: '🟢', category: 'fruit', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  // Kletterpflanzen & Ranker
+  { id: 'weintraube',      name: 'Weintraube',       emoji: '🍇', category: 'fruit', size: 2, tileColor: '#EDE7F6', wateringDays: 4 },
+  { id: 'kiwi',            name: 'Kiwi',             emoji: '🥝', category: 'fruit', size: 2, tileColor: '#E8F5E9', wateringDays: 3 },
+  // Besondere Beeren & Sträucher
+  { id: 'sanddorn',        name: 'Sanddorn',         emoji: '🟠', category: 'fruit', size: 1, tileColor: '#FFF3E0', wateringDays: 7 },
+  { id: 'aronia',          name: 'Aronia',           emoji: '🫐', category: 'fruit', size: 1, tileColor: '#EDE7F6', wateringDays: 5 },
+  { id: 'cranberry',       name: 'Cranberry',        emoji: '🔴', category: 'fruit', size: 1, tileColor: '#FFEBEE', wateringDays: 3 },
+  { id: 'holunderbeere',   name: 'Holunderbeere',    emoji: '🫐', category: 'fruit', size: 2, tileColor: '#EDE7F6', wateringDays: 5 },
+  { id: 'preiselbeere',    name: 'Preiselbeere',     emoji: '🔴', category: 'fruit', size: 1, tileColor: '#FFEBEE', wateringDays: 4 },
+  { id: 'felsenbirne',     name: 'Felsenbirne',      emoji: '🍒', category: 'fruit', size: 1, tileColor: '#FCE4EC', wateringDays: 5 },
+  { id: 'honigbeere',      name: 'Honigbeere',       emoji: '🟡', category: 'fruit', size: 1, tileColor: '#FFFDE7', wateringDays: 4 },
+  { id: 'physalis',        name: 'Physalis',         emoji: '🏮', category: 'fruit', size: 1, tileColor: '#FFF3E0', wateringDays: 3 },
+  { id: 'maulbeere',       name: 'Maulbeere',        emoji: '🫐', category: 'fruit', size: 2, tileColor: '#EDE7F6', wateringDays: 5 },
+  { id: 'cornelkirsche',   name: 'Kornelkirsche',    emoji: '🔴', category: 'fruit', size: 2, tileColor: '#FFEBEE', wateringDays: 5 },
+  // Melonen & Kürbisfrüchte
+  { id: 'melone',          name: 'Melone',           emoji: '🍈', category: 'fruit', size: 2, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'wassermelone',    name: 'Wassermelone',     emoji: '🍉', category: 'fruit', size: 2, tileColor: '#FFEBEE', wateringDays: 2 },
+  // Exotisch (Kübelpflanzen, Winterschutz)
+  { id: 'feige-kübel',     name: 'Feige (Kübel)',    emoji: '🌳', category: 'fruit', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'granatapfel',     name: 'Granatapfel',      emoji: '🍎', category: 'fruit', size: 1, tileColor: '#FFEBEE', wateringDays: 4 },
+  { id: 'passionsfrucht',  name: 'Passionsfrucht',   emoji: '🟣', category: 'fruit', size: 1, tileColor: '#EDE7F6', wateringDays: 2 },
+  { id: 'kaktusfeige',     name: 'Kaktusfeige',      emoji: '🌵', category: 'fruit', size: 1, tileColor: '#E8F5E9', wateringDays: 14 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 export const GARDEN_ELEMENTS: GardenElement[] = [
   ...flowers,
   ...trees,
   ...vegetables,
-  // fruits, herbs, structures, water, landscape, accessory — added in later steps
+  ...fruits,
+  // herbs, structures, water, landscape, accessory — added in later steps
 ];
 
 export const ELEMENT_CATEGORIES: { id: ElementCategory; label: string; emoji: string }[] = [
