@@ -192,11 +192,11 @@ export const useGardenStore = create<GardenStore>()(
 
       removeElement: (uid) =>
         set((s) => {
-          const target = s.placedElements.find((e) => e.uid === uid);
+          const target = s.placedElements.find((e) => e.id === uid);
           if (!target) return {};
           const snapshot = s.placedElements.filter((e) => e.gardenId === target.gardenId);
           return {
-            placedElements: s.placedElements.filter((e) => e.uid !== uid),
+            placedElements: s.placedElements.filter((e) => e.id !== uid),
             _undoStack: [...s._undoStack.slice(-HISTORY_LIMIT + 1), snapshot],
             _redoStack: [],
           };
@@ -275,8 +275,8 @@ export const useGardenStore = create<GardenStore>()(
         // Dedup placed elements by uid
         const seen = new Set<string>();
         state.placedElements = state.placedElements.filter((e) => {
-          if (seen.has(e.uid)) return false;
-          seen.add(e.uid);
+          if (seen.has(e.id)) return false;
+          seen.add(e.id);
           return true;
         });
         // History stacks are never persisted — reset on rehydration
