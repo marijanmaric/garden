@@ -224,19 +224,31 @@ export default function GardenScreen() {
       </View>
 
       {/* ── Garden selector tabs ── */}
-      {gardens.length > 1 && (
+      {gardens.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.gardenTabs}>
           {gardens.map((g) => (
             <TouchableOpacity
               key={g.id}
               style={[styles.gardenTab, g.id === activeGardenId && styles.gardenTabActive]}
               onPress={() => setActiveGarden(g.id)}
+              activeOpacity={0.8}
             >
               <Text style={[styles.gardenTabText, g.id === activeGardenId && styles.gardenTabTextActive]}>
                 {g.name}
               </Text>
+              {g.id === activeGardenId && (
+                <TouchableOpacity
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  onPress={() => openGardenSheet(g.id)}
+                >
+                  <Text style={styles.gardenTabGear}>⚙️</Text>
+                </TouchableOpacity>
+              )}
             </TouchableOpacity>
           ))}
+          <TouchableOpacity style={styles.gardenTabAdd} onPress={createBlankGarden} activeOpacity={0.8}>
+            <Text style={styles.gardenTabAddText}>＋</Text>
+          </TouchableOpacity>
         </ScrollView>
       )}
 
