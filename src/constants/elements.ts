@@ -223,6 +223,106 @@ const herbs: GardenElement[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// STRUKTUREN / STRUCTURES  (20 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const structures: GardenElement[] = [
+  // Beete & Anzucht
+  { id: 'hochbeet',         name: 'Hochbeet',          emoji: '🪴', category: 'structure', size: 2, tileColor: '#EFEBE9' },
+  { id: 'frühbeet',         name: 'Frühbeet',          emoji: '🪴', category: 'structure', size: 1, tileColor: '#E8F5E9' },
+  { id: 'rankgitter',       name: 'Rankgitter',        emoji: '🪜', category: 'structure', size: 1, tileColor: '#EFEBE9' },
+  { id: 'gewaechshaus',     name: 'Gewächshaus',       emoji: '🏠', category: 'structure', size: 3, tileColor: '#E0F7FA' },
+  // Unterkünfte & Schuppen
+  { id: 'geraeteschuppen',  name: 'Geräteschuppen',    emoji: '🏚️', category: 'structure', size: 2, tileColor: '#EFEBE9' },
+  { id: 'gartenhaus',       name: 'Gartenhaus',        emoji: '🏡', category: 'structure', size: 3, tileColor: '#FFF8E1' },
+  { id: 'brennholzlager',   name: 'Brennholzlager',    emoji: '🪵', category: 'structure', size: 1, tileColor: '#EFEBE9' },
+  // Überdachungen
+  { id: 'pergola',          name: 'Pergola',           emoji: '🏗️', category: 'structure', size: 3, tileColor: '#FFF3E0' },
+  { id: 'pavillon',         name: 'Pavillon',          emoji: '⛺', category: 'structure', size: 3, tileColor: '#E8F5E9' },
+  { id: 'carport',          name: 'Überdachung',       emoji: '🏗️', category: 'structure', size: 2, tileColor: '#ECEFF1' },
+  // Kompost & Recycling
+  { id: 'kompost',          name: 'Komposthaufen',     emoji: '♻️', category: 'structure', size: 1, tileColor: '#EFEBE9' },
+  { id: 'regentonne',       name: 'Regentonne',        emoji: '🪣', category: 'structure', size: 1, tileColor: '#E3F2FD' },
+  { id: 'mülleimer',        name: 'Mülleimer',         emoji: '🗑️', category: 'structure', size: 1, tileColor: '#ECEFF1' },
+  // Tore & Eingänge
+  { id: 'gartentor',        name: 'Gartentor',         emoji: '🚪', category: 'structure', size: 1, tileColor: '#EFEBE9' },
+  { id: 'holztor',          name: 'Holztor (groß)',    emoji: '🚪', category: 'structure', size: 2, tileColor: '#EFEBE9' },
+  // Terrassen & Böden
+  { id: 'holzterrasse',     name: 'Holzterrasse',      emoji: '🪵', category: 'structure', size: 3, tileColor: '#EFEBE9' },
+  { id: 'natursteinteich',  name: 'Naturstein-Terrasse', emoji: '🪨', category: 'structure', size: 3, tileColor: '#ECEFF1' },
+  // Sonstiges
+  { id: 'vogelhäuschen',    name: 'Vogelhäuschen',     emoji: '🏠', category: 'structure', size: 1, tileColor: '#FFF8E1' },
+  { id: 'hochsitz',         name: 'Baumhaus',          emoji: '🌳', category: 'structure', size: 2, tileColor: '#E8F5E9' },
+  { id: 'spielhaus',        name: 'Spielhaus',         emoji: '🏠', category: 'structure', size: 2, tileColor: '#FFF3E0' },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WASSER / WATER  (10 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const water: GardenElement[] = [
+  { id: 'gartenteich',      name: 'Gartenteich',       emoji: '💧', category: 'water', size: 3, tileColor: '#E3F2FD' },
+  { id: 'schwimmteich',     name: 'Schwimmteich',      emoji: '🏊', category: 'water', size: 3, tileColor: '#BBDEFB' },
+  { id: 'springbrunnen',    name: 'Springbrunnen',     emoji: '⛲', category: 'water', size: 2, tileColor: '#E3F2FD' },
+  { id: 'vogeltränke',      name: 'Vogeltränke',       emoji: '🐦', category: 'water', size: 1, tileColor: '#E3F2FD' },
+  { id: 'bachlauf',         name: 'Bachlauf',          emoji: '🌊', category: 'water', size: 2, tileColor: '#BBDEFB' },
+  { id: 'wasserfall',       name: 'Wasserfall',        emoji: '💦', category: 'water', size: 2, tileColor: '#E3F2FD' },
+  { id: 'bewässerung',      name: 'Bewässerungsanlage', emoji: '💦', category: 'water', size: 1, tileColor: '#E3F2FD' },
+  { id: 'wasserspiel',      name: 'Wasserspiel',       emoji: '💧', category: 'water', size: 2, tileColor: '#E3F2FD' },
+  { id: 'solarbrunnen',     name: 'Solar-Brunnen',     emoji: '☀️', category: 'water', size: 1, tileColor: '#FFF9C4' },
+  { id: 'miniteich',        name: 'Mini-Teich (Tonne)', emoji: '🪣', category: 'water', size: 1, tileColor: '#E3F2FD' },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LANDSCHAFT / LANDSCAPE  (15 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const landscape: GardenElement[] = [
+  // Bodendecker & Flächen
+  { id: 'rasen',            name: 'Rasenfläche',       emoji: '🌱', category: 'landscape', size: 1, tileColor: '#C8E6C9' },
+  { id: 'wildblumenwiese',  name: 'Wildblumenwiese',   emoji: '🌼', category: 'landscape', size: 1, tileColor: '#F9FBE7' },
+  { id: 'bodendecker',      name: 'Bodendecker',       emoji: '🌿', category: 'landscape', size: 1, tileColor: '#DCEDC8' },
+  { id: 'moorbeet',         name: 'Moorbeet',          emoji: '🌿', category: 'landscape', size: 1, tileColor: '#E8F5E9' },
+  // Wege & Beläge
+  { id: 'kiesweg',          name: 'Kiesweg',           emoji: '🪨', category: 'landscape', size: 1, tileColor: '#ECEFF1' },
+  { id: 'pflastersteine',   name: 'Pflastersteine',    emoji: '🔲', category: 'landscape', size: 1, tileColor: '#CFD8DC' },
+  { id: 'holzbohlenweg',    name: 'Holzbohlenweg',     emoji: '🪵', category: 'landscape', size: 1, tileColor: '#EFEBE9' },
+  { id: 'sandweg',          name: 'Sandweg',           emoji: '🏜️', category: 'landscape', size: 1, tileColor: '#FFF8E1' },
+  { id: 'splitweg',         name: 'Splittweg',         emoji: '⬜', category: 'landscape', size: 1, tileColor: '#ECEFF1' },
+  // Mulch & Boden
+  { id: 'rindenmulch',      name: 'Rindenmulch',       emoji: '🟫', category: 'landscape', size: 1, tileColor: '#EFEBE9' },
+  { id: 'kiesbeet',         name: 'Kiesbeet',          emoji: '🪨', category: 'landscape', size: 1, tileColor: '#F5F5F5' },
+  { id: 'erde',             name: 'Offene Erde',       emoji: '🟫', category: 'landscape', size: 1, tileColor: '#D7CCC8' },
+  // Steingarten
+  { id: 'steingarten',      name: 'Steingarten',       emoji: '🪨', category: 'landscape', size: 2, tileColor: '#ECEFF1' },
+  { id: 'trockenmauer',     name: 'Trockenmauer',      emoji: '🧱', category: 'landscape', size: 1, tileColor: '#EFEBE9' },
+  { id: 'findlinge',        name: 'Findlinge',         emoji: '🪨', category: 'landscape', size: 1, tileColor: '#ECEFF1' },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ZUBEHÖR / ACCESSORIES  (15 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const accessories: GardenElement[] = [
+  // Sitzgelegenheiten
+  { id: 'gartenbank',       name: 'Gartenbank',        emoji: '🪑', category: 'accessory', size: 1, tileColor: '#FFF8E1' },
+  { id: 'gartentisch',      name: 'Gartentisch',       emoji: '🪑', category: 'accessory', size: 2, tileColor: '#FFF8E1' },
+  { id: 'haengematte',      name: 'Hängematte',        emoji: '🛌', category: 'accessory', size: 2, tileColor: '#FFF3E0' },
+  // Licht
+  { id: 'gartenlampe',      name: 'Gartenlampe',       emoji: '💡', category: 'accessory', size: 1, tileColor: '#FFFDE7' },
+  { id: 'solarleuchte',     name: 'Solarleuchte',      emoji: '🌟', category: 'accessory', size: 1, tileColor: '#FFFDE7' },
+  { id: 'lichterkette',     name: 'Lichterkette',      emoji: '✨', category: 'accessory', size: 1, tileColor: '#FFFDE7' },
+  // Töpfe & Pflanzbehälter
+  { id: 'pflanzentopf',     name: 'Pflanzentopf',      emoji: '🪴', category: 'accessory', size: 1, tileColor: '#FFF3E0' },
+  { id: 'pflanzkasten',     name: 'Pflanzkasten',      emoji: '🪴', category: 'accessory', size: 1, tileColor: '#EFEBE9' },
+  { id: 'haengepflanze',    name: 'Hängepflanze',      emoji: '🪴', category: 'accessory', size: 1, tileColor: '#E8F5E9' },
+  // Natur & Tiere
+  { id: 'bienenstock',      name: 'Bienenstock',       emoji: '🐝', category: 'accessory', size: 1, tileColor: '#FFF8E1' },
+  { id: 'insektenhotel',    name: 'Insektenhotel',     emoji: '🐛', category: 'accessory', size: 1, tileColor: '#FFF3E0' },
+  { id: 'igelhaus',         name: 'Igelhaus',          emoji: '🦔', category: 'accessory', size: 1, tileColor: '#EFEBE9' },
+  // Dekoration
+  { id: 'sonnenuhr',        name: 'Sonnenuhr',         emoji: '🕐', category: 'accessory', size: 1, tileColor: '#FFF8E1' },
+  { id: 'windrad',          name: 'Windrad',           emoji: '💨', category: 'accessory', size: 1, tileColor: '#E3F2FD' },
+  { id: 'skulptur',         name: 'Gartenskulptur',    emoji: '🗿', category: 'accessory', size: 1, tileColor: '#ECEFF1' },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 export const GARDEN_ELEMENTS: GardenElement[] = [
@@ -231,7 +331,10 @@ export const GARDEN_ELEMENTS: GardenElement[] = [
   ...vegetables,
   ...fruits,
   ...herbs,
-  // structures, water, landscape, accessory — added in later steps
+  ...structures,
+  ...water,
+  ...landscape,
+  ...accessories,
 ];
 
 export const ELEMENT_CATEGORIES: { id: ElementCategory; label: string; emoji: string }[] = [
