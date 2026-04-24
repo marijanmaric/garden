@@ -187,6 +187,42 @@ const fruits: GardenElement[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// KRÄUTER / HERBS  (25 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const herbs: GardenElement[] = [
+  // Mediterrane Kräuter
+  { id: 'basilikum',      name: 'Basilikum',       emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 1 },
+  { id: 'rosmarin',       name: 'Rosmarin',        emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 7 },
+  { id: 'thymian',        name: 'Thymian',         emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 7 },
+  { id: 'oregano',        name: 'Oregano',         emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 7 },
+  { id: 'salbei',         name: 'Salbei',          emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 7 },
+  { id: 'lavendel-kraut', name: 'Lavendel',        emoji: '💜', category: 'herb', size: 1, tileColor: '#EDE7F6', wateringDays: 7 },
+  // Heimische Kräuter
+  { id: 'petersilie',     name: 'Petersilie',      emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'schnittlauch',   name: 'Schnittlauch',    emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'dill',           name: 'Dill',            emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 2 },
+  { id: 'koriander',      name: 'Koriander',       emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'majoran',        name: 'Majoran',         emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 5 },
+  { id: 'bohnenkraut',    name: 'Bohnenkraut',     emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 5 },
+  { id: 'estragon',       name: 'Estragon',        emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 4 },
+  { id: 'liebstöckel',    name: 'Liebstöckel',     emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'lorbeer',        name: 'Lorbeer',         emoji: '🍃', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 7 },
+  // Minzen & Melissen
+  { id: 'minze',          name: 'Minze',           emoji: '🌿', category: 'herb', size: 1, tileColor: '#E0F2F1', wateringDays: 2 },
+  { id: 'zitronenmelisse', name: 'Zitronenmelisse', emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 3 },
+  { id: 'pfefferminze',   name: 'Pfefferminze',    emoji: '🌿', category: 'herb', size: 1, tileColor: '#E0F2F1', wateringDays: 2 },
+  // Essbare Wildkräuter
+  { id: 'bärlauch',       name: 'Bärlauch',        emoji: '🧄', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 4 },
+  { id: 'waldmeister',    name: 'Waldmeister',     emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 4 },
+  { id: 'borretsch',      name: 'Borretsch',       emoji: '🔵', category: 'herb', size: 1, tileColor: '#E3F2FD', wateringDays: 3 },
+  { id: 'kapuzinerkresse', name: 'Kapuzinerkresse', emoji: '🌸', category: 'herb', size: 1, tileColor: '#FFF3E0', wateringDays: 2 },
+  // Spezielle Kräuter
+  { id: 'kümmel',         name: 'Kümmel',          emoji: '🌿', category: 'herb', size: 1, tileColor: '#F1F8E9', wateringDays: 5 },
+  { id: 'fenchel-kraut',  name: 'Fenchel (Kraut)', emoji: '🌿', category: 'herb', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'ysop',           name: 'Ysop',            emoji: '🌿', category: 'herb', size: 1, tileColor: '#EDE7F6', wateringDays: 5 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 export const GARDEN_ELEMENTS: GardenElement[] = [
@@ -194,7 +230,8 @@ export const GARDEN_ELEMENTS: GardenElement[] = [
   ...trees,
   ...vegetables,
   ...fruits,
-  // herbs, structures, water, landscape, accessory — added in later steps
+  ...herbs,
+  // structures, water, landscape, accessory — added in later steps
 ];
 
 export const ELEMENT_CATEGORIES: { id: ElementCategory; label: string; emoji: string }[] = [
