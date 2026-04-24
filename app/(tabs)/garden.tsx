@@ -112,11 +112,12 @@ export default function GardenScreen() {
     (col: number, row: number) => {
       const existing = placedMap.get(`${col},${row}`);
       if (existing) {
-        const name = ELEMENT_BY_ID.get(existing.elementId)?.name ?? 'Element';
-        Alert.alert(name, 'Was möchtest du tun?', [
-          { text: 'Entfernen', style: 'destructive', onPress: () => removeElement(existing.id) },
-          { text: 'Abbrechen', style: 'cancel' },
-        ]);
+        if (selectedElementId) {
+          // Overwrite mode: remove old, place new
+          removeElement(existing.id);
+        } else {
+          setDetailElement(existing);
+        }
         return;
       }
       if (!selectedElementId || !garden) return;
@@ -131,6 +132,21 @@ export default function GardenScreen() {
     },
     [placedMap, selectedElementId, garden, placeElement, removeElement]
   );
+
+  function createBlankGarden() {
+    const id = generateId('garden');
+    addGarden({
+      id,
+      user_id: 'local',
+      name: 'Mein Garten',
+      location_lat: null,
+      location_lon: null,
+      grid_rows: GRID_ROWS,
+      grid_cols: GRID_COLS,
+      created_at: new Date().toISOString(),
+    });
+    setActiveGarden(id);
+  }
 
   function selectElement(el: GardenElement) {
     setSelectedElementId(el.id === selectedElementId ? null : el.id);
