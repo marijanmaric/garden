@@ -100,7 +100,7 @@ export default function GardenScanScreen() {
     detected.forEach((p, i) => {
       if (!selected.has(i)) return;
       addPlant({
-        id: `plant-scan-${Date.now()}-${i}`,
+        id: generateId('plant'),
         garden_id: activeGardenId,
         user_id: 'local',
         name: p.name,
