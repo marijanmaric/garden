@@ -393,6 +393,45 @@ export default function GardenScreen() {
         </View>
       </Modal>
 
+      {/* ── Garden management sheet ── */}
+      <Modal
+        visible={gardenSheet.visible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setGardenSheet({ visible: false, gardenId: null })}
+      >
+        <View style={styles.detailOverlay}>
+          <View style={styles.detailCard}>
+            <Text style={styles.detailName}>Garten bearbeiten</Text>
+            <View style={styles.gardenSheetInputRow}>
+              <TextInput
+                style={styles.gardenSheetInput}
+                value={gardenNameInput}
+                onChangeText={setGardenNameInput}
+                placeholder="Gartenname"
+                placeholderTextColor={Colors.textSecondary}
+                autoFocus
+                returnKeyType="done"
+                onSubmitEditing={saveGardenName}
+              />
+            </View>
+            <TouchableOpacity style={styles.emptyBtn} onPress={saveGardenName} activeOpacity={0.8}>
+              <Text style={styles.emptyBtnText}>Speichern</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.detailRemoveBtn} onPress={handleDeleteGarden} activeOpacity={0.8}>
+              <Text style={styles.detailRemoveBtnText}>🗑️ Garten löschen</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.detailCloseBtn}
+              onPress={() => setGardenSheet({ visible: false, gardenId: null })}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.detailCloseBtnText}>Abbrechen</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── Element library panel ── */}
       <Animated.View style={[styles.panel, { transform: [{ translateY: panelAnim }] }]}>
         {/* Handle */}
