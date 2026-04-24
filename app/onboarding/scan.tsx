@@ -118,7 +118,7 @@ export default function OnboardingScanScreen() {
   function confirmGarden() {
     if (!result) return;
 
-    const gardenId = `garden-${Date.now()}`;
+    const gardenId = generateId('garden');
     const now = new Date().toISOString();
 
     addGarden({
@@ -134,7 +134,7 @@ export default function OnboardingScanScreen() {
     setActiveGarden(gardenId);
 
     result.zones.forEach((z, i) => {
-      const zoneId = `zone-${Date.now()}-${i}`;
+      const zoneId = generateId('zone');
       addZone({
         id: zoneId,
         garden_id: gardenId,
@@ -151,7 +151,7 @@ export default function OnboardingScanScreen() {
 
       z.detected_plants.slice(0, 1).forEach((plantName, pi) => {
         addPlant({
-          id: `plant-${Date.now()}-${i}-${pi}`,
+          id: generateId('plant'),
           garden_id: gardenId,
           user_id: 'local',
           name: plantName,
