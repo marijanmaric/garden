@@ -147,6 +147,21 @@ export const useGardenStore = create<GardenStore>()(
     {
       name: 'garden-store',
       storage: createJSONStorage(() => AsyncStorage),
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        const dedup = <T extends { id: string }>(arr: T[]): T[] => {
+          const seen = new Set<string>();
+          return arr.filter((item) => {
+            if (seen.has(item.id)) return false;
+            seen.add(item.id);
+            return true;
+          });
+        };
+        state.gardens = dedup(state.gardens);
+        state.plants = dedup(state.plants);
+        state.zones = dedup(state.zones);
+        state.careLogs = dedup(state.careLogs);
+      },
       partialize: (state) => ({
         gardens: state.gardens,
         activeGardenId: state.activeGardenId,
