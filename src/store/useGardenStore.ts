@@ -103,6 +103,30 @@ export const useGardenStore = create<GardenStore>()(
           gardens: [...s.gardens, garden],
           activeGardenId: s.activeGardenId ?? garden.id,
         })),
+      updateGarden: (id, updates) =>
+        set((s) => ({
+          gardens: s.gardens.map((g) => (g.id === id ? { ...g, ...updates } : g)),
+        })),
+      deleteGarden: (id) =>
+        set((s) => {
+          const remaining = s.gardens.filter((g) => g.id !== id);
+          const newActiveId =
+            s.activeGardenId === id
+              ? (remaining[0]?.id ?? null)
+              : s.activeGardenId;
+          return {
+            gardens: remaining,
+            activeGardenId: newActiveId,
+            plants: s.plants.filter((p) => p.garden_id !== id),
+            careLogs: s.careLogs.filter((l) =>
+              s.plants.some((p) => p.garden_id !== id && p.id === l.plant_id)
+            ),
+            zones: s.zones.filter((z) => z.garden_id !== id),
+            placedElements: s.placedElements.filter((e) => e.gardenId !== id),
+            _undoStack: [],
+            _redoStack: [],
+          };
+        }),
       setActiveGarden: (id) => set({ activeGardenId: id }),
       activeGarden: () => {
         const { gardens, activeGardenId } = get();
