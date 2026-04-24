@@ -99,12 +99,65 @@ const trees: GardenElement[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GEMÜSE / VEGETABLES  (40 Einträge)
+// ─────────────────────────────────────────────────────────────────────────────
+const vegetables: GardenElement[] = [
+  // Fruchtgemüse
+  { id: 'tomate',       name: 'Tomate',        emoji: '🍅', category: 'vegetable', size: 1, tileColor: '#FFEBEE', wateringDays: 1 },
+  { id: 'gurke',        name: 'Gurke',         emoji: '🥒', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 1 },
+  { id: 'zucchini',     name: 'Zucchini',      emoji: '🥒', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'paprika',      name: 'Paprika',       emoji: '🫑', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'aubergine',    name: 'Aubergine',     emoji: '🍆', category: 'vegetable', size: 1, tileColor: '#EDE7F6', wateringDays: 2 },
+  { id: 'kürbis',       name: 'Kürbis',        emoji: '🎃', category: 'vegetable', size: 2, tileColor: '#FFF3E0', wateringDays: 2 },
+  { id: 'mais',         name: 'Mais',          emoji: '🌽', category: 'vegetable', size: 1, tileColor: '#FFFDE7', wateringDays: 2 },
+  // Wurzelgemüse
+  { id: 'karotte',      name: 'Karotte',       emoji: '🥕', category: 'vegetable', size: 1, tileColor: '#FFF3E0', wateringDays: 3 },
+  { id: 'kartoffel',    name: 'Kartoffel',     emoji: '🥔', category: 'vegetable', size: 1, tileColor: '#EFEBE9', wateringDays: 4 },
+  { id: 'rote-bete',    name: 'Rote Bete',     emoji: '🟣', category: 'vegetable', size: 1, tileColor: '#F3E5F5', wateringDays: 3 },
+  { id: 'radieschen',   name: 'Radieschen',    emoji: '🔴', category: 'vegetable', size: 1, tileColor: '#FFEBEE', wateringDays: 2 },
+  { id: 'pastinake',    name: 'Pastinake',     emoji: '🥕', category: 'vegetable', size: 1, tileColor: '#FFF8E1', wateringDays: 4 },
+  { id: 'sellerie',     name: 'Sellerie',      emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'süsskartoffel', name: 'Süßkartoffel', emoji: '🍠', category: 'vegetable', size: 1, tileColor: '#FFF3E0', wateringDays: 3 },
+  { id: 'meerrettich',  name: 'Meerrettich',   emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 5 },
+  // Blattgemüse & Salate
+  { id: 'salat',        name: 'Salat',         emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 1 },
+  { id: 'spinat',       name: 'Spinat',        emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'mangold',      name: 'Mangold',       emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'rucola',       name: 'Rucola',        emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'feldsalat',    name: 'Feldsalat',     emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'endivie',      name: 'Endivie',       emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#F1F8E9', wateringDays: 2 },
+  { id: 'pak-choi',     name: 'Pak Choi',      emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'kale',         name: 'Grünkohl',      emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  // Kohlgemüse
+  { id: 'brokkoli',     name: 'Brokkoli',      emoji: '🥦', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'blumenkohl',   name: 'Blumenkohl',    emoji: '🥦', category: 'vegetable', size: 1, tileColor: '#F1F8E9', wateringDays: 3 },
+  { id: 'kohlrabi',     name: 'Kohlrabi',      emoji: '🥦', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'wirsing',      name: 'Wirsing',       emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'rotkohl',      name: 'Rotkohl',       emoji: '🥬', category: 'vegetable', size: 1, tileColor: '#EDE7F6', wateringDays: 3 },
+  { id: 'rosenkohl',    name: 'Rosenkohl',     emoji: '🥦', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  // Zwiebelgewächse & Hülsenfrüchte
+  { id: 'zwiebel',      name: 'Zwiebel',       emoji: '🧅', category: 'vegetable', size: 1, tileColor: '#FFF8E1', wateringDays: 4 },
+  { id: 'porree',       name: 'Lauch / Porree', emoji: '🧅', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'knoblauch',    name: 'Knoblauch',     emoji: '🧄', category: 'vegetable', size: 1, tileColor: '#FFF8E1', wateringDays: 7 },
+  { id: 'erbsen',       name: 'Erbsen',        emoji: '🫛', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'bohnen',       name: 'Bohnen',        emoji: '🫘', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  // Sonstiges
+  { id: 'fenchel',      name: 'Fenchel',       emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 3 },
+  { id: 'artischocke',  name: 'Artischocke',   emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#E8F5E9', wateringDays: 2 },
+  { id: 'rhabarber',    name: 'Rhabarber',     emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#FFEBEE', wateringDays: 4 },
+  { id: 'spargel',      name: 'Spargel',       emoji: '🌿', category: 'vegetable', size: 1, tileColor: '#F1F8E9', wateringDays: 3 },
+  { id: 'topinambur',   name: 'Topinambur',    emoji: '🌻', category: 'vegetable', size: 1, tileColor: '#FFF8DC', wateringDays: 5 },
+  { id: 'steckrübe',    name: 'Steckrübe',     emoji: '🟡', category: 'vegetable', size: 1, tileColor: '#FFFDE7', wateringDays: 4 },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 export const GARDEN_ELEMENTS: GardenElement[] = [
   ...flowers,
   ...trees,
-  // vegetables, fruits, herbs, structures, water, landscape, accessory — added in later steps
+  ...vegetables,
+  // fruits, herbs, structures, water, landscape, accessory — added in later steps
 ];
 
 export const ELEMENT_CATEGORIES: { id: ElementCategory; label: string; emoji: string }[] = [
