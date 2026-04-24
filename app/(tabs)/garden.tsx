@@ -151,6 +151,38 @@ export default function GardenScreen() {
     setActiveGarden(id);
   }
 
+  function openGardenSheet(gId: string) {
+    const g = gardens.find((x) => x.id === gId);
+    setGardenNameInput(g?.name ?? '');
+    setGardenSheet({ visible: true, gardenId: gId });
+  }
+
+  function saveGardenName() {
+    if (!gardenSheet.gardenId || !gardenNameInput.trim()) return;
+    updateGarden(gardenSheet.gardenId, { name: gardenNameInput.trim() });
+    setGardenSheet({ visible: false, gardenId: null });
+  }
+
+  function handleDeleteGarden() {
+    if (!gardenSheet.gardenId) return;
+    const g = gardens.find((x) => x.id === gardenSheet.gardenId);
+    Alert.alert(
+      'Garten löschen',
+      `"${g?.name ?? 'Garten'}" und alle enthaltenen Daten löschen?`,
+      [
+        { text: 'Abbrechen', style: 'cancel' },
+        {
+          text: 'Löschen',
+          style: 'destructive',
+          onPress: () => {
+            deleteGarden(gardenSheet.gardenId!);
+            setGardenSheet({ visible: false, gardenId: null });
+          },
+        },
+      ]
+    );
+  }
+
   function selectElement(el: GardenElement) {
     setSelectedElementId(el.id === selectedElementId ? null : el.id);
     closePanel();
