@@ -8,15 +8,28 @@ import {
   TextInput,
   Animated,
   Alert,
+  Modal,
   Dimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useGardenStore } from '../../src/store/useGardenStore';
-import { EmptyState } from '../../src/components/EmptyState';
 import { Colors } from '../../src/constants';
 import { GARDEN_ELEMENTS, ELEMENT_CATEGORIES, ELEMENT_BY_ID } from '../../src/constants/elements';
 import { generateId } from '../../src/utils/generateId';
 import { GardenElement, ElementCategory, PlacedElement } from '../../src/types';
+
+// ── Care tips by category ──────────────────────────────────────────────────────
+const CATEGORY_CARE: Record<ElementCategory, { sunlight: string; soil: string; tip: string }> = {
+  flower:    { sunlight: '☀️ Sonnig bis halbschattig', soil: '🌱 Humusreicher Boden',     tip: 'Verwelkte Blüten regelmäßig entfernen für längere Blüte.' },
+  tree:      { sunlight: '☀️ Vollsonnig',               soil: '🌱 Tiefgründiger Boden',   tip: 'Mulch um den Stamm schützt Wurzeln und hält Feuchtigkeit.' },
+  vegetable: { sunlight: '☀️ Vollsonnig',               soil: '🌱 Nährstoffreicher Boden', tip: 'Regelmäßig düngen und gleichmäßig gießen.' },
+  fruit:     { sunlight: '☀️ Sonnig',                   soil: '🌱 Durchlässiger Boden',   tip: 'Früchte rechtzeitig ernten für optimalen Geschmack.' },
+  herb:      { sunlight: '☀️ Sonnig bis halbschattig', soil: '🌱 Magerer, trockener Boden', tip: 'Nicht zu viel gießen – Staunässe vermeiden.' },
+  structure: { sunlight: '—',                           soil: '—',                         tip: 'Regelmäßig auf Schäden und Witterungseinflüsse prüfen.' },
+  water:     { sunlight: '☀️ Sonnig bis schattig',      soil: '—',                         tip: 'Wasserqualität und Algenwuchs regelmäßig kontrollieren.' },
+  landscape: { sunlight: '—',                           soil: '—',                         tip: 'Saisonal reinigen und ggf. nachbessern.' },
+  accessory: { sunlight: '—',                           soil: '—',                         tip: 'Vor dem Winter einlagern oder witterungsfest abdecken.' },
+};
 
 // ── Grid constants ─────────────────────────────────────────────────────────────
 const SCREEN_W = Dimensions.get('window').width;
