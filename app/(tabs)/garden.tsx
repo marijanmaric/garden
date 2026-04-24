@@ -50,7 +50,7 @@ const TILE_W = Math.floor((SCREEN_W - 32 - 12) / 5);
 export default function GardenScreen() {
   const router = useRouter();
   const {
-    gardens, activeGardenId, activeGarden, setActiveGarden,
+    gardens, activeGardenId, activeGarden, setActiveGarden, addGarden,
     placedForGarden, placeElement, removeElement, clearDesigner,
     designerUndo, designerRedo, canUndo, canRedo,
     designerZoom, setDesignerZoom,
