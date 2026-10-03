@@ -1,0 +1,24 @@
+{
+  "name": "@m1/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "migrate": "tsx src/cli.ts migrate",
+    "seed": "tsx src/cli.ts seed",
+    "reset": "tsx src/cli.ts reset",
+    "setup": "tsx src/cli.ts setup",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@m1/shared": "*",
+    "bcryptjs": "^2.4.3",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/pg": "^8.11.10"
+  }
+}

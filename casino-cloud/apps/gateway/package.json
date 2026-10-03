@@ -1,0 +1,17 @@
+{
+  "name": "@m1/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Edge gateway for Raspberry Pi / Rock Pi / industrial Linux PCs",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@m1/adapters": "*",
+    "@m1/shared": "*"
+  }
+}

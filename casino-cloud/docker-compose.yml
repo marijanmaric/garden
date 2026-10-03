@@ -1,0 +1,72 @@
+# M1 Casino Cloud: local demo stack.
+#   docker compose up --build   ->   http://localhost:3000   (admin@example.com / demo)
+
+x-app: &app
+  build: .
+  image: m1-casino-cloud:local
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: casino
+      POSTGRES_PASSWORD: casino
+      POSTGRES_DB: casino
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casino -d casino"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    <<: *app
+    command: ["npm", "start", "-w", "@m1/api"]
+    environment:
+      DATABASE_URL: postgres://casino:casino@db:5432/casino
+      JWT_SECRET: ${JWT_SECRET:-local-demo-secret-change-me}
+      GATEWAY_KEY: ${GATEWAY_KEY:-demo-gateway-key}
+      AUTO_SEED: "true"
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Edge gateway with 20 simulated machines. On real hardware this container runs on the Raspberry Pi / Rock Pi.
+  gateway:
+    <<: *app
+    command: ["npm", "start", "-w", "@m1/gateway"]
+    environment:
+      CLOUD_URL: http://api:4000
+      GATEWAY_ID: GW-VIE-001
+      GATEWAY_KEY: ${GATEWAY_KEY:-demo-gateway-key}
+      QUEUE_FILE: /data/queue.jsonl
+    volumes:
+      - gateway-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+
+  web:
+    <<: *app
+    command: ["npm", "start", "-w", "@m1/web"]
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  gateway-data:

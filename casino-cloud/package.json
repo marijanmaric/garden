@@ -1,0 +1,27 @@
+{
+  "name": "m1-casino-cloud",
+  "private": true,
+  "version": "0.1.0",
+  "description": "M1 Casino Cloud: modular casino management SaaS platform",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,gateway,web -c blue,magenta,green \"npm run dev -w @m1/api\" \"npm run dev -w @m1/gateway\" \"npm run dev -w @m1/web\"",
+    "db:migrate": "npm run migrate -w @m1/database",
+    "db:seed": "npm run seed -w @m1/database",
+    "db:reset": "npm run reset -w @m1/database",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "@types/node": "^22.10.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
