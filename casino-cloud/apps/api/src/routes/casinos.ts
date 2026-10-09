@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '@m1/database';
-import { MODULES, ROLE_PERMISSIONS } from '@m1/shared';
+import { MODULES } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 
@@ -63,15 +63,5 @@ export async function casinoRoutes(app: FastifyInstance) {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query('SELECT * FROM jackpots WHERE org_id = $1 AND casino_id = $2 ORDER BY current_value DESC', [req.auth.orgId, casinoId]);
     return r.rows;
-  });
-
-  app.get('/api/v1/employees', { preHandler: guard('employee.view') }, async (req) => {
-    const r = await pool.query(
-      `SELECT e.id, e.email, e.name, e.role, e.active, e.last_login_at, e.created_at,
-         (SELECT json_agg(c.name) FROM employee_casinos ec JOIN casinos c ON c.id = ec.casino_id WHERE ec.employee_id = e.id) casinos
-       FROM employees e WHERE e.org_id = $1 ORDER BY e.name`,
-      [req.auth.orgId],
-    );
-    return { employees: r.rows, rolePermissions: ROLE_PERMISSIONS };
   });
 }

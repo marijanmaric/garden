@@ -29,6 +29,13 @@ interface Pending {
   data?: Partial<MachineEvent>;
 }
 
+/**
+ * Tickets printed by any simulated machine. Players carry them to another machine (TICKET_IN)
+ * or to the cashier, just like real TITO tickets.
+ */
+const printedTickets: Array<{ barcode: string; amount: number }> = [];
+const MAX_POOL = 300;
+
 const ERROR_CODES = ['BILL_JAM', 'REEL_TILT', 'COMM_TIMEOUT', 'HOPPER_EMPTY', 'RAM_ERROR'];
 const BETS = [0.5, 1, 1, 2, 2, 3, 5];
 const NOTES = [5, 10, 10, 20, 20, 50, 100];
@@ -171,15 +178,22 @@ export class SimulatorAdapter implements GamingMachineAdapter {
   }
 
   private ticketIn() {
-    const amount = round2(10 + this.rnd() * 190);
-    this.meters.ticketsIn = round2(this.meters.ticketsIn + amount);
-    this.emit('TICKET_IN', { amount, ticketBarcode: this.barcode() });
+    // Only tickets that were actually printed can be inserted; a quarter of them go to the cashier instead.
+    if (printedTickets.length < 4) return this.cashIn();
+    const [ticket] = printedTickets.splice(Math.floor(this.rnd() * printedTickets.length), 1);
+    this.meters.ticketsIn = round2(this.meters.ticketsIn + ticket.amount);
+    this.emit('TICKET_IN', { amount: ticket.amount, ticketBarcode: ticket.barcode });
   }
 
   private ticketOut() {
     const amount = round2(10 + this.rnd() * 290);
+    const barcode = this.barcode();
     this.meters.ticketsOut = round2(this.meters.ticketsOut + amount);
-    this.emit('TICKET_OUT', { amount, ticketBarcode: this.barcode() });
+    if (this.rnd() < 0.75) {
+      printedTickets.push({ barcode, amount });
+      if (printedTickets.length > MAX_POOL) printedTickets.shift();
+    }
+    this.emit('TICKET_OUT', { amount, ticketBarcode: barcode });
   }
 
   private jackpot() {

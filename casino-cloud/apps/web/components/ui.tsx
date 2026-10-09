@@ -105,3 +105,44 @@ export function BarChart({ data, height = 160, color = 'rgb(var(--brand))', form
     </div>
   );
 }
+
+const TICKET_BADGE: Record<string, string> = {
+  VALID: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 ring-emerald-500/30',
+  REDEEMED: 'bg-sky-500/15 text-sky-600 dark:text-sky-400 ring-sky-500/30',
+  CANCELLED: 'bg-slate-500/15 text-slate-600 dark:text-slate-400 ring-slate-500/30',
+  EXPIRED: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-amber-500/30',
+  VOID: 'bg-red-500/15 text-red-600 dark:text-red-400 ring-red-500/30',
+};
+
+export function TicketBadge({ status }: { status: string }) {
+  return <span className={clsx('badge', TICKET_BADGE[status] ?? TICKET_BADGE.CANCELLED)}>{status}</span>;
+}
+
+export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      <div className={clsx('card max-h-[92vh] w-full overflow-y-auto rounded-b-none sm:rounded-xl', wide ? 'sm:max-w-3xl' : 'sm:max-w-lg')} onClick={(e) => e.stopPropagation()}>
+        <div className="card-h sticky top-0 bg-panel">
+          <span>{title}</span>
+          <button className="btn px-2 py-1 text-xs" onClick={onClose}>Close</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-sub">{label}</span>
+      {children}
+      {hint && <span className="mt-1 block text-xs text-sub">{hint}</span>}
+    </label>
+  );
+}
+
+export function Notice({ tone = 'info', children }: { tone?: 'info' | 'good' | 'bad'; children: React.ReactNode }) {
+  const cls = tone === 'good' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : tone === 'bad' ? 'bg-red-500/10 text-red-600 dark:text-red-400' : 'bg-muted';
+  return <div className={clsx('rounded-lg px-3 py-2 text-sm', cls)}>{children}</div>;
+}

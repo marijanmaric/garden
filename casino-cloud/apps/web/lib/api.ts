@@ -68,3 +68,16 @@ export function useApi<T = any>(path: string | null, opts: { refreshMs?: number 
 
   return { data, error, loading, reload, setData };
 }
+
+/** Downloads an authenticated file (e.g. report export) and saves it in the browser. */
+export async function download(path: string, fallbackName: string) {
+  const res = await fetch(`${apiBase()}/api/v1${path}`, { headers: { authorization: `Bearer ${getToken()}` } });
+  if (!res.ok) throw new ApiError(res.status, (await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+  const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? fallbackName;
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

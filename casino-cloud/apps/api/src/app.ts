@@ -14,12 +14,17 @@ import { auditRoutes } from './routes/audit';
 import { gatewayRoutes } from './routes/gateways';
 import { casinoRoutes } from './routes/casinos';
 import { streamRoutes } from './routes/stream';
+import { ticketRoutes } from './routes/tickets';
+import { cashierRoutes } from './routes/cashier';
+import { cashRoutes } from './routes/cash';
+import { employeeRoutes } from './routes/employees';
+import { reportRoutes } from './routes/reports';
 
 export async function buildApp() {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, trustProxy: true });
 
   // Bearer tokens (no cookies), so reflecting the origin is safe and lets LAN tablets connect.
-  await app.register(cors, { origin: process.env.CORS_ORIGIN?.split(',') ?? true });
+  await app.register(cors, { origin: process.env.CORS_ORIGIN?.split(',') ?? true, exposedHeaders: ['Content-Disposition'] });
   await app.register(rateLimit, { max: 1200, timeWindow: '1 minute' });
 
   app.setErrorHandler((err: Error, _req, reply) => {
@@ -36,7 +41,8 @@ export async function buildApp() {
     return { ok: true, service: 'm1-casino-api' };
   });
 
-  for (const routes of [authRoutes, dashboardRoutes, machineRoutes, floorRoutes, accountingRoutes, alertRoutes, auditRoutes, gatewayRoutes, casinoRoutes, streamRoutes])
+  for (const routes of [authRoutes, dashboardRoutes, machineRoutes, floorRoutes, accountingRoutes, alertRoutes, auditRoutes, gatewayRoutes, casinoRoutes, streamRoutes,
+    ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes])
     await app.register(routes);
 
   return app;

@@ -1,6 +1,7 @@
 import {
-  Activity, AlertTriangle, BarChart3, Building2, Coins, Cpu, CreditCard, FileText, Gift, LayoutDashboard, Map, Monitor,
-  Router, ScrollText, Settings, Sparkles, Star, Ticket, Trophy, Users, UserCog, Wallet,
+  Smartphone, Landmark,
+  Activity, AlertTriangle, BarChart3, Building2, Coins, Cpu, CreditCard, Gift, LayoutDashboard, Map, Monitor,
+  Router, ScrollText, Settings, Sparkles, Star, Ticket, Trophy, Users, UserCog,
 } from 'lucide-react';
 import type { Permission } from '@m1/shared';
 
@@ -10,6 +11,8 @@ export interface NavItem {
   icon: React.ComponentType<{ className?: string }>;
   module?: string;
   permission?: Permission;
+  /** Visible when the user has at least one of these. */
+  anyPermission?: Permission[];
   phase?: number;
 }
 
@@ -34,10 +37,11 @@ export const NAV: Array<{ title: string; items: NavItem[] }> = [
     title: 'Finance',
     items: [
       { href: '/accounting', label: 'Accounting', icon: Coins, module: 'accounting', permission: 'accounting.view' },
-      { href: '/cashier', label: 'Cashier', icon: CreditCard, module: 'cashier', phase: 2 },
-      { href: '/tickets', label: 'Tickets', icon: Ticket, module: 'tickets', phase: 2 },
-      { href: '/cash', label: 'Cash Management', icon: Wallet, module: 'cash', phase: 2 },
-      { href: '/reports', label: 'Reports', icon: BarChart3, module: 'reporting', phase: 2 },
+      { href: '/cashier', label: 'Cashier', icon: CreditCard, module: 'cashier', anyPermission: ['cash.transact', 'cashier.supervise'] },
+      { href: '/mobile', label: 'Mobile Cashier', icon: Smartphone, module: 'cashier', permission: 'cash.transact' },
+      { href: '/tickets', label: 'Tickets', icon: Ticket, module: 'tickets', permission: 'ticket.view' },
+      { href: '/cash', label: 'Cash Management', icon: Landmark, module: 'cash', permission: 'cashier.supervise' },
+      { href: '/reports', label: 'Reports', icon: BarChart3, module: 'reporting', permission: 'report.view' },
     ],
   },
   {
@@ -61,10 +65,6 @@ export const NAV: Array<{ title: string; items: NavItem[] }> = [
 ];
 
 export const PLANNED: Record<string, { title: string; phase: number; icon: React.ComponentType<{ className?: string }>; features: string[] }> = {
-  cashier: { title: 'Cashier & Mobile Cashier', phase: 2, icon: CreditCard, features: ['Cashier sessions with opening / closing balance', 'Tablet optimised Mobile Cashier with barcode scan', 'Ticket validation and payout', 'Expected vs. actual balance, differences audited'] },
-  tickets: { title: 'Ticket System (TITO)', phase: 2, icon: Ticket, features: ['Ticket in / out with barcode', 'Validation, cancellation, expiration, reprint', 'Status: VALID, REDEEMED, CANCELLED, EXPIRED, VOID'] },
-  cash: { title: 'Cash Management', phase: 2, icon: Wallet, features: ['Cash desks and cashboxes', 'Drops, collections, deposits', 'Fully audited cash movements'] },
-  reports: { title: 'Reporting', phase: 2, icon: FileText, features: ['Daily gaming report, machine and casino performance', 'Filters by casino, floor, machine, manufacturer, date', 'Export to CSV, Excel and PDF'] },
   loyalty: { title: 'Loyalty', phase: 3, icon: Star, features: ['Tiers BRONZE to VIP', 'Configurable earning rules (coin in, play time, multipliers)', 'Rewards and point redemption'] },
   promotions: { title: 'Promotions', phase: 3, icon: Sparkles, features: ['Rule engine: IF tier = GOLD AND coin in > 500 THEN award points', 'Free play, bonus, cashback, tournaments', 'Time based promotions'] },
 };

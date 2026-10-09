@@ -139,6 +139,8 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
     case 'TICKET_OUT': {
       await ledger(LEDGER_MAP[type]!, amount ?? 0);
       await db.query(`UPDATE machine_meters SET ${METER_MAP[type]} = ${METER_MAP[type]} + $2, updated_at = now() WHERE machine_id = $1`, [m.id, amount ?? 0]);
+      if (type === 'TICKET_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
+      if (type === 'TICKET_IN' && ev.ticketBarcode) await redeemMachineTicket(db, ctx, ev, label, out);
       break;
     }
     case 'JACKPOT': {
@@ -246,6 +248,41 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
   if (status !== m.status)
     out.push({ kind: 'machine.status', orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, assetNo: label, status });
   return 'accepted';
+}
+
+/** A machine printed a ticket: it becomes a VALID ticket in the TITO system. */
+async function issueMachineTicket(db: PoolClient, ctx: { orgId: string; casinoId: string; machineId: string }, ev: MachineEvent) {
+  const t = await db.query(
+    `INSERT INTO tickets (org_id, casino_id, barcode, amount, issued_by_machine_id, issued_at, expires_at, source_event_id)
+     SELECT $1, $2, $3, $4, $5, $6, $6::timestamptz + make_interval(days => c.ticket_expiry_days), $7 FROM casinos c WHERE c.id = $2
+     ON CONFLICT (org_id, barcode) DO NOTHING RETURNING id`,
+    [ctx.orgId, ctx.casinoId, ev.ticketBarcode, ev.amount, ctx.machineId, ev.timestamp, ev.eventId],
+  );
+  if (t.rowCount)
+    await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, machine_id, created_at) VALUES ($1,$2,'ISSUED',$3,$4)`, [ctx.orgId, t.rows[0].id, ctx.machineId, ev.timestamp]);
+}
+
+/**
+ * A machine accepted a ticket. In production the machine asks the system before accepting;
+ * a ticket that is not VALID here therefore indicates fraud or a sync problem and raises an alert.
+ */
+async function redeemMachineTicket(db: PoolClient, ctx: { orgId: string; casinoId: string; machineId: string }, ev: MachineEvent, label: string, out: BusMessage[]) {
+  const r = await db.query(
+    `UPDATE tickets SET status = 'REDEEMED', redeemed_at = $3, redeemed_machine_id = $4
+     WHERE org_id = $1 AND barcode = $2 AND status = 'VALID' RETURNING id`,
+    [ctx.orgId, ev.ticketBarcode, ev.timestamp, ctx.machineId],
+  );
+  if (r.rowCount) {
+    await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, machine_id, created_at) VALUES ($1,$2,'REDEEMED',$3,$4)`, [ctx.orgId, r.rows[0].id, ctx.machineId, ev.timestamp]);
+    return;
+  }
+  const existing = await db.query('SELECT id, status FROM tickets WHERE org_id = $1 AND barcode = $2', [ctx.orgId, ev.ticketBarcode]);
+  const t = existing.rows[0];
+  if (t) await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, machine_id, details) VALUES ($1,$2,'REJECTED',$3,$4)`, [ctx.orgId, t.id, ctx.machineId, { status: t.status }]);
+  await openAlert(db, {
+    ...ctx, type: 'TICKET_REJECTED', severity: 'CRITICAL',
+    message: t ? `${label} accepted ticket ${ev.ticketBarcode} that is already ${t.status}` : `${label} accepted unknown ticket ${ev.ticketBarcode}`,
+  }, out);
 }
 
 async function endSession(db: PoolClient, m: { current_session_id: string | null }, at?: string) {

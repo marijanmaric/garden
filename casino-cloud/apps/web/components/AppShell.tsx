@@ -39,13 +39,15 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       </div>
       <div className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
         {NAV.map((group) => {
-          const items = group.items.filter((i) => (!i.permission || can(i.permission)) && (!i.module || moduleOn(i.module)));
+          const items = group.items.filter(
+            (i) => (!i.permission || can(i.permission)) && (!i.anyPermission || i.anyPermission.some(can)) && (!i.module || moduleOn(i.module)),
+          );
           if (!items.length) return null;
           return (
             <div key={group.title}>
               <div className="px-2 pb-1.5 text-[10px] font-semibold uppercase tracking-widest text-sub">{group.title}</div>
               {items.map((item) => {
-                const active = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href);
+                const active = item.href === '/' ? pathname === '/' : pathname === item.href || pathname.startsWith(`${item.href}/`);
                 return (
                   <Link
                     key={item.href}

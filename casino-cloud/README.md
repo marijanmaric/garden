@@ -3,7 +3,7 @@
 Modular, multi-tenant casino management SaaS: machine management, floor control, accounting, alerts and audit,
 connected to gaming machines through an edge gateway and a manufacturer-neutral adapter layer.
 
-**Status: Phase 1 (MVP) with simulated machines.** No real manufacturer protocols, no real money functions.
+**Status: Phase 1 + Phase 2 with simulated machines.** No real manufacturer protocols, no real money functions.
 
 ## Quick start
 
@@ -25,7 +25,8 @@ On first start the API migrates the database and seeds the demo tenant automatic
 | floor@example.com | FLOOR_SUPERVISOR |
 | tech@example.com | TECHNICIAN |
 | accounting@example.com | ACCOUNTING |
-| cashier@example.com | CASHIER (sees almost nothing in Phase 1, by design) |
+| cashier@example.com | CASHIER (tickets, cash, mobile cashier only) |
+| attendant@example.com | ATTENDANT (floor service + mobile cashier) |
 | admin@riverside.example | Admin of a second tenant (proves tenant isolation) |
 
 All passwords: `demo`. Tablets on the same network can open `http://<your-ip>:3000`.
@@ -87,6 +88,25 @@ packages/
 - **Realtime.** Server-Sent Events (`/api/v1/stream`) over an in-process bus with a tiny interface, ready to be
   replaced by Redis/NATS/MQTT for multiple API instances.
 
+### Phase 2 modules
+
+- **Tickets (TITO)** `/tickets`: machines print tickets (`TICKET_OUT` creates a VALID ticket), other machines
+  or the cashier redeem them. Validation, cancellation, void, reprint and amount adjustment (old ticket cancelled,
+  new one issued, never edited). Tickets expire automatically (`casinos.ticket_expiry_days`, default 30).
+  Full immutable history per ticket in `ticket_events`. A machine accepting a non-valid ticket raises a
+  `TICKET_REJECTED` alert.
+- **Cashier** `/cashier`: shifts per desk (opening float, expected vs. counted balance, differences raise a
+  `CASH_DIFFERENCE` alert), ticket payout, ticket sale, cash in/out, vault fill/drop, jackpot handpays
+  (pays and sends `RESET_JACKPOT` to the machine). Supervisors see all desks and the shift history.
+- **Mobile Cashier** `/mobile`: full-screen tablet UI with big buttons, keypad, camera barcode scan
+  (browsers with BarcodeDetector), handpays, player lookup, machine lock/unlock, alerts, shift.
+- **Cash Management** `/cash`: money in drawers, ticket liability, machine drop collections against meter values.
+- **Employees** `/employees`: create/edit staff, roles, casino access, deactivate, password reset, activity log.
+- **Reports** `/reports`: 10 reports (daily gaming, machine/manufacturer performance, jackpots, tickets,
+  cashier sessions, cash transactions, collections, alerts, audit) with filters and CSV / Excel / PDF export.
+
+`cash_transactions`, `cash_collections` and `ticket_events` are append-only like the ledger.
+
 ### Accounting definitions
 
 | Metric | Definition |
@@ -105,14 +125,17 @@ Business day = calendar day in the casino's timezone.
 `/api/v1/auth/login`, `/auth/me`, `/dashboard`, `/casinos`, `/casinos/:id/modules`, `/floors`,
 `/floors/:id/layout`, `/machines`, `/machines/:id`, `/machines/:id/commands`, `/machines/:id/maintenance`,
 `/accounting/summary`, `/transactions`, `/transactions/adjustments`, `/alerts`, `/alerts/:id/acknowledge|resolve`,
-`/audit`, `/audit/verify`, `/gateways`, `/simulation`, `/players`, `/jackpots`, `/employees`, `/stream` (SSE).
+`/audit`, `/audit/verify`, `/gateways`, `/simulation`, `/players`, `/jackpots`, `/employees`, `/stream` (SSE),
+`/tickets`, `/tickets/lookup/:barcode`, `/tickets/redeem|issue`, `/tickets/:id/cancel|void|reprint|adjust`,
+`/cashier/desks|session|session/open|session/close|sessions|transactions|handpays`, `/cash/overview|collections`,
+`/reports`, `/reports/:key?format=json|csv|xlsx|pdf`.
 
 Gateway device API (headers `x-gateway-id`, `x-gateway-key`): `/gateway/heartbeat`, `/gateway/events`,
 `/gateway/commands/:id/result`.
 
 ## Roadmap
 
-- **Phase 2:** Ticket system (TITO), cashier & mobile cashier, cash management, employee management UI, reporting/exports
+- **Phase 2 (done):** Ticket system (TITO), cashier & mobile cashier, cash management, employee management, reporting/exports
 - **Phase 3:** Loyalty rules, player app (PWA), promotions engine, cashless sandbox
 - **Phase 4:** Jackpot engine (mystery, time, wide area)
 - **Phase 5:** Real hardware gateway, MQTT, device certificates, first real manufacturer integration (likely SAS)

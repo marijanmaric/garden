@@ -74,13 +74,6 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
     await client.query('BEGIN');
     const pwHash = await bcrypt.hash(DEMO_PASSWORD, 10);
 
-    // --- RBAC reference tables
-    for (const r of ROLES) await client.query('INSERT INTO roles (key, name) VALUES ($1,$2)', [r, r.replace(/_/g, ' ')]);
-    for (const p of PERMISSIONS) await client.query('INSERT INTO permissions (key) VALUES ($1)', [p]);
-    for (const r of ROLES)
-      for (const p of ROLE_PERMISSIONS[r])
-        await client.query('INSERT INTO role_permissions (role_key, permission_key) VALUES ($1,$2)', [r, p]);
-
     // --- Tenant A: M1 Gaming Group
     const org = (await client.query(`INSERT INTO organizations (name, slug) VALUES ('M1 Gaming Group','m1') RETURNING id`)).rows[0].id;
     const casino = (
@@ -175,6 +168,7 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
       ['manager@example.com', 'Maria Manager', 'MANAGER'],
       ['floor@example.com', 'Florian Floor', 'FLOOR_SUPERVISOR'],
       ['cashier@example.com', 'Clara Cashier', 'CASHIER'],
+      ['attendant@example.com', 'Andi Attendant', 'ATTENDANT'],
       ['tech@example.com', 'Tom Technician', 'TECHNICIAN'],
       ['accounting@example.com', 'Alex Accounting', 'ACCOUNTING'],
     ];
@@ -221,6 +215,25 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
       [org],
     );
 
+    await seedCashDesks(client, org, casino);
+    // Ticket history: printed by machines over the last 45 days, partly redeemed, older ones expire.
+    await client.query(
+      `INSERT INTO tickets (org_id, casino_id, barcode, amount, status, issued_by_machine_id, issued_at, expires_at, redeemed_at, redeemed_machine_id)
+       SELECT m.org_id, m.casino_id, lpad((floor(random() * 1e17))::bigint::text, 18, '0'), round((10 + random() * 290)::numeric, 2),
+              CASE WHEN g.i % 3 = 0 THEN 'VALID' ELSE 'REDEEMED' END, m.id, t.ts, t.ts + interval '30 days',
+              CASE WHEN g.i % 3 = 0 THEN NULL ELSE t.ts + interval '2 hours' END,
+              CASE WHEN g.i % 3 = 0 THEN NULL ELSE m.id END
+       FROM generate_series(1, 120) g(i)
+       CROSS JOIN LATERAL (SELECT now() - (random() * interval '45 days') AS ts, g.i AS _) t
+       JOIN LATERAL (SELECT * FROM machines WHERE org_id = $1 ORDER BY random() + g.i * 0 LIMIT 1) m ON true`,
+      [org],
+    );
+    await client.query(
+      `INSERT INTO ticket_events (org_id, ticket_id, action, machine_id, created_at)
+       SELECT org_id, id, 'ISSUED', issued_by_machine_id, issued_at FROM tickets WHERE org_id = $1`,
+      [org],
+    );
+
     // --- Tenant B: proves isolation (its users never see tenant A data)
     const orgB = (await client.query(`INSERT INTO organizations (name, slug) VALUES ('Riverside Gaming Ltd','riverside') RETURNING id`)).rows[0].id;
     const casinoB = (
@@ -229,6 +242,7 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
     for (const m of MODULES)
       await client.query('INSERT INTO casino_modules (org_id, casino_id, module_key, enabled) VALUES ($1,$2,$3,$4)', [orgB, casinoB, m.key, !!m.core || m.key === 'floor']);
     await client.query('INSERT INTO floors (org_id, casino_id, name) VALUES ($1,$2,$3)', [orgB, casinoB, 'Ground Floor']);
+    await seedCashDesks(client, orgB, casinoB);
     const eB = await client.query(`INSERT INTO employees (org_id, email, name, password_hash, role) VALUES ($1,'admin@riverside.example','Riverside Admin',$2,'SUPER_ADMIN') RETURNING id`, [orgB, pwHash]);
     await client.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3)', [eB.rows[0].id, casinoB, orgB]);
 
@@ -238,6 +252,31 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
     await client.query('COMMIT');
     log(`[db] seeded demo data: 2 tenants, ${n} machines, 60 players, 7 jackpots`);
     return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function seedCashDesks(client: pg.PoolClient, orgId: string, casinoId: string) {
+  for (const [name, kind] of [['Main Cage', 'DESK'], ['Mobile Cashier 1', 'MOBILE'], ['Mobile Cashier 2', 'MOBILE']])
+    await client.query('INSERT INTO cash_desks (org_id, casino_id, name, kind) VALUES ($1,$2,$3,$4)', [orgId, casinoId, name, kind]);
+}
+
+/** Mirrors the code-defined RBAC matrix into the reference tables (runs on every start). */
+export async function syncRbac(pool: pg.Pool): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const r of ROLES) await client.query('INSERT INTO roles (key, name) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [r, r.replace(/_/g, ' ')]);
+    for (const p of PERMISSIONS) await client.query('INSERT INTO permissions (key) VALUES ($1) ON CONFLICT DO NOTHING', [p]);
+    await client.query('DELETE FROM role_permissions');
+    for (const r of ROLES)
+      for (const p of ROLE_PERMISSIONS[r])
+        await client.query('INSERT INTO role_permissions (role_key, permission_key) VALUES ($1,$2)', [r, p]);
+    await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

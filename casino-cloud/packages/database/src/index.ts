@@ -6,6 +6,8 @@ export type PoolClient = pg.PoolClient;
 // Return numeric/bigint as JS numbers (amounts are bounded to numeric(14,2)).
 pg.types.setTypeParser(1700, (v) => parseFloat(v));
 pg.types.setTypeParser(20, (v) => parseInt(v, 10));
+// Keep SQL dates as plain YYYY-MM-DD strings (no timezone shift).
+pg.types.setTypeParser(1082, (v) => v);
 
 export const DEFAULT_DATABASE_URL = 'postgres://casino:casino@localhost:5432/casino';
 
@@ -29,5 +31,5 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (c: pg.PoolClient) =
 }
 
 export { migrate } from './migrate';
-export { seed } from './seed';
+export { seed, syncRbac } from './seed';
 export { writeAudit, auditHash, canonicalJson, type AuditEntry } from './audit';

@@ -155,7 +155,7 @@ export default function DashboardPage() {
             </div>
           ))}
         </Card>
-        <Card title="Gateways & Cashier">
+        <Card title="Gateways & Cashier" actions={<Link href="/cashier" className="text-xs font-medium text-brand">Cashier →</Link>}>
           {d.gateways.map((g: any) => (
             <div key={g.id} className="flex items-center gap-2 py-1 text-sm">
               <Router className="h-4 w-4 text-sub" />
@@ -163,8 +163,18 @@ export default function DashboardPage() {
               <StatusBadge status={g.status} />
             </div>
           ))}
-          <div className="mt-3 rounded-lg bg-muted p-3 text-xs text-sub">
-            Cashier status arrives with the Cashier module (Phase 2). Last gateway heartbeat: {formatDateTime(d.gateways[0]?.last_heartbeat_at)}
+          <div className="mt-3 border-t border-line pt-3">
+            {!d.cashier.length && <div className="text-xs text-sub">No cashier shift open.</div>}
+            {d.cashier.map((c: any) => (
+              <div key={c.desk} className="flex items-center justify-between py-1 text-sm">
+                <span>{c.desk}<span className="ml-1 text-xs text-sub">{c.employee}</span></span>
+                <span className="font-semibold tabular-nums">{formatEuro(c.balance)}</span>
+              </div>
+            ))}
+            <div className="mt-2 flex justify-between text-xs text-sub">
+              <span>Ticket liability ({d.tickets.n})</span><span className="tabular-nums">{formatEuro(d.tickets.liability)}</span>
+            </div>
+            <div className="mt-1 text-[11px] text-sub">Last heartbeat {formatDateTime(d.gateways[0]?.last_heartbeat_at)}</div>
           </div>
         </Card>
       </div>

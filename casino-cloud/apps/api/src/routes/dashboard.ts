@@ -38,7 +38,7 @@ export async function dashboardRoutes(app: FastifyInstance) {
   app.get('/api/v1/dashboard', { preHandler: guard('dashboard.view') }, async (req) => {
     const casinoId = scopeCasino(req, q.parse(req.query).casinoId);
     const org = req.auth.orgId;
-    const [machines, financial, players, jackpots, alerts, hourly, topMachines, topPlayers, recent, gateways] = await Promise.all([
+    const [machines, financial, players, jackpots, alerts, hourly, topMachines, topPlayers, recent, gateways, cashier, tickets] = await Promise.all([
       pool.query(
         `SELECT count(*) total,
            count(*) FILTER (WHERE status NOT IN ('OFFLINE','MAINTENANCE')) online,
@@ -93,6 +93,14 @@ export async function dashboardRoutes(app: FastifyInstance) {
         [org, casinoId],
       ),
       pool.query(`SELECT id, device_id, name, status, last_heartbeat_at FROM gateways WHERE org_id = $1 AND casino_id = $2`, [org, casinoId]),
+      pool.query(
+        `SELECT d.name AS desk, d.kind, e.name AS employee, s.opened_at,
+           s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) AS balance
+         FROM cashier_sessions s JOIN cash_desks d ON d.id = s.cash_desk_id JOIN employees e ON e.id = s.employee_id
+         WHERE s.org_id = $1 AND s.casino_id = $2 AND s.status = 'OPEN' ORDER BY d.name`,
+        [org, casinoId],
+      ),
+      pool.query(`SELECT count(*) n, COALESCE(sum(amount), 0) liability FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID'`, [org, casinoId]),
     ]);
     const jp = jackpots.rows;
     return {
@@ -111,6 +119,8 @@ export async function dashboardRoutes(app: FastifyInstance) {
       topPlayers: topPlayers.rows,
       recentTransactions: recent.rows,
       gateways: gateways.rows,
+      cashier: cashier.rows,
+      tickets: tickets.rows[0],
     };
   });
 }
