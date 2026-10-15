@@ -1,5 +1,6 @@
 /** TITO ticket lifecycle. */
-export const TICKET_STATUSES = ['VALID', 'REDEEMED', 'CANCELLED', 'EXPIRED', 'VOID'] as const;
+/** HELD: reserved by a machine (validate -> hold -> commit); released on reject or timeout. */
+export const TICKET_STATUSES = ['VALID', 'HELD', 'REDEEMED', 'CANCELLED', 'EXPIRED', 'VOID'] as const;
 export type TicketStatus = (typeof TICKET_STATUSES)[number];
 
 /**

@@ -2,9 +2,9 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
+import { createEmptyDatabase, insertLegacyData } from './helpers';
 
 /** Upgrade path: a seeded database at 003 (with operational cash/ticket/gaming data) gets migration 004. */
-const base = process.env.TEST_DATABASE_ADMIN_URL ?? 'postgres://casino:casino@localhost:5432/postgres';
 const name = 'casino_upgrade3_test';
 let pool: pg.Pool;
 let db: typeof import('@m1/database');
@@ -19,29 +19,15 @@ async function fingerprint() {
 }
 
 before(async () => {
-  const admin = new pg.Client({ connectionString: base });
-  await admin.connect();
-  await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
-  await admin.query(`CREATE DATABASE ${name}`);
-  await admin.end();
-  const url = new URL(base);
-  url.pathname = `/${name}`;
-  process.env.DATABASE_URL = url.toString();
+  const url = await createEmptyDatabase(name);
+  process.env.DATABASE_URL = url;
   db = await import('@m1/database');
-  pool = db.createPool(url.toString());
+  pool = db.createPool(url);
   await db.migrate(pool, () => {}, { until: '003_player_identity.sql' });
-  await db.syncRbac(pool);
-  await db.seed(pool, () => {});
-  // Some operational activity before the ledger exists.
-  const org = (await pool.query(`SELECT id FROM organizations WHERE slug = 'm1'`)).rows[0].id;
-  const casino = (await pool.query(`SELECT id FROM casinos WHERE org_id = $1`, [org])).rows[0].id;
-  const desk = (await pool.query(`SELECT id FROM cash_desks WHERE casino_id = $1 LIMIT 1`, [casino])).rows[0].id;
-  const emp = (await pool.query(`SELECT id FROM employees WHERE email = 'cashier@example.com'`)).rows[0].id;
-  const s = (await pool.query(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,1000) RETURNING id`, [org, casino, desk, emp])).rows[0].id;
-  await pool.query(`INSERT INTO cash_transactions (org_id, casino_id, session_id, employee_id, type, amount) VALUES ($1,$2,$3,$4,'CASH_IN',250)`, [org, casino, s, emp]);
+  await insertLegacyData(pool);
   before004 = await fingerprint();
   ledger = await import('../src/services/ledger');
-  await db.migrate(pool, () => {});
+  await db.migrate(pool, () => {}, { until: '004_money_ledger.sql' });
   await db.syncMoneyModel(pool);
 });
 
@@ -65,7 +51,7 @@ test('the ledger starts empty (no backfill before 006) and consistent', async ()
 });
 
 test('the ledger works on the upgraded database', async () => {
-  const org = (await pool.query(`SELECT id FROM organizations WHERE slug = 'm1'`)).rows[0].id;
+  const org = (await pool.query(`SELECT id FROM organizations WHERE slug = 'upgrade'`)).rows[0].id;
   const casino = (await pool.query(`SELECT id FROM casinos WHERE org_id = $1`, [org])).rows[0].id;
   const machine = (await pool.query(`SELECT id FROM machines WHERE org_id = $1 LIMIT 1`, [org])).rows[0].id;
   const client = await pool.connect();

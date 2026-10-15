@@ -61,11 +61,9 @@ after(async () => {
 });
 
 describe('migration state', () => {
-  test('fresh database: 003 applied (004 ledger since Step 3), no money entity migration (005) yet', async () => {
+  test('fresh database: 003 applied (004 ledger and 005 entities since Steps 3/4), no backfill migration (006) yet', async () => {
     const applied = (await pool.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((r) => r.name);
-    assert.deepEqual(applied, ['001_init.sql', '002_phase2_cash_tickets.sql', '002a_hotfix_handpay_idempotency.sql', '003_player_identity.sql', '004_money_ledger.sql']);
-    const money = (await pool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND (table_name LIKE 'wallet%' OR table_name LIKE 'vault%' OR table_name LIKE 'handpay%')`)).rows;
-    assert.deepEqual(money, []);
+    assert.deepEqual(applied, ['001_init.sql', '002_phase2_cash_tickets.sql', '002a_hotfix_handpay_idempotency.sql', '003_player_identity.sql', '004_money_ledger.sql', '005_money_entities.sql']);
   });
 
   test('seed writes identity tables only, never the legacy columns', async () => {

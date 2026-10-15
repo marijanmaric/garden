@@ -7,6 +7,7 @@ import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
 import { requireUsableCard } from '../services/players';
+import { payHandpay } from '../services/handpays';
 import { openAlert, resolveAlerts } from '../services/alerts';
 import { addCashTx, requireOpenSession, sessionTotals } from '../services/cashier';
 
@@ -136,71 +137,55 @@ export async function cashierRoutes(app: FastifyInstance) {
     });
   });
 
-  /**
-   * Unpaid jackpot handpays: the latest JACKPOT event of every machine in jackpot state that has
-   * no handpay payment yet. A paid jackpot whose machine has not been reset yet does not show up.
-   */
+  /** Unpaid handpays (PENDING / APPROVED) of the casino, from the handpay entity. */
   app.get('/api/v1/cashier/handpays', { preHandler: guard('cash.transact') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT m.id, m.asset_no, m.game, mm.manufacturer, f.name AS floor, m.position_label,
-         jp.event_id AS jackpot_event_id, jp.amount, jp.occurred_at AS hit_at
-       FROM machines m
-       JOIN LATERAL (
-         SELECT e.event_id, e.amount, e.occurred_at FROM machine_events e
-         WHERE e.machine_id = m.id AND e.type = 'JACKPOT' ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1
-       ) jp ON true
+         h.id AS handpay_id, h.status AS handpay_status, h.source_event_id AS jackpot_event_id,
+         h.amount_cents / 100.0 AS amount, h.amount_cents, e.occurred_at AS hit_at
+       FROM handpays h
+       JOIN machines m ON m.id = h.machine_id
+       JOIN machine_events e ON e.event_id = h.source_event_id
        LEFT JOIN machine_models mm ON mm.id = m.model_id LEFT JOIN floors f ON f.id = m.floor_id
-       WHERE m.org_id = $1 AND m.casino_id = $2 AND m.jackpot_pending
-         AND NOT EXISTS (SELECT 1 FROM cash_transactions ct WHERE ct.source_event_id = jp.event_id)
-       ORDER BY m.asset_no`,
+       WHERE h.org_id = $1 AND h.casino_id = $2 AND h.status IN ('PENDING', 'APPROVED')
+       ORDER BY e.occurred_at`,
       [req.auth.orgId, casinoId],
     );
     return r.rows;
   });
 
   /**
-   * Pays one jackpot handpay from the drawer. The payment is bound to the jackpot event: the same
-   * event can be paid only once (checked here and enforced by a unique index). Payment does not
-   * depend on the machine: the reset command is queued separately and the machine may stay in
-   * jackpot state until the gateway delivers it.
+   * Pays the unpaid handpay of a machine. Bound to the handpay entity (one per jackpot event) and,
+   * through the legacy cash transaction, to the Step 1 unique index: a jackpot is paid at most once.
+   * Payment does not depend on the machine; the reset is requested separately.
    */
   app.post('/api/v1/cashier/handpays/:machineId', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
     const { playerCard, jackpotEventId } = z.object({ playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional() }).parse(req.body ?? {});
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
-      const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
-      // Locking the machine row serialises concurrent handpay attempts for this machine.
-      const m = await db.query('SELECT * FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = $3 FOR NO KEY UPDATE', [machineId, req.auth.orgId, s.casino_id]);
-      const machine = m.rows[0];
-      if (!machine) throw new HttpError(404, 'Machine not found');
-      const jp = await db.query(
-        `SELECT event_id, amount FROM machine_events WHERE machine_id = $1 AND type = 'JACKPOT' ORDER BY occurred_at DESC, id DESC LIMIT 1`,
-        [machineId],
+      const actorRef = { orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip };
+      const open = await db.query(
+        `SELECT id, source_event_id FROM handpays WHERE org_id = $1 AND machine_id = $2 AND casino_id = ANY($3) AND status IN ('PENDING', 'APPROVED')
+         ORDER BY created_at DESC LIMIT 1`,
+        [req.auth.orgId, machineId, req.auth.casinoIds],
       );
-      const jackpot = jp.rows[0];
-      if (!jackpot || !machine.jackpot_pending) throw new HttpError(409, 'No pending jackpot on this machine');
-      if (jackpotEventId && jackpotEventId !== jackpot.event_id) throw new HttpError(409, 'This jackpot is no longer the pending one');
-      if (!jackpot.amount) throw new HttpError(409, 'Jackpot amount unknown');
-      const paid = await db.query('SELECT 1 FROM cash_transactions WHERE source_event_id = $1', [jackpot.event_id]);
-      if (paid.rowCount) throw new HttpError(409, 'Handpay already paid');
-      let playerId: string | undefined;
-      if (playerCard) playerId = (await requireUsableCard(db, req.auth.orgId, playerCard)).player.id;
-      let tx;
-      try {
-        tx = await addCashTx(db, s, 'HANDPAY', jackpot.amount, { machineId, playerId, reference: `Jackpot ${machine.asset_no}`, sourceEventId: jackpot.event_id });
-      } catch (err) {
-        if ((err as { code?: string }).code === '23505') throw new HttpError(409, 'Handpay already paid');
-        throw err;
+      const hp = open.rows[0];
+      if (!hp) {
+        const last = await db.query(`SELECT status FROM handpays WHERE org_id = $1 AND machine_id = $2 ORDER BY created_at DESC LIMIT 1`, [req.auth.orgId, machineId]);
+        const alreadyPaid = ['PAID', 'MACHINE_RESET'].includes(last.rows[0]?.status);
+        throw new HttpError(409, alreadyPaid ? 'Handpay already paid' : 'No pending jackpot on this machine');
       }
-      if (machine.gateway_id)
-        await db.query(`INSERT INTO machine_commands (org_id, machine_id, gateway_id, type, payload, requested_by) VALUES ($1,$2,$3,'RESET_JACKPOT',$4,$5)`, [
-          req.auth.orgId, machineId, machine.gateway_id, { jackpotEventId: jackpot.event_id }, req.auth.sub,
-        ]);
-      await resolveAlerts(db, { orgId: req.auth.orgId, casinoId: s.casino_id, type: 'JACKPOT', machineId }, out);
-      await writeAudit(db, { ...actor(req), casinoId: s.casino_id, action: 'cash.handpay', entityType: 'machine', entityId: machineId, details: { assetNo: machine.asset_no, amount: jackpot.amount, jackpotEventId: jackpot.event_id } });
-      return { transaction: tx, amount: jackpot.amount, assetNo: machine.asset_no, jackpotEventId: jackpot.event_id };
+      if (jackpotEventId && jackpotEventId !== hp.source_event_id) {
+        const paid = await db.query(`SELECT 1 FROM handpays WHERE source_event_id = $1 AND status IN ('PAID', 'MACHINE_RESET')`, [jackpotEventId]);
+        throw new HttpError(409, paid.rowCount ? 'Handpay already paid' : 'This jackpot is no longer the pending one');
+      }
+      const playerId = playerCard ? (await requireUsableCard(db, req.auth.orgId, playerCard)).player.id : null;
+      const paid = await payHandpay(db, actorRef, hp.id, { playerId });
+      await resolveAlerts(db, { orgId: req.auth.orgId, casinoId: paid.handpay.casino_id, type: 'JACKPOT', machineId }, out);
+      const asset = (await db.query('SELECT asset_no FROM machines WHERE id = $1', [machineId])).rows[0].asset_no;
+      return { transaction: paid.transaction, amount: paid.handpay.amount_cents / 100, assetNo: asset, jackpotEventId: paid.handpay.source_event_id, handpayId: paid.handpay.id, status: paid.handpay.status };
     });
     out.forEach((msg) => bus.publish(msg));
     return result;

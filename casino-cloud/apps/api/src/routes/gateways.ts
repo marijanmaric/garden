@@ -1,12 +1,13 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { writeAudit } from '@m1/database';
+import { withTransaction, writeAudit } from '@m1/database';
 import { MACHINE_STATUSES, WIRE_EVENT_TYPES } from '@m1/shared';
 import { actor, guard, scopeCasino } from '../auth';
 import { bus } from '../bus';
 import { pool } from '../db';
 import { ingestEvents } from '../services/ingest';
 import { authenticateGateway, heartbeat } from '../services/gateway';
+import { confirmHandpayReset } from '../services/handpays';
 
 const eventSchema = z.object({
   eventId: z.string().uuid(),
@@ -48,10 +49,16 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const gw = await gatewayAuth(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z.object({ success: z.boolean(), message: z.string().max(500).optional() }).parse(req.body);
-    await pool.query(
-      `UPDATE machine_commands SET status = $3, result_message = $4, completed_at = now() WHERE id = $1 AND gateway_id = $2`,
-      [id, gw.id, body.success ? 'SUCCEEDED' : 'FAILED', body.message ?? null],
-    );
+    await withTransaction(pool, async (db) => {
+      const r = await db.query(
+        `UPDATE machine_commands SET status = $3, result_message = $4, completed_at = now() WHERE id = $1 AND gateway_id = $2 RETURNING type, machine_id, handpay_id`,
+        [id, gw.id, body.success ? 'SUCCEEDED' : 'FAILED', body.message ?? null],
+      );
+      const cmd = r.rows[0];
+      // A confirmed handpay reset completes the handpay (PAID -> MACHINE_RESET).
+      if (cmd && body.success && cmd.type === 'RESET_JACKPOT' && cmd.handpay_id)
+        await confirmHandpayReset(db, { orgId: gw.orgId, machineId: cmd.machine_id, handpayId: cmd.handpay_id });
+    });
     return { ok: true };
   });
 
