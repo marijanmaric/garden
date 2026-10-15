@@ -157,6 +157,23 @@ every money transaction sums to exactly 0 (checked by the database at COMMIT).
 - Existing cashier/ticket/handpay flows still write their legacy tables; they move onto the ledger after the money
   entities (005) and opening balances (006).
 
+### Money entities (migration 005)
+
+Operational state of each money rail. Balances never live on these tables; they come from the ledger.
+
+- **Wallet**: one per player, organisation-level, ACTIVE / BLOCKED (only cash-out to wallet) / CLOSED (terminal, needs
+  zero balance). Balances via the `wallet_balances` view over the ledger.
+- **Cashless session** (player, wallet, card, machine) and **wallet transfer** to/from a machine:
+  REQUESTED -> SENT -> CONFIRMED, or FAILED / EXPIRED. REQUESTED only reserves funds; money moves on CONFIRMED.
+- **Handpay**: PENDING -> APPROVED -> PAID -> MACHINE_RESET, or VOIDED before payment. Payment and machine reset are
+  independent; one handpay per jackpot event; approver and payer must differ.
+- **Vault**: vault per casino, vault sessions, append-only cash counts, cashier sessions linked to a vault session.
+- **Approvals**: four-eyes (requester != decider), limits per casino in `casino_money_settings` (NULL = no approval).
+- **Tickets**: HOLD on scan (hold id, expiry, machine) before redemption, released automatically when stale.
+- Foreign keys point one way (ledger -> entity, command -> entity), so there are no circular references.
+- Upgrade keeps all history and invents no balances: wallets for non-closed players, a Main Vault per casino,
+  handpay entities for paid and currently pending jackpots only. Ledger stays empty until 006.
+
 ### Accounting definitions
 
 | Metric | Definition |

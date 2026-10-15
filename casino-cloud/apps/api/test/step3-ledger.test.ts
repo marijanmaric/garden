@@ -22,13 +22,29 @@ let machineCode: string;
 let gw: { id: string; orgId: string; casinoId: string; deviceId: string };
 let cashierId: string;
 let cashierToken: string;
+let walletPC1: string;
+const walletPlayers = new Map<string, string>();
 const system = { type: 'SYSTEM' as const, name: 'test' };
 
 const tx = <T>(fn: (db: PoolClient) => Promise<T>) => withTransaction(pool, fn);
 const key = (p = 'k') => `${p}-${randomUUID()}`;
 
+/** A new player with a wallet (migration 005: wallets are real entities now). */
+async function newWallet() {
+  const p = (await pool.query('INSERT INTO players (org_id) VALUES ($1) RETURNING id', [orgId])).rows[0].id;
+  const w = (await pool.query('INSERT INTO wallets (org_id, player_id) VALUES ($1,$2) RETURNING id', [orgId, p])).rows[0].id;
+  walletPlayers.set(w, p);
+  return w as string;
+}
+
+/** Player / card references consistent with the wallet (the ledger checks this since 005). */
+function withOwner<T extends { walletId?: string; playerId?: string; cardId?: string }>(ctx: T): T {
+  if (!ctx.walletId || !walletPlayers.has(ctx.walletId)) return ctx;
+  return { ...ctx, playerId: walletPlayers.get(ctx.walletId), cardId: ctx.walletId === walletPC1 ? ctx.cardId : undefined };
+}
+
 function run(type: Exclude<MoneyTransactionType, 'REVERSAL'>, ctx: Omit<Partial<MoneyContext>, 'amountCents'> & { amountCents: number }, dedupeKey = key(), extra: Record<string, unknown> = {}) {
-  return tx((db) => ledger.executeMoneyTransaction(db, { orgId, type, ctx: { casinoId: casinoA, ...ctx, amountCents: ctx.amountCents as never }, dedupeKey, actor: system, ...extra }));
+  return tx((db) => ledger.executeMoneyTransaction(db, { orgId, type, ctx: withOwner({ casinoId: casinoA, ...ctx, amountCents: ctx.amountCents as never }), dedupeKey, actor: system, ...extra }));
 }
 
 const wallet = (walletId: string) => ({ kind: 'WALLET_AVAILABLE' as const, walletId });
@@ -45,7 +61,7 @@ async function fundDrawer(casinoId: string, cashierSessionId: string, amountCent
 async function deposit(walletId: string, amountCents: number, casinoId = casinoA, cashierSessionId = sessionA) {
   return tx((db) => ledger.executeMoneyTransaction(db, {
     orgId, type: 'CASH_DEPOSIT', dedupeKey: key('dep'), actor: system,
-    ctx: { casinoId, amountCents: cents(amountCents), playerId, walletId, cardId, cashierSessionId },
+    ctx: withOwner({ casinoId, amountCents: cents(amountCents), playerId, walletId, cardId, cashierSessionId }),
   }));
 }
 
@@ -88,6 +104,8 @@ before(async () => {
   const card = (await pool.query(`SELECT id, player_id FROM player_cards WHERE org_id = $1 AND card_number = 'PC-00001'`, [orgId])).rows[0];
   cardId = card.id;
   playerId = card.player_id;
+  walletPC1 = (await pool.query('SELECT id FROM wallets WHERE player_id = $1', [playerId])).rows[0].id;
+  walletPlayers.set(walletPC1, playerId);
   const m = (await pool.query(`SELECT id, machine_code FROM machines WHERE org_id = $1 AND asset_no = 'M003'`, [orgId])).rows[0];
   machineId = m.id;
   machineCode = m.machine_code;
@@ -103,8 +121,8 @@ after(async () => {
 
 describe('model', () => {
   test('migration 004 applied; kinds and types mirror the shared model (no second matrix)', async () => {
-    const applied = (await pool.query(`SELECT name FROM schema_migrations WHERE name LIKE '004%' OR name LIKE '005%'`)).rows.map((r) => r.name);
-    assert.deepEqual(applied, ['004_money_ledger.sql']);
+    const applied = (await pool.query(`SELECT name FROM schema_migrations WHERE name >= '004'`)).rows.map((r) => r.name).sort();
+    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql']);
     const types = (await pool.query('SELECT code FROM money_transaction_types ORDER BY code')).rows.map((r) => r.code);
     assert.deepEqual(types, [...MONEY_TRANSACTION_TYPES].sort());
     const kinds = (await pool.query('SELECT code FROM ledger_account_kinds ORDER BY code')).rows.map((r) => r.code);
@@ -131,7 +149,7 @@ describe('model', () => {
 
 describe('posting', () => {
   test('a balanced transaction posts entries, balances and references', async () => {
-    const walletId = randomUUID();
+    const walletId = walletPC1;
     const r = await deposit(walletId, 10_000);
     assert.equal(r.entries.length, 2);
     assert.equal(r.entries.reduce((s, e) => s + e.amount_cents, 0), 0);
@@ -146,9 +164,10 @@ describe('posting', () => {
 
   test('zero, negative and fractional amounts are rejected', async () => {
     for (const amountCents of [0, -500, 1.5]) {
-      await assert.rejects(run('CASH_DEPOSIT', { amountCents, playerId, walletId: randomUUID(), cashierSessionId: sessionA }), (e: Error & { statusCode?: number }) => e.statusCode === 400);
+      await assert.rejects(run('CASH_DEPOSIT', { amountCents, playerId, walletId: await newWallet(), cashierSessionId: sessionA }), (e: Error & { statusCode?: number }) => e.statusCode === 400);
     }
-    await assert.rejects(run('CASH_DEPOSIT', { amountCents: 100, walletId: randomUUID(), cashierSessionId: sessionA }), /player required/);
+    const w = await newWallet();
+    await assert.rejects(tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_DEPOSIT', dedupeKey: key(), actor: system, ctx: { casinoId: casinoA, amountCents: cents(100), walletId: w, cashierSessionId: sessionA } })), /player required/);
   });
 
   test('the database rejects unbalanced, empty, invalid and late entries', async () => {
@@ -171,7 +190,7 @@ describe('posting', () => {
     }), /check constraint/);
     await assert.rejects(tx((db) => header(db, -100)), /must be positive/);
     // entries added later to an already committed transaction
-    const committed = (await deposit(randomUUID(), 500)).transaction.id;
+    const committed = (await deposit(await newWallet(), 500)).transaction.id;
     await assert.rejects(tx((db) => db.query('INSERT INTO ledger_entries (transaction_id, account_id, amount_cents, org_id) VALUES ($1,$2,1,$3)', [committed, equity, orgId])), /only be added in the transaction/);
     const counts = await moneyCount();
     const unbalanced = await ledger.checkLedgerInvariants(pool, orgId);
@@ -179,11 +198,11 @@ describe('posting', () => {
   });
 
   test('a failure rolls back the whole transaction: no entries, balances or audit left behind', async () => {
-    const walletId = randomUUID();
+    const walletId = await newWallet();
     const before = await moneyCount();
     let txId = '';
     await assert.rejects(tx(async (db) => {
-      txId = (await ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_DEPOSIT', dedupeKey: key(), actor: system, ctx: { casinoId: casinoA, amountCents: cents(700), playerId, walletId, cashierSessionId: sessionA } })).transaction.id;
+      txId = (await ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_DEPOSIT', dedupeKey: key(), actor: system, ctx: withOwner({ casinoId: casinoA, amountCents: cents(700), playerId, walletId, cashierSessionId: sessionA }) })).transaction.id;
       throw new Error('boom after posting');
     }), /boom/);
     assert.deepEqual(await moneyCount(), before);
@@ -194,7 +213,7 @@ describe('posting', () => {
 
 describe('immutability and reversals', () => {
   test('money transactions, entries, accounts and balances cannot be changed directly', async () => {
-    const r = await deposit(randomUUID(), 300);
+    const r = await deposit(await newWallet(), 300);
     await assert.rejects(pool.query('UPDATE money_transactions SET amount_cents = 1 WHERE id = $1', [r.transaction.id]), /append-only/);
     await assert.rejects(pool.query('DELETE FROM money_transactions WHERE id = $1', [r.transaction.id]), /append-only/);
     await assert.rejects(pool.query('UPDATE ledger_entries SET amount_cents = 1 WHERE transaction_id = $1', [r.transaction.id]), /append-only/);
@@ -204,7 +223,7 @@ describe('immutability and reversals', () => {
   });
 
   test('a reversal is a new balanced transaction; the original stays unchanged', async () => {
-    const walletId = randomUUID();
+    const walletId = await newWallet();
     const original = await deposit(walletId, 2_500);
     const snapshot = (await pool.query('SELECT * FROM money_transactions WHERE id = $1', [original.transaction.id])).rows[0];
     const k = key('rev');
@@ -223,12 +242,12 @@ describe('immutability and reversals', () => {
   });
 
   test('reversal rules from the matrix are enforced and reversals respect balances', async () => {
-    const walletId = randomUUID();
-    await deposit(walletId, 1_000);
-    const reserve = await run('WALLET_TO_MACHINE_RESERVE', { amountCents: 400, playerId, walletId, machineId, transferId: randomUUID() });
-    await assert.rejects(tx((db) => ledger.reverseMoneyTransaction(db, { orgId, transactionId: reserve.transaction.id, dedupeKey: key(), actor: system, reason: 'nope' })), /undone with WALLET_TO_MACHINE_RELEASE/);
+    const vaultId = (await pool.query('SELECT id FROM vaults WHERE casino_id = $1', [casinoA])).rows[0].id;
+    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'OPENING_BALANCE', dedupeKey: key('vault'), actor: system, ctx: { casinoId: casinoA, amountCents: cents(50_000), debit: { kind: 'VAULT', vaultId }, credit: { kind: 'OPENING_EQUITY' } } }));
+    const fill = await run('VAULT_FILL', { amountCents: 400, vaultId, cashierSessionId: sessionA });
+    await assert.rejects(tx((db) => ledger.reverseMoneyTransaction(db, { orgId, transactionId: fill.transaction.id, dedupeKey: key(), actor: system, reason: 'nope' })), /undone with VAULT_DROP/);
     // Deposit, spend it, then try to reverse the deposit: the wallet would go negative.
-    const w2 = randomUUID();
+    const w2 = await newWallet();
     const dep = await deposit(w2, 500);
     await run('CASH_WITHDRAWAL', { amountCents: 500, playerId, walletId: w2, cashierSessionId: sessionA });
     await assert.rejects(tx((db) => ledger.reverseMoneyTransaction(db, { orgId, transactionId: dep.transaction.id, dedupeKey: key(), actor: system, reason: 'too late' })), /Insufficient balance on WALLET_AVAILABLE/);
@@ -237,13 +256,13 @@ describe('immutability and reversals', () => {
 
 describe('scopes', () => {
   test('a wallet is organisation-level: deposit in casino A, withdraw in casino B, one account', async () => {
-    const walletId = randomUUID();
+    const walletId = await newWallet();
     await deposit(walletId, 6_000, casinoA, sessionA);
-    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_WITHDRAWAL', dedupeKey: key(), actor: system, ctx: { casinoId: casinoB, amountCents: cents(4_000), playerId, walletId, cashierSessionId: sessionB } }));
+    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_WITHDRAWAL', dedupeKey: key(), actor: system, ctx: withOwner({ casinoId: casinoB, amountCents: cents(4_000), playerId, walletId, cashierSessionId: sessionB }) }));
     const accounts = (await pool.query(`SELECT casino_id FROM ledger_accounts WHERE wallet_id = $1`, [walletId])).rows;
     assert.deepEqual(accounts, [{ casino_id: null }]);
     assert.equal(await balance(wallet(walletId)), 2_000);
-    await assert.rejects(pool.query(`INSERT INTO ledger_accounts (org_id, kind, casino_id, wallet_id) VALUES ($1, 'WALLET_AVAILABLE', $2, $3)`, [orgId, casinoA, randomUUID()]), /must not have a casino/);
+    await assert.rejects(pool.query(`INSERT INTO ledger_accounts (org_id, kind, casino_id, wallet_id) VALUES ($1, 'WALLET_AVAILABLE', $2, $3)`, [orgId, casinoA, walletId]), /must not have a casino/);
   });
 
   test('physical money is casino-level and cannot be moved through another casino', async () => {
@@ -252,7 +271,7 @@ describe('scopes', () => {
     await assert.rejects(pool.query(`INSERT INTO ledger_accounts (org_id, kind, cashier_session_id) VALUES ($1, 'DRAWER', $2)`, [orgId, sessionA]), /needs a casino/);
     await assert.rejects(pool.query(`INSERT INTO ledger_accounts (org_id, kind, casino_id, cashier_session_id) VALUES ($1, 'DRAWER', $2, $3)`, [orgId, casinoB, sessionA]), /does not belong to this casino/);
     // Service: a casino A transaction with a casino B drawer session is rejected by the entry trigger.
-    await assert.rejects(run('CASH_DEPOSIT', { amountCents: 100, playerId, walletId: randomUUID(), cashierSessionId: sessionB }), /does not belong to this casino|another casino/);
+    await assert.rejects(run('CASH_DEPOSIT', { amountCents: 100, playerId, walletId: await newWallet(), cashierSessionId: sessionB }), /does not belong to this casino|another casino/);
   });
 });
 
@@ -285,7 +304,7 @@ describe('MACHINE_CREDIT: the bridge between money and gaming', () => {
 describe('protection against overdraft and duplicates', () => {
   test('insufficient balance is refused and leaves no trace', async () => {
     const before = await moneyCount();
-    await assert.rejects(run('CASH_WITHDRAWAL', { amountCents: 100, playerId, walletId: randomUUID(), cashierSessionId: sessionA }), /Insufficient balance on WALLET_AVAILABLE/);
+    await assert.rejects(run('CASH_WITHDRAWAL', { amountCents: 100, playerId, walletId: await newWallet(), cashierSessionId: sessionA }), /Insufficient balance on WALLET_AVAILABLE/);
     await assert.rejects(run('TITO_REDEEM_MACHINE', { amountCents: 100, machineId, ticketId: (await pool.query(`SELECT id FROM tickets LIMIT 1`)).rows[0].id }), /Insufficient balance on TICKET_LIABILITY/);
     const emptyDrawerSession = sessionB;
     const drawerBalance = await balance(drawer(casinoB, emptyDrawerSession));
@@ -294,7 +313,7 @@ describe('protection against overdraft and duplicates', () => {
   });
 
   test('concurrent withdrawals can never overdraw a wallet (double spend)', async () => {
-    const walletId = randomUUID();
+    const walletId = await newWallet();
     await deposit(walletId, 10_000);
     const attempts = await Promise.allSettled(Array.from({ length: 8 }, () => run('CASH_WITHDRAWAL', { amountCents: 3_000, playerId, walletId, cashierSessionId: sessionA })));
     const ok = attempts.filter((a) => a.status === 'fulfilled').length;
@@ -304,7 +323,7 @@ describe('protection against overdraft and duplicates', () => {
   });
 
   test('the same dedupe key moves money once, even concurrently; a different request with it is refused', async () => {
-    const walletId = randomUUID();
+    const walletId = await newWallet();
     const k = key('same');
     const results = await Promise.all(Array.from({ length: 5 }, () => run('CASH_DEPOSIT', { amountCents: 1_500, playerId, walletId, cashierSessionId: sessionA }, k)));
     assert.equal(new Set(results.map((r) => r.transaction.id)).size, 1);
@@ -314,8 +333,8 @@ describe('protection against overdraft and duplicates', () => {
   });
 
   test('HTTP idempotency key and ledger dedupe work together', async () => {
-    const walletId = randomUUID();
-    const payload = { type: 'CASH_DEPOSIT', ctx: { casinoId: casinoA, amountCents: 2_000, playerId, walletId, cardId, cashierSessionId: sessionA } };
+    const walletId = await newWallet();
+    const payload = { type: 'CASH_DEPOSIT', ctx: withOwner({ casinoId: casinoA, amountCents: 2_000, playerId, walletId, cardId, cashierSessionId: sessionA }) };
     const send = (k: string, p: unknown = payload) => app.inject({ method: 'POST', url: '/test/money', payload: p as object, headers: { authorization: `Bearer ${cashierToken}`, 'idempotency-key': k } });
     const k = key('http');
     const results = await Promise.all([send(k), send(k), send(k)]);

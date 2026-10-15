@@ -130,8 +130,11 @@ export async function createPlayer(db: Db, a: Actor, input: NewPlayer) {
     a.orgId, player.id, a.employeeId ?? null,
   ]);
   await audit(db, a, 'player.registered', 'player', player.id, { playerNo: player.player_no });
+  // Every registered player gets an (organisation-level) wallet; its balance lives in the ledger.
+  const wallet = (await db.query('INSERT INTO wallets (org_id, player_id, created_by) VALUES ($1,$2,$3) RETURNING id, status', [a.orgId, player.id, a.employeeId ?? null])).rows[0];
+  await db.query(`INSERT INTO wallet_events (org_id, wallet_id, action, employee_id) VALUES ($1,$2,'CREATED',$3)`, [a.orgId, wallet.id, a.employeeId ?? null]);
   const card = input.card ? await issueCard(db, a, player.id, input.card) : null;
-  return { player, card };
+  return { player, card, wallet };
 }
 
 /** Issues a card. A player can hold at most one ACTIVE card; use replaceCard to swap cards. */

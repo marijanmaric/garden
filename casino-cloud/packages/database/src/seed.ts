@@ -82,6 +82,7 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
         [org],
       )
     ).rows[0].id;
+    await seedMoneyEntities(client, org, casino);
     const enabledByDefault = new Set(['machines', 'floor', 'accounting', 'tickets', 'cash', 'cashier', 'reporting', 'loyalty', 'jackpots']);
     for (const m of MODULES)
       await client.query('INSERT INTO casino_modules (org_id, casino_id, module_key, enabled) VALUES ($1,$2,$3,$4)', [
@@ -156,6 +157,8 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
         org, card.rows[0].id, playerId,
       ]);
       await client.query(`INSERT INTO player_status_history (org_id, player_id, from_status, to_status, reason) VALUES ($1,$2,NULL,'ACTIVE','seed')`, [org, playerId]);
+      const wallet = await client.query('INSERT INTO wallets (org_id, player_id) VALUES ($1,$2) RETURNING id', [org, playerId]);
+      await client.query(`INSERT INTO wallet_events (org_id, wallet_id, action, reason) VALUES ($1,$2,'CREATED','seed')`, [org, wallet.rows[0].id]);
     }
 
     // Jackpots (configuration only in Phase 1; the engine follows in Phase 4)
@@ -255,6 +258,7 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
       await client.query('INSERT INTO casino_modules (org_id, casino_id, module_key, enabled) VALUES ($1,$2,$3,$4)', [orgB, casinoB, m.key, !!m.core || m.key === 'floor']);
     await client.query('INSERT INTO floors (org_id, casino_id, name) VALUES ($1,$2,$3)', [orgB, casinoB, 'Ground Floor']);
     await seedCashDesks(client, orgB, casinoB);
+    await seedMoneyEntities(client, orgB, casinoB);
     const eB = await client.query(`INSERT INTO employees (org_id, email, name, password_hash, role) VALUES ($1,'admin@riverside.example','Riverside Admin',$2,'SUPER_ADMIN') RETURNING id`, [orgB, pwHash]);
     await client.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3)', [eB.rows[0].id, casinoB, orgB]);
 
@@ -295,4 +299,10 @@ export async function syncRbac(pool: pg.Pool): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+/** Per-casino money settings (no approval limits = no approval required) and the main vault. */
+async function seedMoneyEntities(client: pg.PoolClient, orgId: string, casinoId: string) {
+  await client.query('INSERT INTO casino_money_settings (casino_id, org_id) VALUES ($1,$2)', [casinoId, orgId]);
+  await client.query(`INSERT INTO vaults (org_id, casino_id, name) VALUES ($1,$2,'Main Vault')`, [orgId, casinoId]);
 }

@@ -4,6 +4,7 @@ import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { openAlert, resolveAlerts } from './alerts';
 import { cardRejectionMessage, resolveCard } from './players';
+import { confirmHandpayReset, ensureHandpayForJackpot } from './handpays';
 
 export interface GatewayIdentity {
   id: string;
@@ -150,11 +151,17 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       await db.query('UPDATE machine_meters SET jackpot = jackpot + $2, jackpot_wins = jackpot_wins + 1, updated_at = now() WHERE machine_id = $1', [m.id, amount ?? 0]);
       if (isNewer) flags.jackpotPending = true;
       await openAlert(db, { ...ctx, type: 'JACKPOT', severity: 'INFO', message: `Jackpot €${(amount ?? 0).toFixed(2)} on ${label}, handpay required` }, out);
+      // One handpay entity per jackpot event. The decimal amount from the machine is converted to
+      // integer cents once, here at the boundary.
+      if ((amount ?? 0) > 0)
+        await ensureHandpayForJackpot(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) });
       break;
     }
     case 'JACKPOT_RESET':
       if (isNewer) flags.jackpotPending = false;
       await resolveAlerts(db, { ...ctx, type: 'JACKPOT' }, out);
+      // Payment and reset are independent: a paid handpay becomes MACHINE_RESET, an unpaid one stays payable.
+      await confirmHandpayReset(db, { orgId: gw.orgId, machineId: m.id });
       break;
     case 'MACHINE_ERROR':
       if (isNewer) flags.errorCode = ev.errorCode ?? 'UNKNOWN';
