@@ -86,7 +86,13 @@ export async function dashboardRoutes(app: FastifyInstance) {
          WHERE m.org_id = $1 AND m.casino_id = $2 GROUP BY m.id, mm.manufacturer ORDER BY coin_in DESC LIMIT 5`,
         [org, casinoId],
       ),
-      pool.query(`SELECT id, card_number, first_name, last_name, tier, floor(points) points, total_coin_in FROM players WHERE org_id = $1 ORDER BY total_coin_in DESC LIMIT 5`, [org]),
+      pool.query(
+        `SELECT p.id, p.player_no, c.card_number, pr.first_name, pr.last_name, p.tier, floor(p.points) points, p.total_coin_in
+         FROM players p LEFT JOIN player_profiles pr ON pr.player_id = p.id
+         LEFT JOIN player_cards c ON c.player_id = p.id AND c.status = 'ACTIVE'
+         WHERE p.org_id = $1 ORDER BY p.total_coin_in DESC LIMIT 5`,
+        [org],
+      ),
       pool.query(
         `SELECT t.id, t.type, t.amount, t.occurred_at, m.asset_no FROM gaming_transactions t LEFT JOIN machines m ON m.id = t.machine_id
          WHERE t.org_id = $1 AND t.casino_id = $2 AND t.type <> 'WAGER' ORDER BY t.id DESC LIMIT 10`,

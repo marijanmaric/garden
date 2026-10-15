@@ -4,3 +4,5 @@ export * from './rbac';
 export * from './modules';
 export * from './accounting';
 export * from './cash';
+export * from './player';
+export * from './money';

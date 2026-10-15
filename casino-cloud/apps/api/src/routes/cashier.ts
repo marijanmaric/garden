@@ -6,6 +6,7 @@ import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
+import { requireUsableCard } from '../services/players';
 import { openAlert, resolveAlerts } from '../services/alerts';
 import { addCashTx, requireOpenSession, sessionTotals } from '../services/cashier';
 
@@ -126,9 +127,8 @@ export async function cashierRoutes(app: FastifyInstance) {
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       let playerId: string | undefined;
       if (body.playerCard) {
-        const p = await db.query('SELECT id FROM players WHERE org_id = $1 AND card_number = $2', [req.auth.orgId, body.playerCard]);
-        if (!p.rowCount) throw new HttpError(404, 'Unknown player card');
-        playerId = p.rows[0].id;
+        // Reference only: the card identifies the player for this cash movement; it holds no money.
+        playerId = (await requireUsableCard(db, req.auth.orgId, body.playerCard)).player.id;
       }
       const tx = await addCashTx(db, s, body.type, body.amount, { reference: body.reference, playerId });
       await writeAudit(db, { ...actor(req), casinoId: s.casino_id, action: `cash.${body.type.toLowerCase()}`, entityType: 'cash_transaction', entityId: String(tx.id), details: body });
@@ -186,10 +186,7 @@ export async function cashierRoutes(app: FastifyInstance) {
       const paid = await db.query('SELECT 1 FROM cash_transactions WHERE source_event_id = $1', [jackpot.event_id]);
       if (paid.rowCount) throw new HttpError(409, 'Handpay already paid');
       let playerId: string | undefined;
-      if (playerCard) {
-        const p = await db.query('SELECT id FROM players WHERE org_id = $1 AND card_number = $2', [req.auth.orgId, playerCard]);
-        playerId = p.rows[0]?.id;
-      }
+      if (playerCard) playerId = (await requireUsableCard(db, req.auth.orgId, playerCard)).player.id;
       let tx;
       try {
         tx = await addCashTx(db, s, 'HANDPAY', jackpot.amount, { machineId, playerId, reference: `Jackpot ${machine.asset_no}`, sourceEventId: jackpot.event_id });

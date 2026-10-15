@@ -11,13 +11,16 @@ const MACHINE_SELECT = `
     m.status, m.error_code, m.door_open, m.cashbox_open, m.printer_error, m.disabled, m.maintenance, m.adapter_key,
     m.last_communication_at, m.last_error, m.last_error_at, m.floor_id, m.casino_id, m.gateway_id,
     f.name AS floor_name, z.name AS zone_name, mm.manufacturer, mm.name AS model,
-    p.card_number AS player_card, p.first_name || ' ' || p.last_name AS player_name, p.tier AS player_tier,
+    pc.card_number AS player_card, nullif(concat_ws(' ', pr.first_name, pr.last_name), '') AS player_name, p.tier AS player_tier,
     me.coin_in, me.coin_out, me.jackpot, me.games_played, me.games_won, me.jackpot_wins, me.tickets_in, me.tickets_out, me.cash_in, me.cash_out
   FROM machines m
   LEFT JOIN floors f ON f.id = m.floor_id
   LEFT JOIN zones z ON z.id = m.zone_id
   LEFT JOIN machine_models mm ON mm.id = m.model_id
   LEFT JOIN players p ON p.id = m.current_player_id
+  LEFT JOIN player_profiles pr ON pr.player_id = p.id
+  LEFT JOIN player_sessions ps ON ps.id = m.current_session_id
+  LEFT JOIN player_cards pc ON pc.id = ps.card_id
   LEFT JOIN machine_meters me ON me.machine_id = m.id`;
 
 async function loadMachine(orgId: string, casinoIds: string[], id: string) {

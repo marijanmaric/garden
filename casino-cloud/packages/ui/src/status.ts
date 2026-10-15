@@ -22,4 +22,4 @@ export const SEVERITY_BADGE: Record<string, string> = {
 };
 
 /** Event types shown with a monetary amount in live feeds. */
-export const MONEY_EVENTS = new Set(['GAME_PLAYED', 'COIN_IN', 'COIN_OUT', 'TICKET_IN', 'TICKET_OUT', 'JACKPOT']);
+export const MONEY_EVENTS = new Set(['GAME_PLAYED', 'CASH_IN', 'CASH_OUT', 'TITO_IN', 'TITO_OUT', 'CASHLESS_IN', 'CASHLESS_OUT', 'JACKPOT']);

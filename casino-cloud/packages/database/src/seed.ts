@@ -135,15 +135,27 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
       }
     }
 
-    // Players
+    // Players: identity (players), personal data (player_profiles) and card identifiers (player_cards)
+    // are separate. Legacy players.card_number / first_name / last_name are never written.
     for (let i = 1; i <= 60; i++) {
       const tier = TIERS[(i * 7) % TIERS.length];
-      await client.query(
-        `INSERT INTO players (org_id, card_number, first_name, last_name, tier, points, total_coin_in, visits, last_visit_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() - ($9 || ' hours')::interval)`,
-        [org, `PC-${String(i).padStart(5, '0')}`, FIRST[i % FIRST.length], LAST[(i * 5) % LAST.length], tier,
-          5000 + ((i * 7331) % 60000), 2000 + ((i * 3797) % 40000), 3 + (i % 40), i * 3],
+      const player = await client.query(
+        `INSERT INTO players (org_id, home_casino_id, tier, points, total_coin_in, visits, last_visit_at)
+         VALUES ($1,$2,$3,$4,$5,$6, now() - ($7 || ' hours')::interval) RETURNING id`,
+        [org, casino, tier, 5000 + ((i * 7331) % 60000), 2000 + ((i * 3797) % 40000), 3 + (i % 40), i * 3],
       );
+      const playerId = player.rows[0].id;
+      await client.query('INSERT INTO player_profiles (player_id, org_id, first_name, last_name) VALUES ($1,$2,$3,$4)', [
+        playerId, org, FIRST[i % FIRST.length], LAST[(i * 5) % LAST.length],
+      ]);
+      const card = await client.query(
+        `INSERT INTO player_cards (org_id, player_id, card_number, card_type) VALUES ($1,$2,$3,'MAGSTRIPE') RETURNING id`,
+        [org, playerId, `PC-${String(i).padStart(5, '0')}`],
+      );
+      await client.query(`INSERT INTO player_card_events (org_id, card_id, player_id, action, details) VALUES ($1,$2,$3,'ISSUED','{"source":"seed"}')`, [
+        org, card.rows[0].id, playerId,
+      ]);
+      await client.query(`INSERT INTO player_status_history (org_id, player_id, from_status, to_status, reason) VALUES ($1,$2,NULL,'ACTIVE','seed')`, [org, playerId]);
     }
 
     // Jackpots (configuration only in Phase 1; the engine follows in Phase 4)

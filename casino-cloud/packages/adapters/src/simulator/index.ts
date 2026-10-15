@@ -30,7 +30,7 @@ interface Pending {
 }
 
 /**
- * Tickets printed by any simulated machine. Players carry them to another machine (TICKET_IN)
+ * Tickets printed by any simulated machine. Players carry them to another machine (TITO_IN)
  * or to the cashier, just like real TITO tickets.
  */
 const printedTickets: Array<{ barcode: string; amount: number }> = [];
@@ -168,13 +168,13 @@ export class SimulatorAdapter implements GamingMachineAdapter {
   private cashIn() {
     const amount = this.pick(NOTES);
     this.meters.cashIn += amount;
-    this.emit('COIN_IN', { amount });
+    this.emit('CASH_IN', { amount });
   }
 
   private coinOut() {
     const amount = round2(1 + this.rnd() * 20);
     this.meters.cashOut = round2(this.meters.cashOut + amount);
-    this.emit('COIN_OUT', { amount });
+    this.emit('CASH_OUT', { amount });
   }
 
   private ticketIn() {
@@ -182,7 +182,7 @@ export class SimulatorAdapter implements GamingMachineAdapter {
     if (printedTickets.length < 4) return this.cashIn();
     const [ticket] = printedTickets.splice(Math.floor(this.rnd() * printedTickets.length), 1);
     this.meters.ticketsIn = round2(this.meters.ticketsIn + ticket.amount);
-    this.emit('TICKET_IN', { amount: ticket.amount, ticketBarcode: ticket.barcode });
+    this.emit('TITO_IN', { amount: ticket.amount, ticketBarcode: ticket.barcode });
   }
 
   private ticketOut() {
@@ -193,7 +193,7 @@ export class SimulatorAdapter implements GamingMachineAdapter {
       printedTickets.push({ barcode, amount });
       if (printedTickets.length > MAX_POOL) printedTickets.shift();
     }
-    this.emit('TICKET_OUT', { amount, ticketBarcode: barcode });
+    this.emit('TITO_OUT', { amount, ticketBarcode: barcode });
   }
 
   private jackpot() {

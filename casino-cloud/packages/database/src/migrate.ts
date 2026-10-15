@@ -5,8 +5,11 @@ import type pg from 'pg';
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 
-/** Applies pending SQL migrations in filename order. Safe to run on every start. */
-export async function migrate(pool: pg.Pool, log = console.log): Promise<void> {
+/**
+ * Applies pending SQL migrations in filename order. Safe to run on every start.
+ * `until` (tests only) stops after the named migration file, to test upgrade paths.
+ */
+export async function migrate(pool: pg.Pool, log = console.log, opts: { until?: string } = {}): Promise<void> {
   await pool.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
   const client = await pool.connect();
   try {
@@ -15,6 +18,7 @@ export async function migrate(pool: pg.Pool, log = console.log): Promise<void> {
     const applied = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
     const files = (await readdir(MIGRATIONS_DIR)).filter((f) => f.endsWith('.sql')).sort();
     for (const file of files) {
+      if (opts.until && file > opts.until) break;
       if (applied.has(file)) continue;
       const sql = await readFile(join(MIGRATIONS_DIR, file), 'utf8');
       await client.query('BEGIN');

@@ -1,8 +1,9 @@
 import { withTransaction, writeAudit, type PoolClient } from '@m1/database';
-import { deriveMachineStatus, type MachineEvent, type MachineFlags, type MachineStatus } from '@m1/shared';
+import { deriveMachineStatus, normalizeEvent, playerCan, type MachineEvent, type MachineFlags, type MachineStatus, type WireMachineEvent } from '@m1/shared';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { openAlert, resolveAlerts } from './alerts';
+import { cardRejectionMessage, resolveCard } from './players';
 
 export interface GatewayIdentity {
   id: string;
@@ -19,27 +20,28 @@ export interface IngestResult {
 
 /** Maps a financial event onto the ledger entry type it produces. */
 const LEDGER_MAP: Partial<Record<MachineEvent['type'], string>> = {
-  COIN_IN: 'CASH_IN',
-  COIN_OUT: 'CASH_OUT',
-  TICKET_IN: 'TICKET_IN',
-  TICKET_OUT: 'TICKET_OUT',
+  CASH_IN: 'CASH_IN',
+  CASH_OUT: 'CASH_OUT',
+  TITO_IN: 'TICKET_IN',
+  TITO_OUT: 'TICKET_OUT',
   JACKPOT: 'JACKPOT',
 };
 
 const METER_MAP: Partial<Record<MachineEvent['type'], string>> = {
-  COIN_IN: 'cash_in',
-  COIN_OUT: 'cash_out',
-  TICKET_IN: 'tickets_in',
-  TICKET_OUT: 'tickets_out',
+  CASH_IN: 'cash_in',
+  CASH_OUT: 'cash_out',
+  TITO_IN: 'tickets_in',
+  TITO_OUT: 'tickets_out',
 };
 
 /**
  * Ingests a batch of events from an edge gateway. Each event is processed in its own
  * transaction and is idempotent on eventId, so a gateway can safely resend its offline queue.
  */
-export async function ingestEvents(gw: GatewayIdentity, events: MachineEvent[]): Promise<IngestResult> {
+export async function ingestEvents(gw: GatewayIdentity, events: WireMachineEvent[]): Promise<IngestResult> {
   const result: IngestResult = { accepted: 0, duplicates: 0, rejected: [] };
-  const sorted = [...events].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  // Legacy names (COIN_IN, TICKET_OUT, ...) are translated here; nothing behind this point sees them.
+  const sorted = events.map((e) => normalizeEvent(e) as MachineEvent).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   for (const ev of sorted) {
     const out: BusMessage[] = [];
     const outcome = await withTransaction(pool, (db) => processEvent(db, gw, ev, out));
@@ -133,14 +135,14 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       if (isNewer) flags.jackpotPending = false;
       break;
     }
-    case 'COIN_IN':
-    case 'COIN_OUT':
-    case 'TICKET_IN':
-    case 'TICKET_OUT': {
+    case 'CASH_IN':
+    case 'CASH_OUT':
+    case 'TITO_IN':
+    case 'TITO_OUT': {
       await ledger(LEDGER_MAP[type]!, amount ?? 0);
       await db.query(`UPDATE machine_meters SET ${METER_MAP[type]} = ${METER_MAP[type]} + $2, updated_at = now() WHERE machine_id = $1`, [m.id, amount ?? 0]);
-      if (type === 'TICKET_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
-      if (type === 'TICKET_IN' && ev.ticketBarcode) await redeemMachineTicket(db, ctx, ev, label, out);
+      if (type === 'TITO_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
+      if (type === 'TITO_IN' && ev.ticketBarcode) await redeemMachineTicket(db, ctx, ev, label, out);
       break;
     }
     case 'JACKPOT': {
@@ -205,17 +207,22 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       if (isNewer) flags.disabled = false;
       break;
     case 'PLAYER_LOGIN': {
-      const p = await db.query('SELECT id FROM players WHERE org_id = $1 AND card_number = $2', [gw.orgId, ev.playerCardId]);
-      if (p.rowCount && isNewer) {
-        await endSession(db, m);
-        const s = await db.query(
-          `INSERT INTO player_sessions (org_id, casino_id, player_id, machine_id, started_at) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-          [gw.orgId, gw.casinoId, p.rows[0].id, m.id, timestamp],
-        );
-        await db.query('UPDATE players SET visits = visits + 1, last_visit_at = $2 WHERE id = $1', [p.rows[0].id, timestamp]);
-        m.current_player_id = p.rows[0].id;
-        m.current_session_id = s.rows[0].id;
+      if (!isNewer || !ev.playerCardId) break;
+      // player_cards is the only card lookup. Unusable cards and players without CARD_LOGIN start no session.
+      const res = await resolveCard(db, gw.orgId, ev.playerCardId);
+      const rejection = !res.ok ? cardRejectionMessage(res.reason) : !playerCan(res.player.status, 'CARD_LOGIN') ? `player status ${res.player.status}` : null;
+      if (!res.ok || rejection) {
+        await openAlert(db, { ...ctx, type: 'CARD_REJECTED', severity: 'WARNING', message: `${label} rejected card ${ev.playerCardId}: ${rejection}` }, out);
+        break;
       }
+      await endSession(db, m);
+      const s = await db.query(
+        `INSERT INTO player_sessions (org_id, casino_id, player_id, card_id, machine_id, started_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [gw.orgId, gw.casinoId, res.player.id, res.card.id, m.id, timestamp],
+      );
+      await db.query('UPDATE players SET visits = visits + 1, last_visit_at = $2 WHERE id = $1', [res.player.id, timestamp]);
+      m.current_player_id = res.player.id;
+      m.current_session_id = s.rows[0].id;
       break;
     }
     case 'PLAYER_LOGOUT':

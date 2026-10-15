@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '@m1/database';
-import { MACHINE_EVENT_TYPES, MACHINE_STATUSES } from '@m1/shared';
+import { MACHINE_STATUSES, WIRE_EVENT_TYPES } from '@m1/shared';
 import { actor, guard, scopeCasino } from '../auth';
 import { bus } from '../bus';
 import { pool } from '../db';
@@ -10,7 +10,7 @@ import { authenticateGateway, heartbeat } from '../services/gateway';
 
 const eventSchema = z.object({
   eventId: z.string().uuid(),
-  type: z.enum(MACHINE_EVENT_TYPES),
+  type: z.enum(WIRE_EVENT_TYPES), // canonical names plus legacy aliases, normalised at ingestion
   machineId: z.string().min(1).max(64),
   timestamp: z.string().datetime(),
   amount: z.number().min(0).max(10_000_000).optional(),

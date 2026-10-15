@@ -46,13 +46,27 @@ export async function casinoRoutes(app: FastifyInstance) {
     return { key: p.key, enabled };
   });
 
+  /**
+   * Player search. Cards come from player_cards (any card number of the player matches, the
+   * active card is returned), names from player_profiles. Response shape kept for the UI.
+   */
   app.get('/api/v1/players', { preHandler: guard('player.view') }, async (req) => {
     const qs = z.object({ search: z.string().optional() }).parse(req.query);
     const r = await pool.query(
-      `SELECT p.id, p.card_number, p.first_name, p.last_name, p.tier, floor(p.points) points, p.total_coin_in, p.visits, p.last_visit_at,
+      `SELECT p.id, p.player_no, p.status, p.verification_status, ac.card_number, ac.status AS card_status,
+         pr.first_name, pr.last_name, p.tier, floor(p.points) points, p.total_coin_in, p.visits, p.last_visit_at,
          m.asset_no AS current_machine
-       FROM players p LEFT JOIN machines m ON m.current_player_id = p.id
-       WHERE p.org_id = $1 AND ($2::text IS NULL OR p.card_number ILIKE $2 OR p.first_name || ' ' || p.last_name ILIKE $2)
+       FROM players p
+       LEFT JOIN player_profiles pr ON pr.player_id = p.id
+       LEFT JOIN LATERAL (
+         SELECT c.card_number, c.status FROM player_cards c WHERE c.player_id = p.id
+         ORDER BY (c.status = 'ACTIVE') DESC, c.issued_at DESC LIMIT 1
+       ) ac ON true
+       LEFT JOIN machines m ON m.current_player_id = p.id
+       WHERE p.org_id = $1 AND (
+         $2::text IS NULL OR p.player_no ILIKE $2 OR concat_ws(' ', pr.first_name, pr.last_name) ILIKE $2
+         OR EXISTS (SELECT 1 FROM player_cards c WHERE c.player_id = p.id AND c.card_number ILIKE $2)
+       )
        ORDER BY p.total_coin_in DESC LIMIT 200`,
       [req.auth.orgId, qs.search ? `%${qs.search}%` : null],
     );

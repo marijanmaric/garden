@@ -107,6 +107,37 @@ packages/
 
 `cash_transactions`, `cash_collections` and `ticket_events` are append-only like the ledger.
 
+### Player identity (migration 003)
+
+Player identity is its own domain, separate from money, gaming and loyalty:
+
+- `players`: pseudonymous identity (`player_no`, status, verification status). Money and gaming refer to `player_id` only.
+- `player_profiles`: personal data. It can be anonymised or deleted without breaking money, gaming or audit records.
+- `player_cards`: the **only** card lookup source. A card is an identifier, never a money container. One card number = one
+  player per organisation, forever. At most one ACTIVE card per player. Blocking or replacing a card never touches money;
+  a replacement card resolves to the same player (and later the same wallet).
+- `player_verifications`, `player_status_history`, `player_card_events`: append-only history. Document numbers are
+  stored only masked and as a keyed hash (`PII_HASH_SECRET`).
+- Legacy `players.card_number`, `first_name`, `last_name` are read-only (database trigger): kept for compatibility, may
+  only be cleared, never written.
+
+Player status rules (single definition: `packages/shared/src/player.ts`):
+
+| Status | Allowed |
+|---|---|
+| ACTIVE | everything |
+| SUSPENDED | account frozen: only machine to wallet (so credits are never stranded) and profile maintenance |
+| EXCLUDED | no card login, no money into the wallet, no transfers to machines, no new cards; existing balance can be withdrawn, machine to wallet stays possible |
+| CLOSED | terminal, nothing |
+
+A verification (KYC) threshold can be configured per organisation (`organizations.verification_threshold_cents`);
+no amount is built in.
+
+Money model (shared, no database yet): integer cents, canonical money transaction types and the posting matrix in
+`packages/shared/src/money`. Machine events use canonical names (`CASH_IN`, `CASH_OUT`, `TITO_IN`, `TITO_OUT`,
+`CASHLESS_IN`, `CASHLESS_OUT`); legacy names (`COIN_IN`, `COIN_OUT`, `TICKET_IN`, `TICKET_OUT`) are still accepted
+and normalised at ingestion.
+
 ### Accounting definitions
 
 | Metric | Definition |
