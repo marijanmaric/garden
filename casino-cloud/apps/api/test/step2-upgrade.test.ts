@@ -49,7 +49,7 @@ before(async () => {
     [ids.org, ids.casino, ids['LEG-0001'], ids.machine],
   )).rows[0].id;
 
-  await migrate(pool, () => {}); // the upgrade
+  await migrate(pool, () => {}, { until: '003_player_identity.sql' }); // the upgrade to 003
 });
 
 after(async () => {
@@ -108,6 +108,6 @@ test('legacy columns are read-only after the upgrade but may be cleared', async 
 test('running the migration again changes nothing', async () => {
   const count = async () => (await pool.query('SELECT count(*)::int n FROM player_cards')).rows[0].n;
   const before = await count();
-  await migrate(pool, () => {});
+  await migrate(pool, () => {}, { until: '003_player_identity.sql' });
   assert.equal(await count(), before);
 });

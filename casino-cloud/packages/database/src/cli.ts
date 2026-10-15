@@ -1,4 +1,4 @@
-import { createPool, migrate, seed, syncRbac } from './index';
+import { createPool, migrate, seed, syncMoneyModel, syncRbac } from './index';
 
 const cmd = process.argv[2] ?? 'setup';
 const pool = createPool();
@@ -11,6 +11,7 @@ try {
   if (cmd === 'migrate' || cmd === 'setup' || cmd === 'reset') {
     await migrate(pool);
     await syncRbac(pool);
+    await syncMoneyModel(pool);
   }
   if (cmd === 'seed' || cmd === 'setup' || cmd === 'reset') await seed(pool);
 } catch (err) {

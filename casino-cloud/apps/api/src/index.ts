@@ -1,4 +1,4 @@
-import { migrate, seed, syncRbac } from '@m1/database';
+import { migrate, seed, syncMoneyModel, syncRbac } from '@m1/database';
 import { buildApp } from './app';
 import { config } from './config';
 import { pool } from './db';
@@ -21,6 +21,7 @@ async function waitForDatabase(retries = 30) {
 await waitForDatabase();
 await migrate(pool);
 await syncRbac(pool);
+await syncMoneyModel(pool);
 if (config.autoSeed) await seed(pool);
 
 const app = await buildApp();

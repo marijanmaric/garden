@@ -138,6 +138,25 @@ Money model (shared, no database yet): integer cents, canonical money transactio
 `CASHLESS_IN`, `CASHLESS_OUT`); legacy names (`COIN_IN`, `COIN_OUT`, `TICKET_IN`, `TICKET_OUT`) are still accepted
 and normalised at ingestion.
 
+### Money ledger (migration 004)
+
+Double-entry ledger, the financial source of truth. Integer cents, debit = destination (+), credit = source (-),
+every money transaction sums to exactly 0 (checked by the database at COMMIT).
+
+- Account kinds and transaction types come only from the shared model (`packages/shared/src/money`); the database
+  reference tables are synced from it at startup (`syncMoneyModel`) and refuse diverging definitions.
+- Wallet accounts are organisation-level (no casino); drawers, vaults, cashboxes, tickets, handpays and machine credits
+  are casino-level. Player, wallet and card are references on the transaction only; a card is never an account.
+- `money_transactions`, `ledger_entries` and `ledger_accounts` are immutable. `ledger_balances` is maintained only by the
+  posting trigger and refuses overdrafts on non-negative accounts.
+- One execution path: `executeMoneyTransaction` / `reverseMoneyTransaction` in `apps/api/src/services/ledger.ts`.
+  Exactly once per `dedupe_key` (operator Idempotency-Key, machine event id or entity key). Reversals are new
+  transactions that negate the original; one reversal per transaction.
+- Gaming (bets/wins) never enters the ledger; `MACHINE_CREDIT` plus `GAMING_SETTLEMENT` is the bridge.
+- `GET /api/v1/ledger/health` recomputes the invariants; `GET /api/v1/ledger/accounts` lists balances.
+- Existing cashier/ticket/handpay flows still write their legacy tables; they move onto the ledger after the money
+  entities (005) and opening balances (006).
+
 ### Accounting definitions
 
 | Metric | Definition |

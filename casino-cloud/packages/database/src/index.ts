@@ -32,4 +32,5 @@ export async function withTransaction<T>(pool: pg.Pool, fn: (c: pg.PoolClient) =
 
 export { migrate } from './migrate';
 export { seed, syncRbac } from './seed';
+export { syncMoneyModel } from './money-model';
 export { writeAudit, auditHash, canonicalJson, type AuditEntry } from './audit';
