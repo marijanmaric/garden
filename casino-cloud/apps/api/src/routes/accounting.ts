@@ -4,6 +4,7 @@ import { writeAudit } from '@m1/database';
 import { LEDGER_TYPES } from '@m1/shared';
 import { actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
+import { idempotent } from '../services/idempotency';
 import { financialSummary } from './dashboard';
 
 export async function accountingRoutes(app: FastifyInstance) {
@@ -64,20 +65,22 @@ export async function accountingRoutes(app: FastifyInstance) {
   });
 
   /** Corrections never modify the ledger; they append an ADJUSTMENT entry with a mandatory reason. */
-  app.post('/api/v1/transactions/adjustments', { preHandler: guard('casino.manage') }, async (req) => {
+  app.post('/api/v1/transactions/adjustments', { preHandler: guard('casino.manage') }, async (req, reply) => {
     const body = z.object({
       casinoId: z.string().uuid(), machineId: z.string().uuid().optional(), amount: z.number().refine((n) => n !== 0).refine((n) => Math.abs(n) < 1e9),
       reason: z.string().min(3).max(500),
     }).parse(req.body);
     const casinoId = scopeCasino(req, body.casinoId);
-    const r = await pool.query(
+    return idempotent(req, reply, async (db) => {
+    const r = await db.query(
       `INSERT INTO gaming_transactions (org_id, casino_id, machine_id, type, amount, reference, created_by, occurred_at)
        SELECT $1, $2, m.id, 'ADJUSTMENT', $4, $5, $6, now()
        FROM (SELECT $3::uuid AS id) x LEFT JOIN machines m ON m.id = x.id AND m.org_id = $1 AND m.casino_id = $2
        RETURNING id`,
       [req.auth.orgId, casinoId, body.machineId ?? null, body.amount, body.reason, req.auth.sub],
     );
-    await writeAudit(pool, { ...actor(req), casinoId, action: 'ledger.adjustment', entityType: 'gaming_transaction', entityId: String(r.rows[0].id), details: body });
+    await writeAudit(db, { ...actor(req), casinoId, action: 'ledger.adjustment', entityType: 'gaming_transaction', entityId: String(r.rows[0].id), details: body });
     return r.rows[0];
+    });
   });
 }

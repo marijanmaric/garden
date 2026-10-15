@@ -1,10 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { withTransaction, writeAudit } from '@m1/database';
+import { writeAudit } from '@m1/database';
 import { hasPermission, round2 } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
+import { idempotent } from '../services/idempotency';
 import { openAlert, resolveAlerts } from '../services/alerts';
 import { addCashTx, requireOpenSession, sessionTotals } from '../services/cashier';
 
@@ -49,9 +50,9 @@ export async function cashierRoutes(app: FastifyInstance) {
     return { session: { ...s, ...totals }, transactions: tx.rows };
   });
 
-  app.post('/api/v1/cashier/session/open', { preHandler: guard('cash.transact') }, async (req) => {
+  app.post('/api/v1/cashier/session/open', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({ cashDeskId: z.string().uuid(), openingBalance: money }).parse(req.body);
-    return withTransaction(pool, async (db) => {
+    return idempotent(req, reply, async (db) => {
       const d = await db.query('SELECT id, casino_id FROM cash_desks WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3) AND active', [body.cashDeskId, req.auth.orgId, req.auth.casinoIds]);
       if (!d.rowCount) throw new HttpError(404, 'Cash desk not found');
       try {
@@ -69,10 +70,10 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** Closes the shift: counted cash vs. expected balance. Any difference raises an alert. */
-  app.post('/api/v1/cashier/session/close', { preHandler: guard('cash.transact') }, async (req) => {
+  app.post('/api/v1/cashier/session/close', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({ countedBalance: money, note: z.string().max(500).optional() }).parse(req.body);
     const out: BusMessage[] = [];
-    const result = await withTransaction(pool, async (db) => {
+    const result = await idempotent(req, reply, async (db) => {
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       const { expected } = await sessionTotals(db, s.id, s.opening_balance);
       const difference = round2(body.countedBalance - expected);
@@ -109,7 +110,7 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** Manual drawer movements. Vault transfers and adjustments are supervisor operations. */
-  app.post('/api/v1/cashier/transactions', { preHandler: guard('cash.transact') }, async (req) => {
+  app.post('/api/v1/cashier/transactions', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({
       type: z.enum(['CASH_IN', 'CASH_OUT', 'FILL', 'DROP', 'ADJUSTMENT']),
       amount: z.number().refine((n) => n !== 0 && Math.abs(n) <= 1_000_000),
@@ -121,7 +122,7 @@ export async function cashierRoutes(app: FastifyInstance) {
       if (!hasPermission(req.auth.role, 'cashier.supervise')) throw new HttpError(403, 'Adjustments need permission cashier.supervise');
       if (!body.reference || body.reference.length < 3) throw new HttpError(400, 'Adjustments need a reason');
     } else if (body.amount < 0) throw new HttpError(400, 'Amount must be positive');
-    return withTransaction(pool, async (db) => {
+    return idempotent(req, reply, async (db) => {
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       let playerId: string | undefined;
       if (body.playerCard) {
@@ -135,47 +136,76 @@ export async function cashierRoutes(app: FastifyInstance) {
     });
   });
 
-  /** Machines waiting for a jackpot handpay, with the amount to pay. */
+  /**
+   * Unpaid jackpot handpays: the latest JACKPOT event of every machine in jackpot state that has
+   * no handpay payment yet. A paid jackpot whose machine has not been reset yet does not show up.
+   */
   app.get('/api/v1/cashier/handpays', { preHandler: guard('cash.transact') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT m.id, m.asset_no, m.game, mm.manufacturer, f.name AS floor, m.position_label,
-         (SELECT e.amount FROM machine_events e WHERE e.machine_id = m.id AND e.type = 'JACKPOT' ORDER BY e.occurred_at DESC LIMIT 1) AS amount,
-         (SELECT e.occurred_at FROM machine_events e WHERE e.machine_id = m.id AND e.type = 'JACKPOT' ORDER BY e.occurred_at DESC LIMIT 1) AS hit_at
-       FROM machines m LEFT JOIN machine_models mm ON mm.id = m.model_id LEFT JOIN floors f ON f.id = m.floor_id
-       WHERE m.org_id = $1 AND m.casino_id = $2 AND m.jackpot_pending ORDER BY m.asset_no`,
+         jp.event_id AS jackpot_event_id, jp.amount, jp.occurred_at AS hit_at
+       FROM machines m
+       JOIN LATERAL (
+         SELECT e.event_id, e.amount, e.occurred_at FROM machine_events e
+         WHERE e.machine_id = m.id AND e.type = 'JACKPOT' ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1
+       ) jp ON true
+       LEFT JOIN machine_models mm ON mm.id = m.model_id LEFT JOIN floors f ON f.id = m.floor_id
+       WHERE m.org_id = $1 AND m.casino_id = $2 AND m.jackpot_pending
+         AND NOT EXISTS (SELECT 1 FROM cash_transactions ct WHERE ct.source_event_id = jp.event_id)
+       ORDER BY m.asset_no`,
       [req.auth.orgId, casinoId],
     );
     return r.rows;
   });
 
-  /** Pays a jackpot handpay from the drawer and tells the machine (via gateway) that the handpay is done. */
-  app.post('/api/v1/cashier/handpays/:machineId', { preHandler: guard('cash.transact') }, async (req) => {
+  /**
+   * Pays one jackpot handpay from the drawer. The payment is bound to the jackpot event: the same
+   * event can be paid only once (checked here and enforced by a unique index). Payment does not
+   * depend on the machine: the reset command is queued separately and the machine may stay in
+   * jackpot state until the gateway delivers it.
+   */
+  app.post('/api/v1/cashier/handpays/:machineId', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
-    const { playerCard } = z.object({ playerCard: z.string().max(40).optional() }).parse(req.body ?? {});
+    const { playerCard, jackpotEventId } = z.object({ playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional() }).parse(req.body ?? {});
     const out: BusMessage[] = [];
-    const result = await withTransaction(pool, async (db) => {
+    const result = await idempotent(req, reply, async (db) => {
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
+      // Locking the machine row serialises concurrent handpay attempts for this machine.
       const m = await db.query('SELECT * FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = $3 FOR NO KEY UPDATE', [machineId, req.auth.orgId, s.casino_id]);
       const machine = m.rows[0];
       if (!machine) throw new HttpError(404, 'Machine not found');
-      if (!machine.jackpot_pending) throw new HttpError(409, 'No pending jackpot on this machine');
-      const jp = await db.query(`SELECT amount FROM machine_events WHERE machine_id = $1 AND type = 'JACKPOT' ORDER BY occurred_at DESC LIMIT 1`, [machineId]);
-      const amount = jp.rows[0]?.amount;
-      if (!amount) throw new HttpError(409, 'Jackpot amount unknown');
+      const jp = await db.query(
+        `SELECT event_id, amount FROM machine_events WHERE machine_id = $1 AND type = 'JACKPOT' ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+        [machineId],
+      );
+      const jackpot = jp.rows[0];
+      if (!jackpot || !machine.jackpot_pending) throw new HttpError(409, 'No pending jackpot on this machine');
+      if (jackpotEventId && jackpotEventId !== jackpot.event_id) throw new HttpError(409, 'This jackpot is no longer the pending one');
+      if (!jackpot.amount) throw new HttpError(409, 'Jackpot amount unknown');
+      const paid = await db.query('SELECT 1 FROM cash_transactions WHERE source_event_id = $1', [jackpot.event_id]);
+      if (paid.rowCount) throw new HttpError(409, 'Handpay already paid');
       let playerId: string | undefined;
       if (playerCard) {
         const p = await db.query('SELECT id FROM players WHERE org_id = $1 AND card_number = $2', [req.auth.orgId, playerCard]);
         playerId = p.rows[0]?.id;
       }
-      const tx = await addCashTx(db, s, 'HANDPAY', amount, { machineId, playerId, reference: `Jackpot ${machine.asset_no}` });
+      let tx;
+      try {
+        tx = await addCashTx(db, s, 'HANDPAY', jackpot.amount, { machineId, playerId, reference: `Jackpot ${machine.asset_no}`, sourceEventId: jackpot.event_id });
+      } catch (err) {
+        if ((err as { code?: string }).code === '23505') throw new HttpError(409, 'Handpay already paid');
+        throw err;
+      }
       if (machine.gateway_id)
-        await db.query(`INSERT INTO machine_commands (org_id, machine_id, gateway_id, type, requested_by) VALUES ($1,$2,$3,'RESET_JACKPOT',$4)`, [req.auth.orgId, machineId, machine.gateway_id, req.auth.sub]);
+        await db.query(`INSERT INTO machine_commands (org_id, machine_id, gateway_id, type, payload, requested_by) VALUES ($1,$2,$3,'RESET_JACKPOT',$4,$5)`, [
+          req.auth.orgId, machineId, machine.gateway_id, { jackpotEventId: jackpot.event_id }, req.auth.sub,
+        ]);
       await resolveAlerts(db, { orgId: req.auth.orgId, casinoId: s.casino_id, type: 'JACKPOT', machineId }, out);
-      await writeAudit(db, { ...actor(req), casinoId: s.casino_id, action: 'cash.handpay', entityType: 'machine', entityId: machineId, details: { assetNo: machine.asset_no, amount } });
-      return { transaction: tx, amount, assetNo: machine.asset_no };
+      await writeAudit(db, { ...actor(req), casinoId: s.casino_id, action: 'cash.handpay', entityType: 'machine', entityId: machineId, details: { assetNo: machine.asset_no, amount: jackpot.amount, jackpotEventId: jackpot.event_id } });
+      return { transaction: tx, amount: jackpot.amount, assetNo: machine.asset_no, jackpotEventId: jackpot.event_id };
     });
-    out.forEach((m) => bus.publish(m));
+    out.forEach((msg) => bus.publish(msg));
     return result;
   });
 }

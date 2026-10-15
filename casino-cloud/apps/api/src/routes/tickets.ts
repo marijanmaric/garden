@@ -1,9 +1,10 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { withTransaction, writeAudit, type PoolClient } from '@m1/database';
+import { writeAudit, type PoolClient } from '@m1/database';
 import { TICKET_STATUSES, hasPermission } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
+import { idempotent } from '../services/idempotency';
 import { addCashTx, newBarcode, requireOpenSession } from '../services/cashier';
 
 const TICKET_SELECT = `
@@ -91,9 +92,9 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Cashier pays out a ticket from the drawer. Atomic: a ticket can only ever be redeemed once. */
-  app.post('/api/v1/tickets/redeem', { preHandler: guard('ticket.payout') }, async (req) => {
+  app.post('/api/v1/tickets/redeem', { preHandler: guard('ticket.payout') }, async (req, reply) => {
     const { barcode } = z.object({ barcode: barcodeSchema }).parse(req.body);
-    const result = await withTransaction(pool, async (db) => {
+    const result = await idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       const r = await db.query(
         `UPDATE tickets SET status = 'REDEEMED', redeemed_at = now(), redeemed_by_employee = $3, redeemed_session_id = $4
@@ -115,9 +116,9 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Cashier sells a ticket for cash (player takes it to a machine). */
-  app.post('/api/v1/tickets/issue', { preHandler: guard('ticket.payout') }, async (req) => {
+  app.post('/api/v1/tickets/issue', { preHandler: guard('ticket.payout') }, async (req, reply) => {
     const { amount } = z.object({ amount: z.number().positive().max(100000) }).parse(req.body);
-    return withTransaction(pool, async (db) => {
+    return idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       const r = await db.query(
         `INSERT INTO tickets (org_id, casino_id, barcode, amount, issued_by_employee, expires_at)
@@ -136,10 +137,10 @@ export async function ticketRoutes(app: FastifyInstance) {
   const reasonBody = z.object({ reason: z.string().trim().min(3).max(300) });
 
   for (const [action, status, event] of [['cancel', 'CANCELLED', 'CANCELLED'], ['void', 'VOID', 'VOIDED']] as const) {
-    app.post(`/api/v1/tickets/:id/${action}`, { preHandler: guard('ticket.manage') }, async (req) => {
+    app.post(`/api/v1/tickets/:id/${action}`, { preHandler: guard('ticket.manage') }, async (req, reply) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
       const { reason } = reasonBody.parse(req.body);
-      return withTransaction(pool, async (db) => {
+      return idempotent(req, reply, async (db) => {
         const t = await loadTicket(db, req, id);
         requireValid(t);
         await db.query('UPDATE tickets SET status = $2, status_reason = $3 WHERE id = $1', [id, status, reason]);
@@ -150,9 +151,9 @@ export async function ticketRoutes(app: FastifyInstance) {
     });
   }
 
-  app.post('/api/v1/tickets/:id/reprint', { preHandler: guard('ticket.manage') }, async (req) => {
+  app.post('/api/v1/tickets/:id/reprint', { preHandler: guard('ticket.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
-    return withTransaction(pool, async (db) => {
+    return idempotent(req, reply, async (db) => {
       const t = await loadTicket(db, req, id);
       requireValid(t);
       const r = await db.query('UPDATE tickets SET reprint_count = reprint_count + 1 WHERE id = $1 RETURNING reprint_count', [id]);
@@ -163,10 +164,10 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Amount correction: the old ticket is cancelled and replaced by a new one (tickets are never edited). */
-  app.post('/api/v1/tickets/:id/adjust', { preHandler: guard('ticket.manage') }, async (req) => {
+  app.post('/api/v1/tickets/:id/adjust', { preHandler: guard('ticket.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { amount, reason } = z.object({ amount: z.number().positive().max(100000), reason: z.string().trim().min(3).max(300) }).parse(req.body);
-    return withTransaction(pool, async (db) => {
+    return idempotent(req, reply, async (db) => {
       const t = await loadTicket(db, req, id);
       requireValid(t);
       await db.query(`UPDATE tickets SET status = 'CANCELLED', status_reason = $2 WHERE id = $1`, [id, `Replaced: ${reason}`]);

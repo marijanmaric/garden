@@ -19,12 +19,36 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = any>(path: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
+/** Random idempotency key. Uses getRandomValues, which also works on plain-http LAN tablets. */
+export function newIdempotencyKey(prefix = 'k'): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return `${prefix}-${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Money / cashier actions. The API requires an Idempotency-Key on these. */
+const MONEY_ROUTE = /^\/(tickets\/(redeem|issue|[^/]+\/(cancel|void|reprint|adjust))|cashier\/(session\/(open|close)|transactions|handpays\/[^/]+)|cash\/collections|transactions\/adjustments)$/;
+
+export async function api<T = any>(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}): Promise<T> {
+  const { json, idempotencyKey, ...rest } = init;
+  const headers: Record<string, string> = { ...(rest.headers as Record<string, string>) };
   const token = getToken();
   if (token) headers.authorization = `Bearer ${token}`;
-  if (init.json !== undefined) headers['content-type'] = 'application/json';
-  const res = await fetch(`${apiBase()}/api/v1${path}`, { ...init, headers, body: init.json !== undefined ? JSON.stringify(init.json) : init.body });
+  if (json !== undefined) headers['content-type'] = 'application/json';
+  const isMoney = (rest.method ?? 'GET').toUpperCase() === 'POST' && MONEY_ROUTE.test(path);
+  if (isMoney) headers['idempotency-key'] = idempotencyKey ?? newIdempotencyKey();
+
+  // Money calls are retried on network failure with the SAME key, so a lost response never books twice.
+  let res: Response | null = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(`${apiBase()}/api/v1${path}`, { ...rest, headers, body: json !== undefined ? JSON.stringify(json) : rest.body });
+      break;
+    } catch (err) {
+      if (!isMoney || attempt >= 2) throw err;
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+    }
+  }
   const body = await res.json().catch(() => ({}));
   if (res.status === 401 && token) {
     setToken(null);

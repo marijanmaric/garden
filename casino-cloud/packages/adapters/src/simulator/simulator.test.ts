@@ -39,3 +39,33 @@ test('lock command disables machine', async () => {
   const events = await sim.getEvents();
   assert.equal(events[0].type, 'MACHINE_DISABLED');
 });
+
+/** Random source that returns the given values first, then a fixed fallback. */
+function scripted(values: number[], fallback = 0.5) {
+  let i = 0;
+  return () => (i < values.length ? values[i++] : fallback);
+}
+
+test('jackpot is never reset automatically, only by RESET_JACKPOT', async () => {
+  let now = Date.parse('2026-01-01T00:00:00Z');
+  // 0.0252 lands in the jackpot branch of tick(); 0.5 sets the amount.
+  const sim = new SimulatorAdapter(machine, { random: scripted([0.0252, 0.5]), now: () => now });
+  await sim.connect();
+  sim.tick();
+  const first = await sim.getEvents();
+  assert.deepEqual(first.map((e) => e.type), ['JACKPOT']);
+  assert.equal(await sim.getStatus(), 'JACKPOT');
+
+  // Hours later and with more ticks: still locked, no reset event, no play.
+  now += 6 * 3600 * 1000;
+  for (let i = 0; i < 50; i++) sim.tick();
+  const later = await sim.getEvents();
+  assert.equal(later.length, 0);
+  assert.equal(await sim.getStatus(), 'JACKPOT');
+
+  const res = await sim.sendCommand({ id: 'c1', type: 'RESET_JACKPOT' });
+  assert.equal(res.success, true);
+  const afterReset = await sim.getEvents();
+  assert.deepEqual(afterReset.map((e) => e.type), ['JACKPOT_RESET']);
+  assert.equal(await sim.getStatus(), 'ONLINE');
+});

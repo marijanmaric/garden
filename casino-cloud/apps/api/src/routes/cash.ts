@@ -1,10 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { withTransaction, writeAudit } from '@m1/database';
+import { writeAudit } from '@m1/database';
 import { round2 } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
+import { idempotent } from '../services/idempotency';
 import { openAlert } from '../services/alerts';
 
 /** Expected cashbox content of a machine since its last collection, derived from the ledger. */
@@ -54,12 +55,12 @@ export async function cashRoutes(app: FastifyInstance) {
   });
 
   /** Records a machine drop count. Differences against the meters raise an alert. */
-  app.post('/api/v1/cash/collections', { preHandler: guard('cash.manage') }, async (req) => {
+  app.post('/api/v1/cash/collections', { preHandler: guard('cash.manage') }, async (req, reply) => {
     const body = z.object({
       machineId: z.string().uuid(), countedCash: z.number().min(0).max(1e7), countedTickets: z.number().min(0).max(1e7), note: z.string().max(500).optional(),
     }).parse(req.body);
     const out: BusMessage[] = [];
-    const result = await withTransaction(pool, async (db) => {
+    const result = await idempotent(req, reply, async (db) => {
       const m = await db.query('SELECT id, asset_no, casino_id FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3) FOR NO KEY UPDATE', [body.machineId, req.auth.orgId, req.auth.casinoIds]);
       if (!m.rowCount) throw new HttpError(404, 'Machine not found');
       const exp = await expectedDrop(req.auth.orgId, body.machineId);

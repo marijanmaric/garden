@@ -200,8 +200,9 @@ export class SimulatorAdapter implements GamingMachineAdapter {
     const amount = round2(50 + this.rnd() * 550);
     this.meters.jackpot = round2(this.meters.jackpot + amount);
     this.flags.jackpotPending = true;
+    // The machine stays locked in jackpot state until the handpay is paid and the cloud sends
+    // RESET_JACKPOT (see sendCommand). There is deliberately no automatic reset.
     this.emit('JACKPOT', { amount, playerCardId: this.session?.playerCardId });
-    this.schedule(8, 25, 'JACKPOT_RESET', () => (this.flags.jackpotPending = false), { message: 'Handpay completed' });
   }
 
   private togglePlayer() {

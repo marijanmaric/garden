@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Camera, CheckCircle2, Delete, XCircle } from 'lucide-react';
 import { formatDateTime, formatEuro, timeAgo } from '@m1/ui';
 import { api, useApi } from '@/lib/api';
-import { CASH_TX_LABEL, type Cashier } from '@/lib/cashier';
+import { CASH_TX_LABEL, useActionKey, type Cashier } from '@/lib/cashier';
 import { useSession } from '@/lib/session';
 import { Field, Modal, Notice, Stat, TicketBadge } from './ui';
 import { clsx } from './clsx';
@@ -91,6 +91,8 @@ export function ShiftPanel({ cashier, big }: { cashier: Cashier; big?: boolean }
   const [counted, setCounted] = useState('');
   const [note, setNote] = useState('');
   const [msg, setMsg] = useState<Msg>(null);
+  const openKey = useActionKey('open');
+  const closeKey = useActionKey('close');
   const s = cashier.session;
 
   if (!s) {
@@ -107,7 +109,7 @@ export function ShiftPanel({ cashier, big }: { cashier: Cashier; big?: boolean }
         <Field label="Opening balance (EUR)"><input className={clsx('input', big && 'py-3 text-base')} inputMode="decimal" value={opening} onChange={(e) => setOpening(e.target.value)} /></Field>
         {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
         <button className={clsx('btn-primary w-full', big && 'py-4 text-lg')} disabled={!desk}
-          onClick={async () => { try { await cashier.open(desk, Number(opening) || 0); setMsg(null); void desks.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); } }}>
+          onClick={async () => { try { await cashier.open(desk, Number(opening) || 0, openKey.key); openKey.renew(); setMsg(null); void desks.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); } }}>
           Open shift
         </button>
       </div>
@@ -138,7 +140,7 @@ export function ShiftPanel({ cashier, big }: { cashier: Cashier; big?: boolean }
             <Field label="Note"><input className="input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
             {msg && <Notice tone={msg.tone}>{msg.text}</Notice>}
             <button className="btn-primary w-full py-3" onClick={async () => {
-              try { await cashier.close(Number(counted), note); setClosing(false); void desks.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); }
+              try { await cashier.close(Number(counted), note, closeKey.key); closeKey.renew(); setClosing(false); void desks.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); }
             }}>Confirm and close</button>
           </div>
         </Modal>
@@ -167,7 +169,7 @@ export function TicketPayout({ cashier, big }: { cashier: Cashier; big?: boolean
   const pay = async () => {
     setBusy(true);
     try {
-      const r = await cashier.redeem(ticket.barcode);
+      const r = await cashier.redeem(ticket.barcode, `redeem-${ticket.barcode}`);
       setMsg({ tone: 'good', text: `Paid ${formatEuro(r.ticket.amount)} for ticket ${r.ticket.barcode}` });
       setTicket(null);
       setBarcode('');
@@ -215,18 +217,25 @@ export function CashActions({ cashier, big }: { cashier: Cashier; big?: boolean 
   const [amount, setAmount] = useState('');
   const [ref, setRef] = useState('');
   const [msg, setMsg] = useState<Msg>(null);
+  const [busy, setBusy] = useState(false);
+  const action = useActionKey('cash');
   const value = Number(amount);
   const go = async (label: string, fn: () => Promise<any>) => {
+    if (busy) return;
+    setBusy(true);
     try {
       const r = await fn();
+      action.renew();
       setMsg({ tone: 'good', text: r?.barcode ? `Ticket ${r.barcode} printed for ${formatEuro(r.amount)}` : `${label} ${formatEuro(value)} booked` });
       setAmount('');
       setRef('');
     } catch (e) {
       setMsg({ tone: 'bad', text: (e as Error).message });
+    } finally {
+      setBusy(false);
     }
   };
-  const disabled = !cashier.session || !(value > 0);
+  const disabled = busy || !cashier.session || !(value > 0);
   const btn = clsx(big ? 'py-4 text-base' : '');
   return (
     <div className="space-y-3">
@@ -234,13 +243,13 @@ export function CashActions({ cashier, big }: { cashier: Cashier; big?: boolean 
       {big ? <Keypad value={amount} onChange={setAmount} /> : <input className="input" inputMode="decimal" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} />}
       <input className="input" placeholder="Reference / player card (optional)" value={ref} onChange={(e) => setRef(e.target.value)} />
       <div className="grid grid-cols-2 gap-2">
-        <button className={clsx('btn-primary', btn)} disabled={disabled} onClick={() => go('Ticket', () => cashier.issue(value))}>Sell ticket</button>
-        <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Cash in', () => cashier.tx('CASH_IN', value, ref))}>Cash in</button>
-        <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Cash out', () => cashier.tx('CASH_OUT', value, ref))}>Cash out</button>
+        <button className={clsx('btn-primary', btn)} disabled={disabled} onClick={() => go('Ticket', () => cashier.issue(value, action.key))}>Sell ticket</button>
+        <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Cash in', () => cashier.tx('CASH_IN', value, ref, undefined, action.key))}>Cash in</button>
+        <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Cash out', () => cashier.tx('CASH_OUT', value, ref, undefined, action.key))}>Cash out</button>
         {can('cash.manage') && (
           <>
-            <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Fill', () => cashier.tx('FILL', value, ref || 'Vault fill'))}>Fill from vault</button>
-            <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Drop', () => cashier.tx('DROP', value, ref || 'Vault drop'))}>Drop to vault</button>
+            <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Fill', () => cashier.tx('FILL', value, ref || 'Vault fill', undefined, action.key))}>Fill from vault</button>
+            <button className={clsx('btn', btn)} disabled={disabled} onClick={() => go('Drop', () => cashier.tx('DROP', value, ref || 'Vault drop', undefined, action.key))}>Drop to vault</button>
           </>
         )}
       </div>
@@ -259,14 +268,14 @@ export function Handpays({ cashier, big }: { cashier: Cashier; big?: boolean }) 
   return (
     <div className="space-y-2">
       {list.data.map((h) => (
-        <div key={h.id} className="flex items-center gap-3 rounded-xl border border-yellow-500/40 bg-yellow-500/5 p-3">
+        <div key={h.jackpot_event_id} className="flex items-center gap-3 rounded-xl border border-yellow-500/40 bg-yellow-500/5 p-3">
           <div className="flex-1">
             <div className="font-bold">{h.asset_no} <span className="text-xs font-normal text-sub">{h.manufacturer} · {h.floor} {h.position_label}</span></div>
             <div className={clsx('font-bold tabular-nums text-yellow-600 dark:text-yellow-400', big ? 'text-3xl' : 'text-xl')}>{formatEuro(h.amount)}</div>
             <div className="text-xs text-sub">hit {timeAgo(h.hit_at)}</div>
           </div>
           <button className={clsx('btn-primary', big && 'px-6 py-4 text-lg')} disabled={!cashier.session}
-            onClick={async () => { try { const r = await cashier.handpay(h.id); setMsg({ tone: 'good', text: `Handpay ${formatEuro(r.amount)} on ${r.assetNo} paid, machine reset requested.` }); void list.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); } }}>
+            onClick={async () => { try { const r = await cashier.handpay(h.id, h.jackpot_event_id, `handpay-${h.jackpot_event_id}`); setMsg({ tone: 'good', text: `Handpay ${formatEuro(r.amount)} on ${r.assetNo} paid, machine reset requested.` }); void list.reload(); } catch (e) { setMsg({ tone: 'bad', text: (e as Error).message }); } }}>
             PAY
           </button>
         </div>
