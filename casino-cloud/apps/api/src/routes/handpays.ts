@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { HttpError, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
-import { requestHandpayApproval, retryHandpayReset, voidHandpay } from '../services/handpays';
+import { replayDeferredHandpays, requestHandpayApproval, retryHandpayReset, voidHandpay } from '../services/handpays';
 import { detectLegacyHandpayExceptions, proposeException } from '../services/handpay-exceptions';
 import type { CashActor } from '../services/cash-ops';
 
@@ -38,6 +38,18 @@ export async function handpayRoutes(app: FastifyInstance) {
     const { reason } = z.object({ reason: z.string().trim().min(3).max(300) }).parse(req.body);
     await inScope(req, id);
     return idempotent(req, reply, (db) => voidHandpay(db, actorOf(req), id, reason));
+  });
+
+  // ---- jackpots deferred while HANDPAY was frozen ----
+  app.get('/api/v1/handpays/deferred', { preHandler: guard('cashier.supervise') }, async (req) => {
+    const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
+    return (await pool.query('SELECT * FROM deferred_money_events WHERE org_id = $1 AND casino_id = $2 ORDER BY created_at', [req.auth.orgId, casinoId])).rows;
+  });
+
+  /** Replays deferred jackpots of an unfrozen rail (also done by the freeze lift and the maintenance job). */
+  app.post('/api/v1/handpays/deferred/replay', { preHandler: guard('cashier.supervise') }, async (req, reply) => {
+    const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.body ?? {}).casinoId);
+    return idempotent(req, reply, async (db) => ({ replayed: await replayDeferredHandpays(db, { orgId: req.auth.orgId, casinoId }) }));
   });
 
   // ---- legacy handpay exceptions (pre Step 1 payments without jackpot event id) ----

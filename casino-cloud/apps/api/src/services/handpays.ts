@@ -67,7 +67,7 @@ const handpayOnLedger = (db: Db, h: { org_id: string; casino_id: string }) => ra
  * Creates the handpay for a jackpot event (idempotent: one handpay per event). On a ledger HANDPAY
  * rail the liability is booked in the same transaction (expense -> payable), keyed by the event.
  */
-export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number }) {
+export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number; businessDate?: string | null }) {
   const r = await db.query(
     `INSERT INTO handpays (org_id, casino_id, machine_id, source_event_id, kind, amount_cents) VALUES ($1,$2,$3,$4,'JACKPOT',$5)
      ON CONFLICT ON CONSTRAINT handpays_one_per_event DO NOTHING RETURNING *`,
@@ -79,11 +79,88 @@ export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; ca
   if (await handpayOnLedger(db, h)) {
     const tx = await executeMoneyTransaction(db, {
       orgId: input.orgId, type: 'HANDPAY_CREATE_JACKPOT', dedupeKey: eventDedupeKey(input.eventId, 'HANDPAY_CREATE_JACKPOT'), sourceEventId: input.eventId,
-      actor: { type: 'GATEWAY', name: 'jackpot' }, ctx: { casinoId: input.casinoId, amountCents: cents(input.amountCents), machineId: input.machineId, handpayId: h.id },
+      actor: { type: 'GATEWAY', name: 'jackpot' }, businessDate: input.businessDate ?? null,
+      ctx: { casinoId: input.casinoId, amountCents: cents(input.amountCents), machineId: input.machineId, handpayId: h.id },
     });
     await event(db, h, 'LIABILITY_BOOKED', null, null, null, { transactionId: tx.transaction.id });
   }
   return h;
+}
+
+/**
+ * Entry point for a jackpot machine event (ingestion). The machine event itself is already stored.
+ * HANDPAY rail on the ledger and frozen: the jackpot is recorded as a deferred money event (no handpay,
+ * no booking); it is replayed after the freeze is lifted. Otherwise the handpay is created now.
+ * The deferred record takes occurred_at / received_at / business_date from the machine event (009 trigger).
+ */
+export async function handleJackpotEvent(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number }) {
+  if (await handpayOnLedger(db, { org_id: input.orgId, casino_id: input.casinoId })) {
+    const frozen = (await db.query(`SELECT money_rail_frozen($1, $2, 'HANDPAY', NULL) AS f`, [input.orgId, input.casinoId])).rows[0].f;
+    if (frozen) {
+      const r = await db.query(
+        `INSERT INTO deferred_money_events (event_id, org_id, casino_id, machine_id, rail, kind, amount_cents, reason)
+         VALUES ($1, $2, $3, $4, 'HANDPAY', 'JACKPOT', $5, 'FROZEN')
+         ON CONFLICT (event_id) DO NOTHING RETURNING *`,
+        [input.eventId, input.orgId, input.casinoId, input.machineId, input.amountCents],
+      );
+      const d = r.rows[0];
+      if (d)
+        await writeAudit(db as PoolClient, {
+          orgId: input.orgId, casinoId: input.casinoId, actorType: 'SYSTEM', actorId: null, actorName: 'jackpot',
+          action: 'handpay.deferred', entityType: 'machine_event', entityId: input.eventId,
+          details: { machineId: input.machineId, amountCents: input.amountCents, reason: d.reason, occurredAt: d.occurred_at, receivedAt: d.received_at, businessDate: d.business_date },
+        });
+      return { deferred: r.rowCount === 1, handpay: undefined };
+    }
+  }
+  return { deferred: false, handpay: await ensureHandpayForJackpot(db, input) };
+}
+
+/**
+ * Replays deferred jackpot events whose HANDPAY rail is no longer frozen: creates the handpay and its
+ * liability booking on the original business date of the event (never silently today). Idempotent and
+ * concurrency-safe: the event id is the key (one handpay per event, one creation booking per handpay),
+ * rows are locked. Each record runs in its own savepoint: a record that cannot be booked (e.g. its
+ * business date is already closed) stays PENDING with last_error - the closed-date guard is never
+ * bypassed - and reconciliation reports it (handpay.no_stale_deferred_events) for explicit handling.
+ */
+export async function replayDeferredHandpays(db: Db, filter: { orgId?: string; casinoId?: string } = {}) {
+  const due = (await db.query(
+    `SELECT d.*, d.business_date::text AS business_date FROM deferred_money_events d
+     WHERE d.status = 'PENDING' AND d.rail = 'HANDPAY' AND ($1::uuid IS NULL OR d.org_id = $1) AND ($2::uuid IS NULL OR d.casino_id = $2)
+       AND NOT money_rail_frozen(d.org_id, d.casino_id, 'HANDPAY', NULL)
+       -- a record already refused for a closed date is not retried on every tick (reconciliation reports it)
+       AND NOT (d.last_error IS NOT NULL AND EXISTS (SELECT 1 FROM business_day_closes b WHERE b.casino_id = d.casino_id AND b.business_date = d.business_date))
+     ORDER BY d.occurred_at, d.event_id FOR UPDATE OF d SKIP LOCKED`,
+    [filter.orgId ?? null, filter.casinoId ?? null],
+  )).rows;
+  const done = [];
+  for (const d of due) {
+    await db.query('SAVEPOINT deferred_replay');
+    try {
+      let h = await ensureHandpayForJackpot(db, { orgId: d.org_id, casinoId: d.casino_id, machineId: d.machine_id, eventId: d.event_id, amountCents: Number(d.amount_cents), businessDate: d.business_date });
+      if (!h) h = (await db.query('SELECT * FROM handpays WHERE source_event_id = $1', [d.event_id])).rows[0];
+      await db.query(`UPDATE deferred_money_events SET status = 'PROCESSED', replayed_at = now(), handpay_id = $2, attempts = attempts + 1, last_error = NULL WHERE event_id = $1`, [d.event_id, h!.id]);
+      await event(db, h!, 'DEFERRED_REPLAYED', null, null, null, { businessDate: d.business_date, occurredAt: d.occurred_at, receivedAt: d.received_at, reason: d.reason });
+      await writeAudit(db as PoolClient, {
+        orgId: d.org_id, casinoId: d.casino_id, actorType: 'SYSTEM', actorId: null, actorName: 'jackpot',
+        action: 'handpay.deferred_replayed', entityType: 'machine_event', entityId: d.event_id,
+        details: { handpayId: h!.id, amountCents: Number(d.amount_cents), businessDate: d.business_date, occurredAt: d.occurred_at, attempts: d.attempts + 1 },
+      });
+      await db.query('RELEASE SAVEPOINT deferred_replay');
+      done.push({ eventId: d.event_id as string, handpayId: h!.id });
+    } catch (err) {
+      await db.query('ROLLBACK TO SAVEPOINT deferred_replay');
+      const message = err instanceof Error ? err.message : String(err);
+      await db.query('UPDATE deferred_money_events SET attempts = attempts + 1, last_error = $2 WHERE event_id = $1', [d.event_id, message]);
+      await writeAudit(db as PoolClient, {
+        orgId: d.org_id, casinoId: d.casino_id, actorType: 'SYSTEM', actorId: null, actorName: 'jackpot',
+        action: 'handpay.deferred_replay_failed', entityType: 'machine_event', entityId: d.event_id,
+        details: { businessDate: d.business_date, error: message, attempts: d.attempts + 1 },
+      });
+    }
+  }
+  return done;
 }
 
 export async function lockHandpay(db: Db, orgId: string, handpayId: string): Promise<HandpayRow> {

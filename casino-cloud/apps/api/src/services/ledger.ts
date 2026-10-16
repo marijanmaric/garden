@@ -33,6 +33,12 @@ export interface ExecuteMoneyInput {
   approvedBy?: string | null;
   reason?: string | null;
   sourceEventId?: string | null;
+  /**
+   * The casino business date the money belongs to, when it is not today: only for the controlled
+   * replay of a deferred event. It must equal the business date of the source event's occurred_at and
+   * of its pending deferred record; a closed date is still refused. Not exposed by any API request.
+   */
+  businessDate?: string | null;
 }
 
 export interface MoneyTransactionRow {
@@ -146,10 +152,23 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 1. Org lock (the same lock writeAudit takes): keeps the lock order fixed and the audit chain linear.
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`audit:${input.orgId}`]);
 
+  // An explicit business date only for the replay of a pending deferred record, validated against the
+  // original machine event (occurred_at in the casino time zone), never a free override.
+  if (input.businessDate != null) {
+    if (!input.sourceEventId) throw new HttpError(409, 'An explicit business date needs its source event');
+    const ok = await db.query(
+      `SELECT 1 FROM deferred_money_events d JOIN machine_events e ON e.event_id = d.event_id JOIN casinos c ON c.id = d.casino_id
+       WHERE d.event_id = $1 AND d.org_id = $2 AND d.casino_id = $3 AND d.status = 'PENDING'
+         AND d.business_date = $4::date AND (e.occurred_at AT TIME ZONE c.timezone)::date = $4::date
+         AND $4::date <= (now() AT TIME ZONE c.timezone)::date`,
+      [input.sourceEventId, input.orgId, input.ctx.casinoId, input.businessDate]);
+    if (!ok.rowCount) throw new HttpError(409, `Business date ${input.businessDate} does not match a pending deferred event`);
+  }
+
   // A closed business date takes no money (the database refuses it too); answer with a clear 409.
   const closed = await db.query(
     `SELECT d.business_date::text AS d FROM business_day_closes d JOIN casinos c ON c.id = d.casino_id
-     WHERE d.casino_id = $1 AND d.business_date = (now() AT TIME ZONE c.timezone)::date`, [input.ctx.casinoId]);
+     WHERE d.casino_id = $1 AND d.business_date = COALESCE($2::date, (now() AT TIME ZONE c.timezone)::date)`, [input.ctx.casinoId, input.businessDate ?? null]);
   if (closed.rowCount) throw new HttpError(409, `Business date ${closed.rows[0].d} of this casino is closed`);
 
   // 2. Exactly once per dedupe key.
@@ -161,11 +180,11 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
        player_id, wallet_id, card_id, machine_id, cashier_session_id, vault_id, ticket_id, handpay_id, transfer_id,
        source_event_id, options, reversal_of, reason, actor_type, actor_id, approved_by, business_date)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,
-       (now() AT TIME ZONE COALESCE((SELECT timezone FROM casinos WHERE id = $2), 'UTC'))::date)
+       COALESCE($23::date, (now() AT TIME ZONE COALESCE((SELECT timezone FROM casinos WHERE id = $2), 'UTC'))::date))
      ON CONFLICT ON CONSTRAINT money_transactions_dedupe DO NOTHING RETURNING *`,
     [input.orgId, input.ctx.casinoId, input.type, input.ctx.amountCents, input.dedupeKey, hash, ...refs,
       input.sourceEventId ?? null, JSON.stringify(options), reversalOf, input.reason ?? null, input.actor.type,
-      input.actor.employeeId ?? null, input.approvedBy ?? null],
+      input.actor.employeeId ?? null, input.approvedBy ?? null, input.businessDate ?? null],
   );
   if (!inserted.rowCount) {
     const prev = (await db.query('SELECT * FROM money_transactions WHERE org_id = $1 AND dedupe_key = $2', [input.orgId, input.dedupeKey])).rows[0];

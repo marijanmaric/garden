@@ -82,8 +82,9 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
         ledger: await import('../src/services/ledger'), handpays: await import('../src/services/handpays'),
         players: await import('../src/services/players'), recon: await import('../src/services/reconciliation'),
       };
-      const r = await one(`SELECT money_rail_ledger($1,$2,'HANDPAY',NULL) h, money_rail_ledger($1,$2,'CASH',NULL) c, money_rail_ledger($1,NULL,'CASHLESS',NULL) w`, [c.orgId, c.casino.id]);
-      assert.deepEqual([r.h, r.c, r.w], [true, true, true]);
+      const r = await one(`SELECT money_rail_ledger($1,$2,'HANDPAY',NULL) h, money_rail_ledger($1,$2,'CASH',NULL) c, money_rail_ledger($1,NULL,'CASHLESS',NULL) w, money_rail_ledger($1,$2,'TITO',NULL) t`, [c.orgId, c.casino.id]);
+      // TITO stays LEGACY in this whole suite: HANDPAY works completely without it (no technical dependency)
+      assert.deepEqual([r.h, r.c, r.w, r.t], [true, true, true, false]);
       await ensureVaultOpen(c.pool as never, c.casino);
       st.shift = await openShift('cashier@example.com', 1_000_000);
     });
@@ -266,6 +267,38 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       st.openOnM4 = (await handpayOf(e3)).id;
     });
 
+    test('wallet handpay = HANDPAY_PAYABLE -> WALLET_AVAILABLE: no reservation, no transfer, no balance needed, exactly once', async () => {
+      const cardNumber = `7BW-${randomUUID().slice(0, 8)}`;
+      const p = await tx((db) => svc.players.createPlayer(db as never, actor('admin@example.com'), { homeCasinoId: c.casino.id, card: { cardNumber } }));
+      assert.equal((await one('SELECT available_cents FROM wallet_balances WHERE player_id = $1', [p.player.id])).available_cents, 0, 'an empty wallet can receive a handpay');
+      const { eventId } = await jackpot(5, 77.77);
+      const h = await handpayOf(eventId);
+      const key = randomUUID();
+      const results = await Promise.all([
+        pay('cashier@example.com', 5, { payTo: 'WALLET', playerCard: cardNumber }, key),
+        ...Array.from({ length: 4 }, () => pay('cashier@example.com', 5, { payTo: 'WALLET', playerCard: cardNumber })),
+      ]);
+      assert.equal(results.filter((r) => r.statusCode === 200).length, 1, results.map((r) => r.body).join('\n'));
+      assert.ok(results.filter((r) => r.statusCode !== 200).every((r) => r.statusCode === 409));
+      const ok = results.find((r) => r.statusCode === 200)!;
+      if (ok === results[0]) assert.deepEqual((await pay('cashier@example.com', 5, { payTo: 'WALLET', playerCard: cardNumber }, key)).json(), ok.json());
+      assert.equal(ok.json().payTo, 'WALLET');
+      assert.match((await pay('cashier@example.com', 5, { payTo: 'CASH' })).json().error, /already paid/, 'no second payment by another method');
+      const mt = await one(`SELECT type, amount_cents, wallet_id, player_id, handpay_id, source_event_id, transfer_id, cashier_session_id FROM money_transactions WHERE handpay_id = $1 AND type = 'HANDPAY_PAY'`, [h.id]);
+      const wallet = (await one('SELECT id FROM wallets WHERE player_id = $1', [p.player.id])).id;
+      assert.deepEqual(mt, { type: 'HANDPAY_PAY', amount_cents: 7_777, wallet_id: wallet, player_id: p.player.id, handpay_id: h.id, source_event_id: eventId, transfer_id: null, cashier_session_id: null });
+      assert.ok(Number.isSafeInteger(mt.amount_cents));
+      const entries = await q(`SELECT a.kind, e.amount_cents FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id JOIN money_transactions t ON t.id = e.transaction_id
+        WHERE t.handpay_id = $1 AND t.type = 'HANDPAY_PAY' ORDER BY a.kind`, [h.id]);
+      assert.deepEqual(entries, [{ kind: 'HANDPAY_PAYABLE', amount_cents: 7_777 }, { kind: 'WALLET_AVAILABLE', amount_cents: -7_777 }]);
+      const wb = await one('SELECT available_cents, reserved_cents FROM wallet_balances WHERE player_id = $1', [p.player.id]);
+      assert.deepEqual([wb.available_cents, wb.reserved_cents], [7_777, 0]);
+      assert.equal((await q(`SELECT 1 FROM ledger_accounts WHERE wallet_id = $1 AND kind = 'WALLET_RESERVED'`, [wallet])).length, 0, 'the reservation account is never touched');
+      assert.equal((await q('SELECT 1 FROM wallet_transfers WHERE wallet_id = $1', [wallet])).length, 0, 'no wallet <-> machine transfer');
+      assert.deepEqual((await q('SELECT type FROM money_transactions WHERE wallet_id = $1', [wallet])).map((r) => r.type), ['HANDPAY_PAY'], 'one credit, no duplicate');
+      assert.equal((await q('SELECT 1 FROM cash_transactions WHERE source_event_id = $1', [eventId])).length, 0);
+    });
+
     test('insufficient cash and a rolled back transaction leave no trace', async () => {
       const small = await openShift('attendant@example.com', 1_000);
       const { eventId } = await jackpot(5, 50);
@@ -300,30 +333,169 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       assert.match((await pay('cashier@example.com', 6)).json().error, /No pending jackpot/);
     });
 
-    test('frozen HANDPAY: no payment, no new liability (the gateway retries); CASH continues; lift after a clean run', async () => {
+    test('frozen HANDPAY: the jackpot is stored and deferred (no handpay, no booking); the lift replays it exactly once', async () => {
       await q(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason) VALUES ($1,'HANDPAY',$2,'test freeze')`, [c.orgId, c.casino.id]);
       const r = await pay('cashier@example.com', 4);
       assert.equal(r.statusCode, 409);
       assert.match(r.json().error, /HANDPAY is frozen/);
       const eventId = randomUUID();
       const j = await jackpot(6, 40, eventId);
-      assert.equal(j.res.statusCode, 409);
-      assert.equal((await q('SELECT 1 FROM machine_events WHERE event_id = $1', [eventId])).length, 0, 'not stored: the gateway resends it');
+      assert.equal(j.res.json().accepted, 1, j.res.body);
+      // the authoritative event is stored, the handpay processing is deferred, nothing is booked
+      assert.equal((await q('SELECT 1 FROM machine_events WHERE event_id = $1', [eventId])).length, 1);
+      const d = await one('SELECT status, reason, amount_cents, business_date, occurred_at, received_at, replayed_at FROM deferred_money_events WHERE event_id = $1', [eventId]);
+      const ev = await one('SELECT occurred_at, received_at FROM machine_events WHERE event_id = $1', [eventId]);
+      assert.deepEqual([d.occurred_at, d.received_at, d.replayed_at], [ev.occurred_at, ev.received_at, null]);
+      const today = (await one(`SELECT (now() AT TIME ZONE timezone)::date::text AS d FROM casinos WHERE id = $1`, [c.casino.id])).d;
+      assert.deepEqual([d.status, d.reason, Number(d.amount_cents), d.business_date], ['PENDING', 'FROZEN', 4_000, today]);
+      assert.equal(await handpayOf(eventId), undefined);
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [eventId])).length, 0);
+      assert.ok(await one(`SELECT 1 FROM alerts WHERE casino_id = $1 AND type = 'HANDPAY_DEFERRED'`, [c.casino.id]));
+      // a gateway resend is a duplicate; a replay while frozen does nothing
+      assert.equal((await jackpot(6, 40, eventId)).res.json().duplicates, 1);
+      assert.deepEqual((await post('floor@example.com', '/api/v1/handpays/deferred/replay', { casinoId: c.casino.id })).json().replayed, []);
+      // CASH continues while HANDPAY is frozen
       const f = await post('manager@example.com', '/api/v1/cash/movements', { kind: 'FILL', cashierSessionId: st.shift, amountCents: 500 });
       assert.equal((await post('cashier@example.com', `/api/v1/cash/movements/${f.json().movement.id}/confirm`, { totalCents: 500 })).json().movement.status, 'CONFIRMED');
+      // the lift replays the deferred jackpot in the same transaction, on the business date of occurred_at
       const freezeId = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND rail = 'HANDPAY' AND lifted_at IS NULL`, [c.casino.id])).id;
       const lift = await post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason: 'test over' });
       assert.equal(lift.json().lifted, true, JSON.stringify(lift.json().result?.checks?.filter((x: { ok: boolean }) => !x.ok) ?? lift.json()));
-      assert.equal((await jackpot(6, 40, eventId)).res.json().accepted, 1);
-      assert.equal((await handpayOf(eventId)).status, 'PENDING');
+      assert.deepEqual(lift.json().replayed.map((x: { eventId: string }) => x.eventId), [eventId]);
+      const h = await handpayOf(eventId);
+      assert.equal(h.status, 'PENDING');
+      const created = await q(`SELECT business_date::text AS d FROM money_transactions WHERE handpay_id = $1 AND type = 'HANDPAY_CREATE_JACKPOT'`, [h.id]);
+      assert.deepEqual(created, [{ d: today }], 'exactly one creation booking, original business date');
+      assert.deepEqual(await one('SELECT status, handpay_id, replayed_at IS NOT NULL AS replayed FROM deferred_money_events WHERE event_id = $1', [eventId]), { status: 'PROCESSED', handpay_id: h.id, replayed: true });
+      assert.deepEqual((await q(`SELECT action FROM audit_logs WHERE entity_id = $1 ORDER BY created_at, id`, [eventId])).map((r) => r.action), ['handpay.deferred', 'handpay.deferred_replayed']);
+      // repeated replay, maintenance job and gateway resend: still one handpay, one booking
+      assert.deepEqual((await post('floor@example.com', '/api/v1/handpays/deferred/replay', { casinoId: c.casino.id })).json().replayed, []);
+      assert.deepEqual(await tx((db) => svc.handpays.replayDeferredHandpays(db as never)), []);
+      assert.equal((await jackpot(6, 40, eventId)).res.json().duplicates, 1);
+      assert.deepEqual(await txsOf(h.id), ['HANDPAY_CREATE_JACKPOT']);
       assert.equal((await pay('cashier@example.com', 6)).statusCode, 200);
+    });
+
+    test('frozen HANDPAY on a machine whose MACHINE rail is on the ledger: the event is still stored (deferred record satisfies the guard)', async () => {
+      const all = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7BM${Date.now() % 100000}`, machines: 1, gateway: true });
+      await q(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason) VALUES ($1,'HANDPAY',$2,'test freeze')`, [c.orgId, all.id]);
+      const eventId = randomUUID();
+      const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': all.gateway!.deviceId, 'x-gateway-key': all.gateway!.key },
+        payload: { events: [{ eventId, type: 'JACKPOT', machineId: all.machines[0].code, timestamp: new Date().toISOString(), amount: 15 }] } });
+      assert.equal(r.json().accepted, 1, r.body);
+      assert.equal((await one('SELECT status FROM deferred_money_events WHERE event_id = $1', [eventId])).status, 'PENDING');
+      assert.equal(await handpayOf(eventId), undefined);
+      const freezeId = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [all.id])).id;
+      const lift = await post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason: 'test over' });
+      assert.equal(lift.json().replayed.length, 1, lift.body);
+      assert.deepEqual(await txsOf((await handpayOf(eventId)).id), ['HANDPAY_CREATE_JACKPOT']);
+    });
+
+    test('deferred replay is concurrency-safe: parallel replays of the same events book each event once', async () => {
+      await q(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason) VALUES ($1,'HANDPAY',$2,'test freeze 2')`, [c.orgId, c.casino.id]);
+      const events = [randomUUID(), randomUUID()];
+      for (const e of events) assert.equal((await jackpot(7, 12.34, e)).res.json().accepted, 1);
+      // lift the freeze without the in-transaction replay, so that independent replays race
+      const run = (await one(`INSERT INTO reconciliation_runs (org_id, casino_id, trigger, ok, checks) VALUES ($1,$2,'MANUAL',true,'[]') RETURNING id`, [c.orgId, c.casino.id])).id;
+      await q(`UPDATE money_rail_freezes SET lifted_at = now(), lifted_by = $2, lift_reason = 'race test', lift_run_id = $3 WHERE casino_id = $1 AND rail = 'HANDPAY' AND lifted_at IS NULL`, [c.casino.id, c.emp['admin@example.com'], run]);
+      const results = await Promise.all(Array.from({ length: 4 }, () => tx((db) => svc.handpays.replayDeferredHandpays(db as never, { casinoId: c.casino.id }))));
+      assert.equal(results.flat().length, 2);
+      for (const e of events) {
+        const h = await handpayOf(e);
+        assert.deepEqual(await txsOf(h.id), ['HANDPAY_CREATE_JACKPOT']);
+        assert.equal((await one('SELECT status FROM deferred_money_events WHERE event_id = $1', [e])).status, 'PROCESSED');
+      }
+      // pay both (the route pays the newest open handpay of the machine first)
+      assert.equal((await pay('cashier@example.com', 7)).statusCode, 200);
+      assert.equal((await pay('cashier@example.com', 7)).statusCode, 200);
+    });
+
+    test('business date: a deferred jackpot is booked on the date of occurred_at, not on the replay day; the date cannot be overridden', async () => {
+      const b = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7BD${Date.now() % 100000}`, rails: ['VAULT', 'CASH', 'HANDPAY'], machines: 1, gateway: true });
+      const send = (eventId: string, timestamp: string, amount: number) => c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': b.gateway!.deviceId, 'x-gateway-key': b.gateway!.key },
+        payload: { events: [{ eventId, type: 'JACKPOT', machineId: b.machines[0].code, timestamp, amount }] } });
+      const day = async (offset: number) => (await one(`SELECT ((now() AT TIME ZONE timezone)::date + $2::int)::text AS d FROM casinos WHERE id = $1`, [b.id, offset])).d as string;
+      const [today, yesterday] = [await day(0), await day(-1)];
+      await q(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason) VALUES ($1,'HANDPAY',$2,'test freeze')`, [c.orgId, b.id]);
+      const eventId = randomUUID();
+      const occurred = new Date(Date.now() - 24 * 3600_000).toISOString();
+      assert.equal((await send(eventId, occurred, 25)).json().accepted, 1);
+      const d = await one('SELECT business_date::text AS bd, occurred_at, received_at FROM deferred_money_events WHERE event_id = $1', [eventId]);
+      assert.equal(d.bd, yesterday, 'business date of occurred_at, not of received_at');
+      assert.ok(d.received_at > d.occurred_at);
+      // the recorded event is immutable and taken from the machine event, never supplied freely
+      await assert.rejects(c.pool.query(`UPDATE deferred_money_events SET business_date = $2 WHERE event_id = $1`, [eventId, today]), /immutable/);
+      await assert.rejects(c.pool.query(`DELETE FROM deferred_money_events WHERE event_id = $1`, [eventId]));
+      const other = (await one(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES (gen_random_uuid(),$1,$2,$3,'JACKPOT',0,now()) RETURNING event_id`, [c.orgId, b.id, b.machines[0].id])).event_id; // amount 0: no handpay due
+      await assert.rejects(c.pool.query(`INSERT INTO deferred_money_events (event_id, org_id, casino_id, machine_id, rail, kind, amount_cents, reason, business_date) VALUES ($1,$2,$3,$4,'HANDPAY','JACKPOT',999,'FROZEN',$5)`,
+        [other, c.orgId, b.id, b.machines[0].id, today]), /does not match machine event/);
+      // an explicit business date is only accepted for a pending deferred record of that event and date
+      const book = (sourceEventId: string, businessDate: string) => tx((db) => svc.ledger.executeMoneyTransaction(db as never, {
+        orgId: c.orgId, type: 'HANDPAY_CREATE_JACKPOT', dedupeKey: `bd-${randomUUID()}`, sourceEventId, businessDate, actor: { type: 'GATEWAY', name: 'test' },
+        ctx: { casinoId: b.id, amountCents: cents(1_000), machineId: b.machines[0].id, handpayId: randomUUID() },
+      }));
+      await assert.rejects(book(other, today), /does not match a pending deferred event/);
+      await assert.rejects(book(eventId, today), /does not match a pending deferred event/);
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = ANY($1)', [[eventId, other]])).length, 0);
+      // lift: one creation booking on the original business date (yesterday), replayed_at set
+      const freezeId = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [b.id])).id;
+      const lift = await post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason: 'test over' });
+      assert.deepEqual(lift.json().replayed.map((x: { eventId: string }) => x.eventId), [eventId], lift.body);
+      const h = await handpayOf(eventId);
+      assert.deepEqual(await q(`SELECT business_date::text AS d FROM money_transactions WHERE source_event_id = $1`, [eventId]), [{ d: yesterday }]);
+      assert.ok((await one('SELECT replayed_at FROM deferred_money_events WHERE event_id = $1', [eventId])).replayed_at);
+      await assert.rejects(c.pool.query(`UPDATE deferred_money_events SET attempts = attempts + 1 WHERE event_id = $1`, [eventId]), /immutable/);
+      const run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: b.id })).json();
+      assert.equal(run.ok, true, JSON.stringify(run.checks.filter((x: { ok: boolean }) => !x.ok)));
+      assert.deepEqual(await txsOf(h.id), ['HANDPAY_CREATE_JACKPOT']);
+    });
+
+    test('business date: a deferred jackpot whose original date is closed is not booked (guard not bypassed); reconciliation reports it until explained by four eyes', async () => {
+      const b = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7BC${Date.now() % 100000}`, rails: ['VAULT', 'CASH', 'HANDPAY'], machines: 1, gateway: true });
+      const twoDaysAgo = (await one(`SELECT ((now() AT TIME ZONE timezone)::date - 2)::text AS d FROM casinos WHERE id = $1`, [b.id])).d;
+      const runId = (await one(`INSERT INTO reconciliation_runs (org_id, casino_id, trigger, ok, checks) VALUES ($1,$2,'MANUAL',true,'[]') RETURNING id`, [c.orgId, b.id])).id;
+      await q(`INSERT INTO business_day_closes (casino_id, business_date, org_id, closed_by, reconciliation_run_id) VALUES ($1,$2,$3,$4,$5)`, [b.id, twoDaysAgo, c.orgId, c.emp['manager@example.com'], runId]);
+      await q(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason) VALUES ($1,'HANDPAY',$2,'test freeze')`, [c.orgId, b.id]);
+      const eventId = randomUUID();
+      const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': b.gateway!.deviceId, 'x-gateway-key': b.gateway!.key },
+        payload: { events: [{ eventId, type: 'JACKPOT', machineId: b.machines[0].code, timestamp: new Date(Date.now() - 48 * 3600_000).toISOString(), amount: 33 }] } });
+      assert.equal(r.json().accepted, 1, r.body);
+      assert.equal((await one('SELECT business_date::text AS d FROM deferred_money_events WHERE event_id = $1', [eventId])).d, twoDaysAgo);
+      // the lift succeeds; the replay of this record is refused by the closed-date guard and kept
+      let freezeId = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [b.id])).id;
+      const lift = await post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason: 'test over' });
+      assert.deepEqual([lift.json().lifted, lift.json().replayed], [true, []], lift.body);
+      const d = await one('SELECT status, attempts, last_error, replayed_at FROM deferred_money_events WHERE event_id = $1', [eventId]);
+      assert.deepEqual([d.status, d.attempts, d.replayed_at], ['PENDING', 1, null]);
+      assert.match(d.last_error, /Business date .* is closed/);
+      assert.equal(await handpayOf(eventId), undefined);
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [eventId])).length, 0, 'never moved to today');
+      assert.ok(await one(`SELECT 1 FROM audit_logs WHERE entity_id = $1 AND action = 'handpay.deferred_replay_failed'`, [eventId]));
+      // the maintenance safety net does not retry it on every tick
+      assert.deepEqual(await tx((db) => svc.handpays.replayDeferredHandpays(db as never, { casinoId: b.id })), []);
+      assert.equal((await one('SELECT attempts FROM deferred_money_events WHERE event_id = $1', [eventId])).attempts, 1);
+      // reconciliation detects the unresolved deferred event, freezes HANDPAY and blocks the day close
+      const run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: b.id })).json();
+      const stale = run.checks.find((x: { key: string }) => x.key === 'handpay.no_stale_deferred_events');
+      assert.deepEqual(stale.items, [`deferred_event:${eventId}`]);
+      assert.deepEqual(run.frozen.map((f: { rail: string }) => f.rail), ['HANDPAY']);
+      const yesterday = (await one(`SELECT ((now() AT TIME ZONE timezone)::date - 1)::text AS d FROM casinos WHERE id = $1`, [b.id])).d;
+      assert.equal((await post('manager@example.com', '/api/v1/money/day-close', { casinoId: b.id, businessDate: yesterday })).json().closed, false);
+      // explicit handling: a four-eyes explanation (late-event process); the event stays recorded and unbooked
+      const req = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: b.id, itemKey: `deferred_event:${eventId}`, explanation: 'Late jackpot for a closed date, handled by the late-event process' });
+      assert.equal(req.statusCode, 200, req.body);
+      assert.ok((await post('accounting@example.com', `/api/v1/approvals/${req.json().id}/decide`, { decision: 'APPROVED' })).json().resolution);
+      freezeId = run.frozen[0].id;
+      assert.equal((await post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason: 'explained' })).json().lifted, true);
+      assert.equal((await one('SELECT status FROM deferred_money_events WHERE event_id = $1', [eventId])).status, 'PENDING');
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [eventId])).length, 0);
     });
 
     test('reconciliation: HANDPAY checks clean; a payable mismatch freezes only HANDPAY; a four-eyes correction repairs it', async () => {
       let run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: c.casino.id })).json();
       assert.equal(run.ok, true, JSON.stringify(run.checks.filter((x: { ok: boolean }) => !x.ok)));
       assert.deepEqual(run.checks.filter((x: { rail: string }) => x.rail === 'HANDPAY').map((x: { key: string }) => x.key).sort(),
-        ['handpay.bookings_match_state', 'handpay.creations_booked', 'handpay.payable_matches_open_handpays', 'handpay.payments_booked_once']);
+        ['handpay.bookings_match_state', 'handpay.creations_booked', 'handpay.deferred_business_date', 'handpay.jackpots_accounted', 'handpay.no_stale_deferred_events', 'handpay.payable_matches_open_handpays', 'handpay.payments_booked_once']);
       const adjust = (debit: Record<string, unknown>, credit: Record<string, unknown>) => tx((db) => svc.ledger.executeMoneyTransaction(db as never, {
         orgId: c.orgId, type: 'ADJUSTMENT', dedupeKey: `adj-${randomUUID()}`, reason: 'test', actor: { type: 'EMPLOYEE', employeeId: c.emp['manager@example.com'] }, approvedBy: c.emp['accounting@example.com'],
         ctx: { casinoId: c.casino.id, amountCents: cents(100), debit: debit as never, credit: credit as never },
@@ -345,7 +517,7 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       await assert.rejects(tx((db) => svc.handpays.payHandpay(db as never, actor('manager@example.com', [l.id]), h!.id)), /HANDPAY is not: cut over the HANDPAY rail first/);
       const cut = await post('admin@example.com', '/api/v1/money/cutover', { rail: 'HANDPAY', casinoId: l.id });
       assert.equal(cut.statusCode, 409);
-      assert.match(cut.json().error, /not released yet: ledger operations missing for TITO/);
+      assert.match(cut.json().error, /maintenance window with VAULT, CASH, TITO, .*missing for TITO \(maintenance-window dependency, not a technical one/);
     });
 
     test('historical handpays: unmapped legacy payments block the cutover until classified by four eyes with evidence', async () => {

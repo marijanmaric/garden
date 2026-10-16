@@ -22,10 +22,26 @@ test('every legacy cash transaction type is mapped to the rails it moves money o
   for (const rails of Object.values(LEGACY_CASH_TX_RAILS)) assert.ok(rails.includes('CASH'));
 });
 
-test('production release: a rail is released only with everything its legacy operations depend on', async () => {
-  const { RAIL_PRODUCTION_READY, railReleaseBlockers } = await import('./cutover');
-  assert.deepEqual([...RAIL_PRODUCTION_READY], ['CASHLESS']);
+test('dependencies: HANDPAY needs CASH technically, never TITO; TITO only through the maintenance window', async () => {
+  const { RAIL_PRODUCTION_READY, RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_PREREQUISITES, railRelease, railReleaseBlockers } = await import('./cutover');
+  const { MONEY_TRANSACTIONS, postings } = await import('./transactions');
+  const { ACCOUNT_KIND_RAIL } = await import('./cutover');
+  // A: derived from the posting matrix: every rail a HANDPAY posting touches
+  const touched = new Set<string>();
+  for (const type of ['HANDPAY_CREATE_JACKPOT', 'HANDPAY_PAY'] as const)
+    for (const payTo of ['CASH', 'WALLET'] as const)
+      for (const p of postings(type, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', handpayId: 'h', cashierSessionId: 's', walletId: 'w', payTo }))
+        if (ACCOUNT_KIND_RAIL[p.account.kind]) touched.add(ACCOUNT_KIND_RAIL[p.account.kind]!);
+  assert.deepEqual([...touched].sort(), ['CASH', 'CASHLESS', 'HANDPAY']);
+  assert.ok(!touched.has('TITO'));
+  assert.ok(MONEY_TRANSACTIONS.HANDPAY_PAY.rail === 'HANDPAY');
+  assert.deepEqual([...RAIL_IMPLEMENTATION_REQUIRES.HANDPAY], ['CASH']);
+  // B: the cutover prerequisite
+  assert.deepEqual([...CUTOVER_PREREQUISITES.HANDPAY], ['CASH']);
+  // C: TITO appears only as a missing rail of the shared maintenance window
+  const r = railRelease('HANDPAY');
+  assert.deepEqual([r.implementationMissing, r.windowMissing, r.released], [[], ['TITO'], false]);
   assert.deepEqual(railReleaseBlockers('HANDPAY'), ['TITO']);
-  assert.deepEqual(railReleaseBlockers('CASH'), ['TITO']);
-  assert.deepEqual(railReleaseBlockers('CASHLESS'), []);
+  assert.deepEqual(railRelease('CASHLESS').released, true);
+  assert.deepEqual([...RAIL_PRODUCTION_READY], ['CASHLESS']);
 });

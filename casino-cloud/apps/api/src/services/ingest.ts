@@ -4,7 +4,7 @@ import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { openAlert, resolveAlerts } from './alerts';
 import { cardRejectionMessage, resolveCard } from './players';
-import { confirmHandpayReset, ensureHandpayForJackpot } from './handpays';
+import { confirmHandpayReset, handleJackpotEvent } from './handpays';
 
 export interface GatewayIdentity {
   id: string;
@@ -153,8 +153,12 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       await openAlert(db, { ...ctx, type: 'JACKPOT', severity: 'INFO', message: `Jackpot €${(amount ?? 0).toFixed(2)} on ${label}, handpay required` }, out);
       // One handpay entity per jackpot event. The decimal amount from the machine is converted to
       // integer cents once, here at the boundary.
-      if ((amount ?? 0) > 0)
-        await ensureHandpayForJackpot(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) });
+      // On a frozen HANDPAY rail the event is kept as a deferred money event and replayed after the lift.
+      if ((amount ?? 0) > 0) {
+        const r = await handleJackpotEvent(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) });
+        if (r.deferred)
+          await openAlert(db, { ...ctx, type: 'HANDPAY_DEFERRED', severity: 'WARNING', message: `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; handpay deferred while HANDPAY is frozen` }, out);
+      }
       break;
     }
     case 'JACKPOT_RESET':

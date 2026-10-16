@@ -61,35 +61,71 @@ export const CASHBOX_IN_EVENT_TYPES = ['CASH_IN', 'COIN_IN'] as const;
 /** Rails whose ledger-backed operations are implemented (7a: VAULT, CASH; 7b: HANDPAY). */
 export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDPAY', 'CASHLESS'];
 
-/**
- * Rails that must be released too before a rail can go live in production, because the rail's
- * legacy operations would otherwise stop working: legacy fills / drops move vault AND drawer money
- * (VAULT needs CASH), a cashier ticket payout moves drawer AND ticket money (CASH needs TITO), a
- * handpay is paid from a drawer (HANDPAY needs CASH).
+/*
+ * Three different kinds of dependency between rails, kept apart on purpose:
+ *
+ * A. IMPLEMENTATION dependency (technical): the rail's own ledger operations post to accounts of
+ *    another rail, so that rail's ledger operations must exist. Derived from the posting matrix:
+ *    HANDPAY_CREATE_JACKPOT touches HANDPAY_PAYABLE + expense, HANDPAY_PAY touches HANDPAY_PAYABLE +
+ *    DRAWER (CASH) or WALLET_AVAILABLE (CASHLESS, optional payout). HANDPAY never touches TITO.
+ *
+ * B. CUTOVER dependency (technical, enforced by the cutover service): rails that must already be on
+ *    the ledger when the rail is cut over = CUTOVER_PREREQUISITES (HANDPAY needs CASH).
+ *
+ * C. MAINTENANCE-WINDOW dependency (operational only): rails that must go live in the same window,
+ *    because a legacy operation spans them and would stop working if only one side were on the
+ *    ledger: legacy fill / drop (CASH + VAULT), legacy cashier ticket payout / sale (CASH + TITO),
+ *    legacy handpay payment (CASH + HANDPAY). The window may only be opened when every rail in it is
+ *    implemented. This - and nothing else - is why a production HANDPAY cutover waits for TITO.
  */
-export const RAIL_RELEASE_REQUIRES: Record<CutoverRail, readonly CutoverRail[]> = {
-  VAULT: ['CASH'],
-  CASH: ['VAULT', 'TITO', 'HANDPAY'],
-  HANDPAY: ['CASH'],
-  TITO: ['CASH'],
+export const RAIL_IMPLEMENTATION_REQUIRES: Record<CutoverRail, readonly CutoverRail[]> = {
+  VAULT: [],
+  CASH: ['VAULT'], // fills / drops
+  HANDPAY: ['CASH'], // cash payout from a drawer (wallet payout additionally needs CASHLESS, checked per payment)
+  TITO: ['CASH'], // cashier sale / payout
   CASHLESS: [],
-  MACHINE: ['TITO', 'HANDPAY', 'CASHLESS'],
+  MACHINE: ['VAULT', 'TITO', 'HANDPAY', 'CASHLESS'],
 };
 
-/** Rails not implemented yet that block a production cutover of `rail` (empty = released). */
-export function railReleaseBlockers(rail: CutoverRail): CutoverRail[] {
+/** C: rails that go live together (one maintenance window). Rails not listed form a window of their own. */
+export const MAINTENANCE_WINDOWS: ReadonlyArray<readonly CutoverRail[]> = [['VAULT', 'CASH', 'HANDPAY', 'TITO']];
+
+export function maintenanceWindowOf(rail: CutoverRail): readonly CutoverRail[] {
+  return MAINTENANCE_WINDOWS.find((w) => w.includes(rail)) ?? [rail];
+}
+
+export interface RailRelease {
+  rail: CutoverRail;
+  /** A: missing ledger implementations the rail itself needs (technical). */
+  implementationMissing: CutoverRail[];
+  /** B: rails that must be on the ledger before this cutover (enforced by the cutover itself). */
+  cutoverPrerequisites: readonly CutoverRail[];
+  /** C: rails of the same maintenance window whose ledger implementation is still missing (operational). */
+  windowMissing: CutoverRail[];
+  released: boolean;
+}
+
+export function railRelease(rail: CutoverRail): RailRelease {
   const seen = new Set<CutoverRail>();
   const visit = (r: CutoverRail) => {
     if (seen.has(r)) return;
     seen.add(r);
-    RAIL_RELEASE_REQUIRES[r].forEach(visit);
+    RAIL_IMPLEMENTATION_REQUIRES[r].forEach(visit);
   };
   visit(rail);
-  return [...seen].filter((r) => !RAIL_IMPLEMENTED.includes(r)).sort();
+  const implementationMissing = [...seen].filter((r) => !RAIL_IMPLEMENTED.includes(r)).sort();
+  const windowMissing = maintenanceWindowOf(rail).filter((r) => !RAIL_IMPLEMENTED.includes(r) && !implementationMissing.includes(r)).sort();
+  return { rail, implementationMissing, cutoverPrerequisites: CUTOVER_PREREQUISITES[rail], windowMissing, released: !implementationMissing.length && !windowMissing.length };
+}
+
+/** Rails not implemented yet that block a production cutover of `rail` (A + C; empty = released). */
+export function railReleaseBlockers(rail: CutoverRail): CutoverRail[] {
+  const r = railRelease(rail);
+  return [...new Set([...r.implementationMissing, ...r.windowMissing])].sort();
 }
 
 /** Rails that may be cut over in production now. Dry runs are always allowed; tests use the service directly. */
-export const RAIL_PRODUCTION_READY: readonly CutoverRail[] = (['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE'] as const).filter((r) => railReleaseBlockers(r).length === 0);
+export const RAIL_PRODUCTION_READY: readonly CutoverRail[] = CUTOVER_RAILS.filter((r) => railRelease(r).released);
 
 /** Freeze scopes: one rail (of a casino / machine / the org for CASHLESS) or everything (GLOBAL). */
 export type FreezeRail = CutoverRail | 'GLOBAL';

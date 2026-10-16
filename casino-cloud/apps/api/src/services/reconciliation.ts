@@ -6,6 +6,7 @@ import { openAlert } from './alerts';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import type { CashActor } from './cash-ops';
 import { checkLedgerInvariants } from './ledger';
+import { replayDeferredHandpays } from './handpays';
 
 /**
  * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY).
@@ -144,6 +145,31 @@ async function handpayChecks(db: Db, casinoId: string, since: string) {
          ORDER BY t.created_at, t.id`, 'money_tx'),
     },
     {
+      // durability: every jackpot received since the cutover has a handpay or a deferred record
+      key: 'handpay.jackpots_accounted',
+      items: await ids(
+        `SELECT e.event_id AS id FROM machine_events e WHERE e.casino_id = $1 AND e.received_at > $2 AND e.type = 'JACKPOT' AND e.amount > 0
+           AND NOT EXISTS (SELECT 1 FROM handpays h WHERE h.source_event_id = e.event_id)
+           AND NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
+         ORDER BY e.event_id`, 'jackpot_event'),
+    },
+    {
+      // a deferred jackpot must not stay pending once its rail is no longer frozen
+      key: 'handpay.no_stale_deferred_events',
+      items: await ids(
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING'
+           AND NOT money_rail_frozen(d.org_id, d.casino_id, 'HANDPAY', NULL) ORDER BY d.event_id`, 'deferred_event', [casinoId]),
+    },
+    {
+      // a replayed jackpot is booked on the business date of its occurred_at, never moved to the replay day
+      key: 'handpay.deferred_business_date',
+      items: await ids(
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PROCESSED'
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = d.event_id AND t.type = 'HANDPAY_CREATE_JACKPOT'
+                             AND t.handpay_id = d.handpay_id AND t.business_date = d.business_date AND t.amount_cents = d.amount_cents)
+         ORDER BY d.event_id`, 'deferred_event', [casinoId]),
+    },
+    {
       key: 'handpay.creations_booked',
       items: await ids(
         `SELECT h.id FROM handpays h WHERE h.casino_id = $1 AND h.created_at > $2
@@ -230,8 +256,10 @@ export async function liftFreeze(db: Db, a: CashActor, freezeId: string, reason:
   const blocking = result.checks.filter((c) => !c.ok && (c.rail === f.rail || c.rail === 'GLOBAL'));
   if (blocking.length) return { lifted: false as const, result };
   await rows(db, 'UPDATE money_rail_freezes SET lifted_at = now(), lifted_by = $2, lift_reason = $3, lift_run_id = $4 WHERE id = $1', [freezeId, a.employeeId, reason, result.runId]);
+  // Money events deferred while frozen continue now, in the same transaction (before any day close).
+  const replayed = f.rail === 'HANDPAY' || f.rail === 'GLOBAL' ? await replayDeferredHandpays(db, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }) : [];
   await writeAudit(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id, actorType: 'EMPLOYEE', actorId: a.employeeId, actorName: a.employeeEmail ?? null, ip: a.ip ?? null, action: 'money.freeze_lifted', entityType: 'money_rail_freeze', entityId: freezeId, details: { rail: f.rail, reason, runId: result.runId } });
-  return { lifted: true as const, result };
+  return { lifted: true as const, result, replayed };
 }
 
 /** Step 1 of a four-eyes explanation of one reconciliation item. */
@@ -267,6 +295,12 @@ export async function closeBusinessDay(db: Db, a: CashActor, input: { casinoId: 
   const frozen = await rows(db,
     `SELECT id, rail FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL AND (casino_id = $2 OR casino_id IS NULL)`, [a.orgId, input.casinoId]);
   if (frozen.length) return { closed: false as const, reason: `Frozen: ${frozen.map((f) => f.rail).join(', ')}`, result: null };
+  // A pending deferred event blocks the close unless it was explicitly explained (four eyes), e.g. one
+  // whose original business date is already closed and that goes through the late-event process.
+  const deferred = await rows(db,
+    `SELECT count(*)::int n FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING'
+       AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = d.org_id AND r.item_key = 'deferred_event:' || d.event_id)`, [input.casinoId]);
+  if (deferred[0].n) return { closed: false as const, reason: `${deferred[0].n} deferred money event(s) not processed yet`, result: null };
   const result = await runReconciliation(db, { orgId: a.orgId, casinoId: input.casinoId, trigger: 'DAY_CLOSE', employeeId: a.employeeId }, out);
   if (!result.ok) return { closed: false as const, reason: 'Reconciliation mismatch', result };
   await rows(db, 'INSERT INTO business_day_closes (casino_id, business_date, org_id, closed_by, reconciliation_run_id) VALUES ($1,$2,$3,$4,$5)',

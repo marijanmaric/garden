@@ -115,7 +115,7 @@ after(async () => {
 describe('model', () => {
   test('migration 004 applied; kinds and types mirror the shared model (no second matrix)', async () => {
     const applied = (await pool.query(`SELECT name FROM schema_migrations WHERE name >= '004'`)).rows.map((r) => r.name).sort();
-    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql', '007_ledger_cash_ops.sql', '008_handpay_ledger.sql']);
+    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql', '007_ledger_cash_ops.sql', '008_handpay_ledger.sql', '009_deferred_money_events.sql']);
     const types = (await pool.query('SELECT code FROM money_transaction_types ORDER BY code')).rows.map((r) => r.code);
     assert.deepEqual(types, [...MONEY_TRANSACTION_TYPES].sort());
     const kinds = (await pool.query('SELECT code FROM ledger_account_kinds ORDER BY code')).rows.map((r) => r.code);
