@@ -324,9 +324,11 @@ describe('HANDPAY', () => {
     await machineEvent(c, c.machines[0], 'JACKPOT', 200);
     const r = await dry('HANDPAY', { casinoId: c.id });
     assert.ok(failed(r).includes('handpay_payments_have_jackpot_event'));
-    assert.deepEqual(r.checks.find((x) => x.name === 'handpay_payments_have_jackpot_event')!.detail, {
-      unmappedCashTransactionIds: [ct], reason: 'legacy handpay payment without jackpot event id: cannot be mapped deterministically',
-    });
+    const detail = r.checks.find((x) => x.name === 'handpay_payments_have_jackpot_event')!.detail as Record<string, unknown>;
+    assert.deepEqual(detail.unmappedCashTransactionIds, [ct]);
+    assert.equal(detail.reason, 'legacy handpay payment without jackpot event id: cannot be mapped deterministically');
+    assert.deepEqual(detail.exceptions, [{ cashTransactionId: ct, exceptionId: null, status: 'NOT_DETECTED' }]);
+    assert.match(String(detail.action), /legacy-exceptions/);
   });
 
   test('paid handpays are history, unpaid ones become HANDPAY_PAYABLE; mapping is by event id 1:1', async () => {
@@ -367,11 +369,17 @@ describe('HANDPAY', () => {
 
     // after the cutover: the legacy payment path is refused (no second, independent money write)
     const s2 = await legacyShift(c, 'cashier@example.com', 0, []);
-    await assert.rejects(tx((db) => svc.handpays.payHandpay(db, { orgId, employeeId: emp['cashier@example.com'] }, open!.id)), /money is on the ledger/);
+    // Step 7b: the payment now takes the ledger path (HANDPAY_PAY); the empty drawer cannot pay it, nothing is written.
+    await assert.rejects(tx((db) => svc.handpays.payHandpay(db, { orgId, employeeId: emp['cashier@example.com'] }, open!.id)), /Insufficient balance on DRAWER/);
+    assert.equal((await one(`SELECT count(*)::int n FROM cash_transactions WHERE source_event_id = $1`, [openEvent])).n, 0);
     assert.equal((await one('SELECT status FROM handpays WHERE id = $1', [open!.id])).status, 'PENDING');
-    // a new jackpot cannot create a handpay without its ledger transaction
+    // a new jackpot: the handpay service books its liability itself (Step 7b); a raw insert without it is refused
     const e3 = await machineEvent(c, c.machines[0], 'JACKPOT', 10);
-    await assert.rejects(tx((db) => svc.handpays.ensureHandpayForJackpot(db, { orgId, casinoId: c.id, machineId: c.machines[0], eventId: e3, amountCents: 1_000 })), /HANDPAY is on the ledger/);
+    const e4 = await machineEvent(c, c.machines[0], 'JACKPOT', 11);
+    await assert.rejects(pool.query(`INSERT INTO handpays (org_id, casino_id, machine_id, source_event_id, amount_cents) VALUES ($1,$2,$3,$4,1100)`, [orgId, c.id, c.machines[0], e4]), /HANDPAY is on the ledger/);
+    const h3 = await tx((db) => svc.handpays.ensureHandpayForJackpot(db, { orgId, casinoId: c.id, machineId: c.machines[0], eventId: e3, amountCents: 1_000 }));
+    assert.equal((await one(`SELECT type FROM money_transactions WHERE handpay_id = $1`, [h3!.id])).type, 'HANDPAY_CREATE_JACKPOT');
+    assert.equal(await balance(c.id, { kind: 'HANDPAY_PAYABLE' }), 51_234 + 1_000);
     await q(`UPDATE cashier_sessions SET status = 'CLOSED', closed_at = now(), expected_balance = 0, counted_balance = 0, difference = 0 WHERE id = $1`, [s2]);
   });
 });

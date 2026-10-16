@@ -8,7 +8,7 @@ import type { CashActor } from './cash-ops';
 import { checkLedgerInvariants } from './ledger';
 
 /**
- * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants).
+ * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY).
  *
  * Every failed check is CRITICAL: an alert is raised and the affected rail is FROZEN for the
  * casino (a global invariant freezes the whole organisation). A frozen rail takes only corrections;
@@ -21,7 +21,7 @@ type Db = Pick<PoolClient, 'query'>;
 
 export interface ReconCheck {
   key: string;
-  rail: 'CASH' | 'VAULT' | 'GLOBAL';
+  rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'GLOBAL';
   ok: boolean;
   items: string[];
   resolved: string[];
@@ -36,7 +36,7 @@ export interface ReconResult {
 
 const rows = async (db: Db, sql: string, params: unknown[]) => (await db.query(sql, params)).rows;
 
-async function cutoverTime(db: Db, orgId: string, casinoId: string, rail: 'CASH' | 'VAULT'): Promise<string | null> {
+async function cutoverTime(db: Db, orgId: string, casinoId: string, rail: 'CASH' | 'VAULT' | 'HANDPAY'): Promise<string | null> {
   const r = await rows(db, `SELECT as_of FROM money_rail_cutovers WHERE org_id = $1 AND casino_id = $2 AND rail = $3 AND created_txid <> pg_current_xact_id()`, [orgId, casinoId, rail]);
   return r[0]?.as_of ?? null;
 }
@@ -112,6 +112,49 @@ async function vaultChecks(db: Db, casinoId: string, since: string) {
   ];
 }
 
+/**
+ * HANDPAY (Step 7b): payable = open handpays; every payment and every creation since the cutover
+ * booked exactly once with the handpay amount; a void reverses its creation.
+ */
+async function handpayChecks(db: Db, casinoId: string, since: string) {
+  const p = [casinoId, since];
+  const ids = async (sql: string, prefix: string, params: unknown[] = p) => (await rows(db, sql, params)).map((r) => `${prefix}:${r.id}`);
+  return [
+    {
+      key: 'handpay.payable_matches_open_handpays',
+      items: await ids(
+        `SELECT c.id FROM casinos c WHERE c.id = $1
+           AND COALESCE((SELECT sum(amount_cents) FROM handpays WHERE casino_id = c.id AND status IN ('PENDING', 'APPROVED')), 0)
+           <> COALESCE((SELECT -b.balance_cents FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id WHERE a.casino_id = c.id AND a.kind = 'HANDPAY_PAYABLE'), 0)`,
+        'handpay_payable', [casinoId]),
+    },
+    {
+      key: 'handpay.payments_booked_once',
+      items: await ids(
+        `SELECT h.id FROM handpays h WHERE h.casino_id = $1 AND h.paid_at > $2 AND h.status IN ('PAID', 'MACHINE_RESET')
+           AND (SELECT count(*) FROM money_transactions t WHERE t.handpay_id = h.id AND t.type = 'HANDPAY_PAY' AND t.amount_cents = h.amount_cents) <> 1
+         ORDER BY h.id`, 'handpay'),
+    },
+    {
+      key: 'handpay.bookings_match_state',
+      items: await ids(
+        `SELECT t.id FROM money_transactions t JOIN handpays h ON h.id = t.handpay_id WHERE t.casino_id = $1 AND t.created_at > $2
+           AND ((t.type = 'HANDPAY_PAY' AND (h.status NOT IN ('PAID', 'MACHINE_RESET') OR t.amount_cents <> h.amount_cents))
+             OR (t.type = 'HANDPAY_CREATE_JACKPOT' AND t.amount_cents <> h.amount_cents))
+         ORDER BY t.created_at, t.id`, 'money_tx'),
+    },
+    {
+      key: 'handpay.creations_booked',
+      items: await ids(
+        `SELECT h.id FROM handpays h WHERE h.casino_id = $1 AND h.created_at > $2
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.handpay_id = h.id AND t.type = 'HANDPAY_CREATE_JACKPOT')
+            OR (h.casino_id = $1 AND h.created_at > $2 AND h.status = 'VOIDED' AND NOT EXISTS (
+                 SELECT 1 FROM money_transactions r JOIN money_transactions c ON c.id = r.reversal_of WHERE c.handpay_id = h.id AND c.type = 'HANDPAY_CREATE_JACKPOT'))
+         ORDER BY h.id`, 'handpay'),
+    },
+  ];
+}
+
 async function freeze(db: Db, orgId: string, casinoId: string | null, rail: FreezeRail, reason: string, runId: string) {
   const r = await rows(db,
     `INSERT INTO money_rail_freezes (org_id, rail, casino_id, reason, reconciliation_run_id)
@@ -138,6 +181,8 @@ export async function runReconciliation(
     if (cashSince) for (const c of await cashChecks(db, casinoId, cashSince)) raw.push({ ...c, rail: 'CASH' });
     const vaultSince = await cutoverTime(db, orgId, casinoId, 'VAULT');
     if (vaultSince) for (const c of await vaultChecks(db, casinoId, vaultSince)) raw.push({ ...c, rail: 'VAULT' });
+    const handpaySince = await cutoverTime(db, orgId, casinoId, 'HANDPAY');
+    if (handpaySince) for (const c of await handpayChecks(db, casinoId, handpaySince)) raw.push({ ...c, rail: 'HANDPAY' });
   }
   const inv = await checkLedgerInvariants(db, orgId);
   raw.push({ key: 'global.ledger_invariants', rail: 'GLOBAL', items: inv.ok ? [] : [`ledger:${orgId}`] });
@@ -154,7 +199,7 @@ export async function runReconciliation(
     [orgId, casinoId, input.trigger, ok, JSON.stringify(checks), input.employeeId ?? null]))[0];
 
   const frozen: ReconResult['frozen'] = [];
-  for (const rail of ['CASH', 'VAULT', 'GLOBAL'] as const) {
+  for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'GLOBAL'] as const) {
     const failed = checks.filter((c) => c.rail === rail && !c.ok);
     if (!failed.length) continue;
     const reason = failed.map((c) => `${c.key} (${c.items.length})`).join(', ');
@@ -232,7 +277,7 @@ export async function closeBusinessDay(db: Db, a: CashActor, input: { casinoId: 
 
 /** Scheduled: every casino with CASH or VAULT on the ledger, each in its own transaction. */
 export async function reconcileLedgerCasinos(pool: Pool, publish: (m: BusMessage) => void = () => {}) {
-  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT')`)).rows;
+  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT', 'HANDPAY')`)).rows;
   const results = [];
   for (const c of casinos) {
     const out: BusMessage[] = [];

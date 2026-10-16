@@ -134,11 +134,11 @@ test('full cutover of the upgraded casino represents exactly the outstanding leg
   assert.deepEqual(await money(), before_);
 });
 
-test('after the cutover the legacy handpay payment is refused (Step 1 protection now via the ledger rule)', async () => {
+test('after the cutover the legacy handpay payment path is gone: the ledger path pays (here: refused, empty drawer)', async () => {
   const { payHandpay } = await import('../src/services/handpays');
   const h = (await one('SELECT id FROM handpays WHERE source_event_id = $1', [legacy.pendingEvent])).id;
   const s = (await one(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) SELECT org_id, casino_id, cash_desk_id, employee_id, 0 FROM cashier_sessions WHERE id = $1 RETURNING id`, [legacy.session])).id;
-  await assert.rejects(db.withTransaction(pool, (x) => payHandpay(x, actor(), h)), /money is on the ledger/);
+  await assert.rejects(db.withTransaction(pool, (x) => payHandpay(x, actor(), h)), /Insufficient balance on DRAWER/);
   assert.equal((await one('SELECT status FROM handpays WHERE id = $1', [h])).status, 'PENDING');
   assert.equal((await one(`SELECT count(*)::int n FROM cash_transactions WHERE type = 'HANDPAY' AND source_event_id = $1`, [legacy.pendingEvent])).n, 0);
   void s;

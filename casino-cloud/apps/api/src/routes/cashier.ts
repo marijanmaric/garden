@@ -178,7 +178,9 @@ export async function cashierRoutes(app: FastifyInstance) {
    */
   app.post('/api/v1/cashier/handpays/:machineId', { preHandler: guard('cash.transact') }, async (req, reply) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
-    const { playerCard, jackpotEventId } = z.object({ playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional() }).parse(req.body ?? {});
+    const { playerCard, jackpotEventId, payTo } = z.object({
+      playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional(), payTo: z.enum(['CASH', 'WALLET']).default('CASH'),
+    }).parse(req.body ?? {});
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
       const actorRef = { orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip };
@@ -197,11 +199,14 @@ export async function cashierRoutes(app: FastifyInstance) {
         const paid = await db.query(`SELECT 1 FROM handpays WHERE source_event_id = $1 AND status IN ('PAID', 'MACHINE_RESET')`, [jackpotEventId]);
         throw new HttpError(409, paid.rowCount ? 'Handpay already paid' : 'This jackpot is no longer the pending one');
       }
-      const playerId = playerCard ? (await requireUsableCard(db, req.auth.orgId, playerCard)).player.id : null;
-      const paid = await payHandpay(db, actorRef, hp.id, { playerId });
+      const card = playerCard ? await requireUsableCard(db, req.auth.orgId, playerCard) : null;
+      const paid = await payHandpay(db, actorRef, hp.id, { playerId: card?.player.id ?? null, cardId: card?.card.id ?? null, payTo });
       await resolveAlerts(db, { orgId: req.auth.orgId, casinoId: paid.handpay.casino_id, type: 'JACKPOT', machineId }, out);
       const asset = (await db.query('SELECT asset_no FROM machines WHERE id = $1', [machineId])).rows[0].asset_no;
-      return { transaction: paid.transaction, amount: paid.handpay.amount_cents / 100, assetNo: asset, jackpotEventId: paid.handpay.source_event_id, handpayId: paid.handpay.id, status: paid.handpay.status };
+      return {
+        transaction: paid.transaction, amount: paid.handpay.amount_cents / 100, amountCents: paid.handpay.amount_cents, assetNo: asset, jackpotEventId: paid.handpay.source_event_id,
+        handpayId: paid.handpay.id, status: paid.handpay.status, payTo, moneyTransactionId: 'moneyTransaction' in paid ? (paid.moneyTransaction as { id: string }).id : null,
+      };
     });
     out.forEach((msg) => bus.publish(msg));
     return result;

@@ -278,8 +278,16 @@ async function planHandpay(ctx: Ctx): Promise<RailPlan> {
   const p = [casinoId];
   const ids = async (sql: string) => (await db.query(sql, p)).rows.map((r) => r.id);
 
-  const unmapped = await ids(`SELECT id FROM cash_transactions WHERE casino_id = $1 AND type = 'HANDPAY' AND source_event_id IS NULL ORDER BY id`);
-  check(ctx, 'handpay_payments_have_jackpot_event', unmapped.length === 0, unmapped.length ? { unmappedCashTransactionIds: unmapped, reason: 'legacy handpay payment without jackpot event id: cannot be mapped deterministically' } : undefined);
+  // Legacy payments without jackpot event id: only a four-eyes classification (handpay exception) maps them.
+  const unmapped = (await db.query(
+    `SELECT ct.id, x.id AS exception_id, x.status FROM cash_transactions ct LEFT JOIN handpay_legacy_exceptions x ON x.cash_transaction_id = ct.id
+     WHERE ct.casino_id = $1 AND ct.type = 'HANDPAY' AND ct.source_event_id IS NULL AND (x.status IS DISTINCT FROM 'APPROVED') ORDER BY ct.id`, p)).rows;
+  check(ctx, 'handpay_payments_have_jackpot_event', unmapped.length === 0, unmapped.length ? {
+    unmappedCashTransactionIds: unmapped.map((u) => u.id),
+    exceptions: unmapped.map((u) => ({ cashTransactionId: u.id, exceptionId: u.exception_id, status: u.status ?? 'NOT_DETECTED' })),
+    reason: 'legacy handpay payment without jackpot event id: cannot be mapped deterministically',
+    action: 'detect and classify them (LINK / HISTORICAL / DISPUTED, four eyes, evidence) under /api/v1/handpays/legacy-exceptions',
+  } : undefined);
   const badPayments = await ids(
     `SELECT ct.id FROM cash_transactions ct LEFT JOIN handpays h ON h.source_event_id = ct.source_event_id
      WHERE ct.casino_id = $1 AND ct.type = 'HANDPAY' AND ct.source_event_id IS NOT NULL
@@ -291,7 +299,9 @@ async function planHandpay(ctx: Ctx): Promise<RailPlan> {
   const badPaid = await ids(
     `SELECT h.id FROM handpays h LEFT JOIN cash_transactions ct ON ct.id = h.legacy_cash_transaction_id
      WHERE h.casino_id = $1 AND h.status IN ('PAID', 'MACHINE_RESET')
-       AND (ct.id IS NULL OR ct.type <> 'HANDPAY' OR ct.source_event_id IS DISTINCT FROM h.source_event_id)
+       AND (ct.id IS NULL OR ct.type <> 'HANDPAY' OR (ct.source_event_id IS DISTINCT FROM h.source_event_id
+            AND NOT EXISTS (SELECT 1 FROM handpay_legacy_exceptions x WHERE x.cash_transaction_id = ct.id AND x.status = 'APPROVED'
+                            AND x.resolution = 'LINK' AND x.linked_event_id = h.source_event_id)))
      ORDER BY h.id`,
   );
   check(ctx, 'paid_handpays_have_legacy_payment', badPaid.length === 0, badPaid.length ? { handpayIds: badPaid } : undefined);
@@ -300,6 +310,14 @@ async function planHandpay(ctx: Ctx): Promise<RailPlan> {
        AND EXISTS (SELECT 1 FROM cash_transactions ct WHERE ct.source_event_id = h.source_event_id)`,
   );
   check(ctx, 'unpaid_handpays_have_no_payment', paidOpen.length === 0, paidOpen.length ? { handpayIds: paidOpen } : undefined);
+  // A disputed historical payment must not possibly concern a handpay that would be opened as payable.
+  const disputed = await ids(
+    `SELECT h.id FROM handpay_legacy_exceptions x JOIN cash_transactions ct ON ct.id = x.cash_transaction_id
+     JOIN handpays h ON h.casino_id = x.casino_id AND h.status IN ('PENDING', 'APPROVED') AND (ct.machine_id IS NULL OR h.machine_id = ct.machine_id)
+     JOIN machine_events e ON e.event_id = h.source_event_id AND e.occurred_at <= ct.created_at
+     WHERE x.casino_id = $1 AND x.status = 'APPROVED' AND x.resolution = 'DISPUTED' ORDER BY h.id`,
+  );
+  check(ctx, 'disputed_payments_clear_of_open_handpays', disputed.length === 0, disputed.length ? { handpayIds: disputed, action: 'LINK or VOID these handpays before the cutover' } : undefined);
   const orphanJackpots = await ids(
     `SELECT m.id FROM machines m WHERE m.casino_id = $1 AND m.jackpot_pending
        AND (SELECT count(*) FROM handpays h WHERE h.machine_id = m.id AND h.status IN ('PENDING', 'APPROVED', 'PAID')) <> 1`,

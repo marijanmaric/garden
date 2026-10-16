@@ -146,6 +146,12 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 1. Org lock (the same lock writeAudit takes): keeps the lock order fixed and the audit chain linear.
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`audit:${input.orgId}`]);
 
+  // A closed business date takes no money (the database refuses it too); answer with a clear 409.
+  const closed = await db.query(
+    `SELECT d.business_date::text AS d FROM business_day_closes d JOIN casinos c ON c.id = d.casino_id
+     WHERE d.casino_id = $1 AND d.business_date = (now() AT TIME ZONE c.timezone)::date`, [input.ctx.casinoId]);
+  if (closed.rowCount) throw new HttpError(409, `Business date ${closed.rows[0].d} of this casino is closed`);
+
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
   const refs = (Object.keys(REF_COLUMNS) as Array<keyof typeof REF_COLUMNS>).map((k) => input.ctx[k] ?? null);

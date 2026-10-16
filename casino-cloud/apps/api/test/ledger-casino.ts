@@ -12,6 +12,8 @@ export interface LedgerCasino {
   vault: string;
   desk: string;
   machines: Array<{ id: string; code: string; asset: string }>;
+  /** Edge gateway of the casino (device id + key for the gateway API) when requested. */
+  gateway?: { id: string; orgId: string; casinoId: string; deviceId: string; key: string };
 }
 
 const ALL: CutoverRail[] = ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE'];
@@ -23,41 +25,64 @@ async function employees(pool: Pool, orgId: string) {
 
 export async function createLedgerCasino(
   pool: Pool,
-  opts: { orgId: string; code: string; rails?: CutoverRail[]; machines?: number; vaultCents?: number; counter?: string; verifier?: string },
+  opts: { orgId: string; code: string; rails?: CutoverRail[]; machines?: number; vaultCents?: number; counter?: string; verifier?: string; gateway?: boolean },
 ): Promise<LedgerCasino> {
-  const { withTransaction } = await import('@m1/database');
-  const cutover = await import('../src/services/cutover');
-  const rails = opts.rails ?? ALL;
-  const emp = await employees(pool, opts.orgId);
-  const counter = emp[opts.counter ?? 'manager@example.com'];
-  const verifier = emp[opts.verifier ?? 'admin@example.com'];
-  const q = async (sql: string, p: unknown[]) => (await pool.query(sql, p)).rows[0];
+  const c = await createCasinoShell(pool, opts);
+  await cutoverCasinoRails(pool, c, opts.rails ?? ALL, opts);
+  return c;
+}
 
+/** Casino, settings, vault, desk, machines (and a gateway) in LEGACY mode: no rail cut over yet. */
+export async function createCasinoShell(pool: Pool, opts: { orgId: string; code: string; machines?: number; gateway?: boolean }): Promise<LedgerCasino> {
+  const { createHash } = await import('node:crypto');
+  const emp = await employees(pool, opts.orgId);
+  const q = async (sql: string, p: unknown[]) => (await pool.query(sql, p)).rows[0];
   const id = (await q(`INSERT INTO casinos (org_id, code, name) VALUES ($1,$2,$3) RETURNING id`, [opts.orgId, opts.code, `Ledger ${opts.code}`])).id;
   await pool.query('INSERT INTO casino_money_settings (casino_id, org_id) VALUES ($1,$2)', [id, opts.orgId]);
   const vault = (await q(`INSERT INTO vaults (org_id, casino_id, name) VALUES ($1,$2,'Main Vault') RETURNING id`, [opts.orgId, id])).id;
   const desk = (await q(`INSERT INTO cash_desks (org_id, casino_id, name) VALUES ($1,$2,'Ledger Cage') RETURNING id`, [opts.orgId, id])).id;
   for (const e of Object.values(emp)) await pool.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [e, id, opts.orgId]);
+  let gateway: LedgerCasino['gateway'];
+  if (opts.gateway) {
+    const key = `${opts.code}-key-secret`;
+    const g = await q(`INSERT INTO gateways (org_id, casino_id, device_id, name, api_key_hash) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [opts.orgId, id, `${opts.code}-GW`, `Gateway ${opts.code}`, createHash('sha256').update(key).digest('hex')]);
+    gateway = { id: g.id, orgId: opts.orgId, casinoId: id, deviceId: `${opts.code}-GW`, key };
+  }
   const machines = [];
   for (let i = 1; i <= (opts.machines ?? 3); i++) {
     const code = `${opts.code}-${String(i).padStart(4, '0')}`;
-    const m = await q(`INSERT INTO machines (org_id, casino_id, machine_code, asset_no) VALUES ($1,$2,$3,$4) RETURNING id`, [opts.orgId, id, code, `${opts.code}M${i}`]);
+    const m = await q(`INSERT INTO machines (org_id, casino_id, machine_code, asset_no, gateway_id) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [opts.orgId, id, code, `${opts.code}M${i}`, gateway?.id ?? null]);
     machines.push({ id: m.id, code, asset: `${opts.code}M${i}` });
   }
+  return { id, orgId: opts.orgId, vault, desk, machines, gateway };
+}
 
-  const as = (employeeId: string) => ({ orgId: opts.orgId, employeeId, casinoIds: [id] });
+/** Cuts the given rails of a casino over through the real mechanism (verified counts, openings). */
+export async function cutoverCasinoRails(
+  pool: Pool,
+  c: LedgerCasino,
+  rails: CutoverRail[],
+  opts: { vaultCents?: number; deskCents?: number; counter?: string; verifier?: string } = {},
+) {
+  const { withTransaction } = await import('@m1/database');
+  const cutover = await import('../src/services/cutover');
+  const emp = await employees(pool, c.orgId);
+  const counter = emp[opts.counter ?? 'manager@example.com'];
+  const verifier = emp[opts.verifier ?? 'admin@example.com'];
+  const { id, vault, desk, machines } = c;
+  const as = (employeeId: string) => ({ orgId: c.orgId, employeeId, casinoIds: [id] });
   const count = async (context: 'VAULT_CUTOVER' | 'DRAWER_CUTOVER' | 'MACHINE_DROP', ref: Record<string, string>, totalCents: number) => {
-    const c = await withTransaction(pool as never, (db) => cutover.recordCutoverCount(db, as(counter), { casinoId: id, context, ...ref, totalCents }));
-    await withTransaction(pool as never, (db) => cutover.verifyCutoverCount(db, as(verifier), c.id, { totalCents }));
+    const x = await withTransaction(pool as never, (db) => cutover.recordCutoverCount(db, as(counter), { casinoId: id, context, ...ref, totalCents }));
+    await withTransaction(pool as never, (db) => cutover.verifyCutoverCount(db, as(verifier), x.id, { totalCents }));
   };
   const run = (rail: CutoverRail, target: Record<string, string> = { casinoId: id }) => cutover.runCutover(pool as never, as(verifier), { rail, ...target });
-
   if (rails.includes('VAULT')) {
     await count('VAULT_CUTOVER', { vaultId: vault }, opts.vaultCents ?? 100_000_000);
     await run('VAULT');
   }
   if (rails.includes('CASH')) {
-    await count('DRAWER_CUTOVER', { cashDeskId: desk }, 0);
+    await count('DRAWER_CUTOVER', { cashDeskId: desk }, opts.deskCents ?? 0);
     await run('CASH');
   }
   if (rails.includes('HANDPAY')) await run('HANDPAY');
@@ -68,7 +93,6 @@ export async function createLedgerCasino(
       await count('MACHINE_DROP', { machineId: m.id }, 0);
       await run('MACHINE', { machineId: m.id });
     }
-  return { id, orgId: opts.orgId, vault, desk, machines };
 }
 
 /** Opens (and verifies) the vault session if needed: counter counts the ledger amount, verifier confirms blind. */

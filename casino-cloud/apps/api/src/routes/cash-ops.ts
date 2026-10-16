@@ -9,6 +9,8 @@ import { cancelMovement, confirmMovement, decideShortOver, recountVault, request
 import { closeBusinessDay, decideResolution, liftFreeze, requestResolution, runReconciliation } from '../services/reconciliation';
 import { closeVaultSession, openVaultSession, startVaultCount } from '../services/vault';
 import { decideApproval } from '../services/approvals';
+import { decideHandpayApproval } from '../services/handpays';
+import { decideException } from '../services/handpay-exceptions';
 
 /**
  * Step 7a: ledger-backed vault and drawer operations, approvals, reconciliation, freezes, day close.
@@ -130,6 +132,8 @@ export async function cashOpsRoutes(app: FastifyInstance) {
       if (!ap || !req.auth.casinoIds.includes(ap.casino_id)) throw new HttpError(404, 'Approval not found');
       if (ap.action === 'DRAWER_SHORT_OVER') return decideShortOver(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'RECONCILIATION_RESOLUTION') return decideResolution(db, actorOf(req), id, body.decision, body.note);
+      if (ap.action === 'HANDPAY_PAY') return decideHandpayApproval(db, actorOf(req), id, body.decision, body.note);
+      if (ap.action === 'HANDPAY_EXCEPTION') return decideException(db, actorOf(req), id, body.decision, body.note);
       return { approval: await decideApproval(db, actorOf(req), id, body.decision, body.note) };
     });
   });

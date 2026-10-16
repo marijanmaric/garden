@@ -21,3 +21,11 @@ test('every legacy cash transaction type is mapped to the rails it moves money o
   assert.deepEqual(Object.keys(LEGACY_CASH_TX_RAILS).sort(), Object.keys(CASH_TX_TYPES).sort());
   for (const rails of Object.values(LEGACY_CASH_TX_RAILS)) assert.ok(rails.includes('CASH'));
 });
+
+test('production release: a rail is released only with everything its legacy operations depend on', async () => {
+  const { RAIL_PRODUCTION_READY, railReleaseBlockers } = await import('./cutover');
+  assert.deepEqual([...RAIL_PRODUCTION_READY], ['CASHLESS']);
+  assert.deepEqual(railReleaseBlockers('HANDPAY'), ['TITO']);
+  assert.deepEqual(railReleaseBlockers('CASH'), ['TITO']);
+  assert.deepEqual(railReleaseBlockers('CASHLESS'), []);
+});

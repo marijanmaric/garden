@@ -212,6 +212,24 @@ organisation, MACHINE per machine. The migration itself moves nothing; every rai
   money transaction.
 - Production cutover stays locked for VAULT / CASH until ticket payout and handpay run on the ledger (7b / 7c).
 
+### Handpay on the ledger (migration 008, Step 7b)
+
+- Jackpot event → handpay PENDING with HANDPAY_CREATE_JACKPOT (expense → payable) in the ingest transaction;
+  approval only above `handpay_approval_cents` (approvals table, four eyes, approver ≠ payer); HANDPAY_PAY
+  (payable → drawer, or → wallet with the HANDPAY_TO_WALLET capability) atomic with the state change; the cash row
+  is a LegacyProjection carrying the jackpot event id. Verification required above the organisation threshold.
+- Exactly once: one handpay per jackpot event, one payment and one creation booking per handpay (unique indexes),
+  the Step 1 cash index, ledger dedupe keys and the HTTP Idempotency-Key.
+- Machine reset is a separate gateway command: failure / timeout → FAILED → retried (job or
+  `POST /api/v1/handpays/:id/reset`); late or duplicate responses confirm once; a reset never books money.
+- Void before payment reverses the liability. LEGACY HANDPAY rails keep the Step 1 cash flow; a LEGACY HANDPAY with
+  CASH on the ledger refuses payment instead of mixing.
+- Legacy payments without jackpot event id (before Step 1) block the HANDPAY cutover until classified as LINK /
+  HISTORICAL / DISPUTED by two employees with evidence (`/api/v1/handpays/legacy-exceptions`); no ledger money and
+  no cash movement is created for history.
+- Reconciliation adds HANDPAY (payable = open handpays, payments and creations booked once); mismatch freezes HANDPAY.
+- Production cutover: HANDPAY needs CASH, CASH needs TITO, so it stays locked until 7c.
+
 ### Accounting definitions
 
 | Metric | Definition |

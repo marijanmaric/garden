@@ -48,3 +48,17 @@ export async function projectShiftCounted(db: Db, sessionId: string, c: { expect
 export async function projectShiftClosed(db: Db, sessionId: string, note?: string | null) {
   await db.query(`UPDATE cashier_sessions SET status = 'CLOSED', closed_at = now(), close_note = COALESCE($2, close_note) WHERE id = $1`, [sessionId, note ?? null]);
 }
+
+/**
+ * A ledger handpay payment in cash as the legacy HANDPAY drawer row. It carries the jackpot event id,
+ * so the Step 1 unique index (one cash payment per jackpot event) keeps protecting it.
+ */
+export async function projectHandpayCash(
+  db: Db,
+  session: SessionRow,
+  input: { amountCents: number; moneyTransactionId: string; sourceEventId: string; machineId: string; playerId?: string | null; reference: string },
+) {
+  return addCashTx(db as PoolClient, session, 'HANDPAY', input.amountCents / 100, {
+    moneyTransactionId: input.moneyTransactionId, sourceEventId: input.sourceEventId, machineId: input.machineId, playerId: input.playerId ?? undefined, reference: input.reference,
+  });
+}

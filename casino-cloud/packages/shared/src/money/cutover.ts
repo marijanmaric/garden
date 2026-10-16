@@ -58,13 +58,38 @@ export const MACHINE_MONEY_EVENT_TYPES = ['CASH_IN', 'CASH_OUT', 'TITO_IN', 'TIT
 /** Machine event types that put cash into the cashbox (legacy COIN_IN = canonical CASH_IN). */
 export const CASHBOX_IN_EVENT_TYPES = ['CASH_IN', 'COIN_IN'] as const;
 
+/** Rails whose ledger-backed operations are implemented (7a: VAULT, CASH; 7b: HANDPAY). */
+export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDPAY', 'CASHLESS'];
+
 /**
- * Rails whose complete ledger-backed operations exist, so a production cutover is allowed.
- * VAULT and CASH are implemented in Step 7a, but ticket payouts and handpays (cash drawer +
- * TITO / HANDPAY) follow in 7b / 7c: until then a production cutover of them is refused.
- * Dry runs are always allowed; tests use the cutover service directly.
+ * Rails that must be released too before a rail can go live in production, because the rail's
+ * legacy operations would otherwise stop working: legacy fills / drops move vault AND drawer money
+ * (VAULT needs CASH), a cashier ticket payout moves drawer AND ticket money (CASH needs TITO), a
+ * handpay is paid from a drawer (HANDPAY needs CASH).
  */
-export const RAIL_PRODUCTION_READY: readonly CutoverRail[] = ['CASHLESS'];
+export const RAIL_RELEASE_REQUIRES: Record<CutoverRail, readonly CutoverRail[]> = {
+  VAULT: ['CASH'],
+  CASH: ['VAULT', 'TITO', 'HANDPAY'],
+  HANDPAY: ['CASH'],
+  TITO: ['CASH'],
+  CASHLESS: [],
+  MACHINE: ['TITO', 'HANDPAY', 'CASHLESS'],
+};
+
+/** Rails not implemented yet that block a production cutover of `rail` (empty = released). */
+export function railReleaseBlockers(rail: CutoverRail): CutoverRail[] {
+  const seen = new Set<CutoverRail>();
+  const visit = (r: CutoverRail) => {
+    if (seen.has(r)) return;
+    seen.add(r);
+    RAIL_RELEASE_REQUIRES[r].forEach(visit);
+  };
+  visit(rail);
+  return [...seen].filter((r) => !RAIL_IMPLEMENTED.includes(r)).sort();
+}
+
+/** Rails that may be cut over in production now. Dry runs are always allowed; tests use the service directly. */
+export const RAIL_PRODUCTION_READY: readonly CutoverRail[] = (['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE'] as const).filter((r) => railReleaseBlockers(r).length === 0);
 
 /** Freeze scopes: one rail (of a casino / machine / the org for CASHLESS) or everything (GLOBAL). */
 export type FreezeRail = CutoverRail | 'GLOBAL';
