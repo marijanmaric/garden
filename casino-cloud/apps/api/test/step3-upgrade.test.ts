@@ -50,17 +50,24 @@ test('the ledger starts empty (no backfill before 006) and consistent', async ()
   assert.equal((await ledger.checkLedgerInvariants(pool)).ok, true);
 });
 
-test('the ledger works on the upgraded database', async () => {
+test('the ledger on the upgraded database (today\'s schema): legacy rails take no ledger booking (Step 7a guard)', async () => {
+  await db.migrate(pool, () => {});
+  await db.syncMoneyModel(pool);
   const org = (await pool.query(`SELECT id FROM organizations WHERE slug = 'upgrade'`)).rows[0].id;
   const casino = (await pool.query(`SELECT id FROM casinos WHERE org_id = $1`, [org])).rows[0].id;
   const machine = (await pool.query(`SELECT id FROM machines WHERE org_id = $1 LIMIT 1`, [org])).rows[0].id;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await ledger.executeMoneyTransaction(client, { orgId: org, type: 'MACHINE_CASH_IN', dedupeKey: `t-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { casinoId: casino, machineId: machine, amountCents: 5_000 as never } });
-    await client.query('COMMIT');
+    await assert.rejects(
+      ledger.executeMoneyTransaction(client, { orgId: org, type: 'MACHINE_CASH_IN', dedupeKey: `t-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { casinoId: casino, machineId: machine, amountCents: 5_000 as never } }),
+      /MACHINE money is not on the ledger/,
+    );
+    await client.query('ROLLBACK');
   } finally {
     client.release();
   }
+  const counts = (await pool.query('SELECT (SELECT count(*)::int FROM money_transactions) t, (SELECT count(*)::int FROM ledger_entries) e')).rows[0];
+  assert.deepEqual(counts, { t: 0, e: 0 });
   assert.equal((await ledger.checkLedgerInvariants(pool)).ok, true);
 });

@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { syncMoneyModel, withTransaction, type Pool, type PoolClient } from '@m1/database';
 import { MONEY_TRANSACTION_TYPES, ACCOUNT_KIND_KEYS, cents, type MoneyContext, type MoneyTransactionType } from '@m1/shared';
 import { setupTestDatabase } from './helpers';
+import { createLedgerCasino, openLedgerShift } from './ledger-casino';
 
 let app: FastifyInstance;
 let pool: Pool;
@@ -51,13 +52,6 @@ const wallet = (walletId: string) => ({ kind: 'WALLET_AVAILABLE' as const, walle
 const drawer = (casinoId: string, cashierSessionId: string) => ({ kind: 'DRAWER' as const, casinoId, cashierSessionId });
 const balance = (ref: Parameters<typeof ledger.getBalance>[2]) => ledger.getBalance(pool, orgId, ref);
 
-async function fundDrawer(casinoId: string, cashierSessionId: string, amountCents: number) {
-  await tx((db) => ledger.executeMoneyTransaction(db, {
-    orgId, type: 'OPENING_BALANCE', dedupeKey: key('open'), actor: system,
-    ctx: { casinoId, amountCents: cents(amountCents), debit: drawer(casinoId, cashierSessionId), credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: randomUUID() } },
-  }));
-}
-
 async function deposit(walletId: string, amountCents: number, casinoId = casinoA, cashierSessionId = sessionA) {
   return tx((db) => ledger.executeMoneyTransaction(db, {
     orgId, type: 'CASH_DEPOSIT', dedupeKey: key('dep'), actor: system,
@@ -93,24 +87,23 @@ before(async () => {
   const g = (await pool.query(`SELECT id, org_id, casino_id, device_id FROM gateways WHERE device_id = 'GW-VIE-001'`)).rows[0];
   gw = { id: g.id, orgId: g.org_id, casinoId: g.casino_id, deviceId: g.device_id };
   orgId = g.org_id;
-  casinoA = g.casino_id;
-  casinoB = (await pool.query(`INSERT INTO casinos (org_id, code, name) VALUES ($1, 'VIE-002', 'Second Casino') RETURNING id`, [orgId])).rows[0].id;
+  // D7: ledger tests run on casinos whose rails were cut over through the real mechanism (counts,
+  // openings); the seeded demo casino stays LEGACY and is used only for gaming ingestion here.
+  const ledgerA = await createLedgerCasino(pool, { orgId, code: 'VIE-L1', machines: 2 });
+  const ledgerB = await createLedgerCasino(pool, { orgId, code: 'VIE-L2', machines: 1 });
+  casinoA = ledgerA.id;
+  casinoB = ledgerB.id;
   const employees = Object.fromEntries((await pool.query('SELECT email, id FROM employees WHERE org_id = $1', [orgId])).rows.map((r) => [r.email, r.id]));
   cashierId = employees['cashier@example.com'];
-  const deskA = (await pool.query(`SELECT id FROM cash_desks WHERE casino_id = $1 LIMIT 1`, [casinoA])).rows[0].id;
-  const deskB = (await pool.query(`INSERT INTO cash_desks (org_id, casino_id, name) VALUES ($1,$2,'Cage B') RETURNING id`, [orgId, casinoB])).rows[0].id;
-  sessionA = (await pool.query(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,0) RETURNING id`, [orgId, casinoA, deskA, employees['manager@example.com']])).rows[0].id;
-  sessionB = (await pool.query(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,0) RETURNING id`, [orgId, casinoB, deskB, employees['admin@example.com']])).rows[0].id;
+  sessionA = await openLedgerShift(pool, ledgerA, { cashierEmail: 'manager@example.com', floatCents: 1_000_000 });
+  sessionB = await openLedgerShift(pool, ledgerB, { cashierEmail: 'admin@example.com', floatCents: 1_000_000 });
   const card = (await pool.query(`SELECT id, player_id FROM player_cards WHERE org_id = $1 AND card_number = 'PC-00001'`, [orgId])).rows[0];
   cardId = card.id;
   playerId = card.player_id;
   walletPC1 = (await pool.query('SELECT id FROM wallets WHERE player_id = $1', [playerId])).rows[0].id;
   walletPlayers.set(walletPC1, playerId);
-  const m = (await pool.query(`SELECT id, machine_code FROM machines WHERE org_id = $1 AND asset_no = 'M003'`, [orgId])).rows[0];
-  machineId = m.id;
-  machineCode = m.machine_code;
-  await fundDrawer(casinoA, sessionA, 1_000_000);
-  await fundDrawer(casinoB, sessionB, 1_000_000);
+  machineId = ledgerA.machines[0].id;
+  machineCode = (await pool.query(`SELECT machine_code FROM machines WHERE org_id = $1 AND asset_no = 'M003'`, [orgId])).rows[0].machine_code; // legacy demo machine (gaming only)
   cashierToken = (await app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { email: 'cashier@example.com', password: 'demo' } })).json().token;
 });
 
@@ -122,7 +115,7 @@ after(async () => {
 describe('model', () => {
   test('migration 004 applied; kinds and types mirror the shared model (no second matrix)', async () => {
     const applied = (await pool.query(`SELECT name FROM schema_migrations WHERE name >= '004'`)).rows.map((r) => r.name).sort();
-    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql']);
+    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql', '007_ledger_cash_ops.sql']);
     const types = (await pool.query('SELECT code FROM money_transaction_types ORDER BY code')).rows.map((r) => r.code);
     assert.deepEqual(types, [...MONEY_TRANSACTION_TYPES].sort());
     const kinds = (await pool.query('SELECT code FROM ledger_account_kinds ORDER BY code')).rows.map((r) => r.code);
@@ -242,8 +235,7 @@ describe('immutability and reversals', () => {
   });
 
   test('reversal rules from the matrix are enforced and reversals respect balances', async () => {
-    const vaultId = (await pool.query('SELECT id FROM vaults WHERE casino_id = $1', [casinoA])).rows[0].id;
-    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'OPENING_BALANCE', dedupeKey: key('vault'), actor: system, ctx: { casinoId: casinoA, amountCents: cents(50_000), debit: { kind: 'VAULT', vaultId }, credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: randomUUID() } } }));
+    const vaultId = (await pool.query('SELECT id FROM vaults WHERE casino_id = $1', [casinoA])).rows[0].id; // funded by its cutover count
     const fill = await run('VAULT_FILL', { amountCents: 400, vaultId, cashierSessionId: sessionA });
     await assert.rejects(tx((db) => ledger.reverseMoneyTransaction(db, { orgId, transactionId: fill.transaction.id, dedupeKey: key(), actor: system, reason: 'nope' })), /undone with VAULT_DROP/);
     // Deposit, spend it, then try to reverse the deposit: the wallet would go negative.
@@ -283,11 +275,15 @@ describe('MACHINE_CREDIT: the bridge between money and gaming', () => {
     assert.equal(r.accepted, 1);
     assert.deepEqual(await moneyCount(), before, 'bets and wins never become ledger transactions');
 
-    const ticketId = (await pool.query(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,70,now() + interval '30 days') RETURNING id`, [orgId, casinoA, String(Date.now()).padStart(18, '0')])).rows[0].id;
     await run('MACHINE_CASH_IN', { amountCents: 10_000, machineId }, key('cashin'));
     assert.equal(await balance(credit), 10_000);
-    // Player loses 30.00 on the machine (gaming only), then cashes out 70.00 by ticket.
-    await run('TITO_ISSUE_MACHINE', { amountCents: 7_000, machineId, ticketId });
+    // Player loses 30.00 on the machine (gaming only), then cashes out 70.00 by ticket. TITO is on the
+    // ledger here: the ticket row and its ledger transaction are written in one database transaction.
+    const ticketId = await tx(async (db) => {
+      const id = (await db.query(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,70,now() + interval '30 days') RETURNING id`, [orgId, casinoA, String(Date.now()).padStart(18, '0')])).rows[0].id;
+      await ledger.executeMoneyTransaction(db, { orgId, type: 'TITO_ISSUE_MACHINE', dedupeKey: key(), actor: system, ctx: { casinoId: casinoA, amountCents: cents(7_000), machineId, ticketId: id } });
+      return id as string;
+    });
     assert.equal(await balance(credit), 3_000);
     assert.equal(await balance({ kind: 'TICKET_LIABILITY', casinoId: casinoA }), 7_000);
     // Settlement: credit meter reports 0, so 30.00 is the gaming result.

@@ -10,6 +10,7 @@ import { requireUsableCard } from '../services/players';
 import { payHandpay } from '../services/handpays';
 import { openAlert, resolveAlerts } from '../services/alerts';
 import { addCashTx, requireOpenSession, sessionTotals } from '../services/cashier';
+import { cashOnLedger, submitCloseCount } from '../services/cash-ops';
 
 const money = z.number().min(0).max(1_000_000);
 
@@ -40,6 +41,8 @@ export async function cashierRoutes(app: FastifyInstance) {
     );
     const s = r.rows[0];
     if (!s) return { session: null };
+    // Ledger casinos: the cashier counts blind, the expected drawer balance is shown to supervisors only.
+    const blind = (await cashOnLedger(pool, req.auth.orgId, s.casino_id)) && !hasPermission(req.auth.role, 'cashier.supervise');
     const [totals, tx] = await Promise.all([
       sessionTotals(pool, s.id, s.opening_balance),
       pool.query(
@@ -49,6 +52,7 @@ export async function cashierRoutes(app: FastifyInstance) {
         [s.id],
       ),
     ]);
+    if (blind) return { session: { ...s, expected_balance: null, blind: true, expected: null, byType: {} }, transactions: tx.rows.map(({ amount: _a, ...t }) => t) };
     return { session: { ...s, ...totals }, transactions: tx.rows };
   });
 
@@ -57,6 +61,8 @@ export async function cashierRoutes(app: FastifyInstance) {
     return idempotent(req, reply, async (db) => {
       const d = await db.query('SELECT id, casino_id FROM cash_desks WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3) AND active', [body.cashDeskId, req.auth.orgId, req.auth.casinoIds]);
       if (!d.rowCount) throw new HttpError(404, 'Cash desk not found');
+      if (body.openingBalance !== 0 && (await cashOnLedger(db, req.auth.orgId, d.rows[0].casino_id)))
+        throw new HttpError(409, 'On the ledger a shift opens with an empty drawer: the float comes from the vault as a fill');
       try {
         const s = await db.query(
           `INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -76,6 +82,12 @@ export async function cashierRoutes(app: FastifyInstance) {
     const body = z.object({ countedBalance: money, note: z.string().max(500).optional() }).parse(req.body);
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
+      const ledgerSession = (await db.query(`SELECT casino_id FROM cashier_sessions WHERE org_id = $1 AND employee_id = $2 AND status IN ('OPEN', 'COUNTING')`, [req.auth.orgId, req.auth.sub])).rows[0];
+      if (ledgerSession && (await cashOnLedger(db, req.auth.orgId, ledgerSession.casino_id))) {
+        // Ledger casinos: blind count -> short / over (approval above the limit) -> final drop to the vault.
+        return submitCloseCount(db, { orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip, casinoIds: req.auth.casinoIds },
+          { totalCents: Math.round(body.countedBalance * 100), note: body.note });
+      }
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       const { expected } = await sessionTotals(db, s.id, s.opening_balance);
       const difference = round2(body.countedBalance - expected);
@@ -126,6 +138,10 @@ export async function cashierRoutes(app: FastifyInstance) {
     } else if (body.amount < 0) throw new HttpError(400, 'Amount must be positive');
     return idempotent(req, reply, async (db) => {
       const s = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
+      if (await cashOnLedger(db, req.auth.orgId, s.casino_id))
+        throw new HttpError(409, body.type === 'FILL' || body.type === 'DROP'
+          ? 'On the ledger fills and drops are vault movements confirmed by the receiving side (/api/v1/cash/movements)'
+          : 'Generic cash in / out / adjustment is not available on the ledger: use an explicit money operation or a four-eyes adjustment');
       let playerId: string | undefined;
       if (body.playerCard) {
         // Reference only: the card identifies the player for this cash movement; it holds no money.

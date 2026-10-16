@@ -57,3 +57,17 @@ export const LEGACY_CASH_TX_RAILS: Record<string, readonly CutoverRail[]> = {
 export const MACHINE_MONEY_EVENT_TYPES = ['CASH_IN', 'CASH_OUT', 'TITO_IN', 'TITO_OUT', 'CASHLESS_IN', 'CASHLESS_OUT', 'JACKPOT', 'COIN_IN', 'COIN_OUT', 'TICKET_IN', 'TICKET_OUT'] as const;
 /** Machine event types that put cash into the cashbox (legacy COIN_IN = canonical CASH_IN). */
 export const CASHBOX_IN_EVENT_TYPES = ['CASH_IN', 'COIN_IN'] as const;
+
+/**
+ * Rails whose complete ledger-backed operations exist, so a production cutover is allowed.
+ * VAULT and CASH are implemented in Step 7a, but ticket payouts and handpays (cash drawer +
+ * TITO / HANDPAY) follow in 7b / 7c: until then a production cutover of them is refused.
+ * Dry runs are always allowed; tests use the cutover service directly.
+ */
+export const RAIL_PRODUCTION_READY: readonly CutoverRail[] = ['CASHLESS'];
+
+/** Freeze scopes: one rail (of a casino / machine / the org for CASHLESS) or everything (GLOBAL). */
+export type FreezeRail = CutoverRail | 'GLOBAL';
+
+/** The only bookings allowed on a frozen rail: corrections (both four-eyes / reversal rules apply). */
+export const CORRECTION_TYPES = ['ADJUSTMENT', 'REVERSAL'] as const;

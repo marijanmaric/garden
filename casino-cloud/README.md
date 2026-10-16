@@ -191,6 +191,27 @@ organisation, MACHINE per machine. The migration itself moves nothing; every rai
 - `POST /api/v1/money/counts`, `/counts/:id/verify`, `/money/cutover/dry-run`, `/money/cutover` (permission
   `money.cutover`), `GET /api/v1/money/rails`. A fresh demo database starts with CASHLESS on the ledger only.
 
+### Ledger cash and vault (migration 007, Step 7a)
+
+- **Final rail rule**, enforced by the ledger service and by a database trigger on `ledger_entries`: a LEGACY rail takes
+  no ledger booking; a LEDGER rail takes no independent legacy money write (legacy rows are projections written by
+  `legacy-projection.ts` in the same transaction); a frozen rail takes only corrections (ADJUSTMENT / REVERSAL);
+  opening balances exist only inside a cutover.
+- **Vault ↔ drawer** (`cash-ops.ts`): a fill is issued by the vault and confirmed by the cashier, a drop is handed in
+  by the cashier and confirmed by the vault, each with the receiver's own count. REQUESTED moves nothing; a count
+  mismatch rejects; unconfirmed requests expire.
+- **Shift**: opens with an empty drawer (float = fill). Close = blind count → DRAWER_SHORT_OVER (supervisor approval
+  above `short_over_approval_cents`) → final drop to the vault → closed with drawer 0.
+- **Vault session**: blind opening / closing count verified by a second employee's blind count; the difference is
+  booked as VAULT_COUNT_DIFFERENCE (counter = actor, verifier = approver). Fills / drops need a verified open vault.
+- **Reconciliation** (`reconciliation.ts`, every 15 minutes and on demand): CASH (projection ↔ ledger per shift),
+  VAULT (movements ↔ ledger, count settlements) and the global ledger invariants. A CRITICAL mismatch raises an alert
+  and freezes the affected rail (global: everything); other rails continue. A freeze is lifted only after a clean run;
+  a discrepancy that cannot be undone is explained by two different employees.
+- **Day close**: only a past business date, only without freezes and with a clean run; afterwards that date takes no
+  money transaction.
+- Production cutover stays locked for VAULT / CASH until ticket payout and handpay run on the ledger (7b / 7c).
+
 ### Accounting definitions
 
 | Metric | Definition |

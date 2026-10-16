@@ -2,6 +2,7 @@ import { writeAudit, type PoolClient } from '@m1/database';
 import { VAULT_SESSION_TRANSITIONS, denominationTotal, type CashCountContext, type VaultSessionStatus } from '@m1/shared';
 import { HttpError } from '../auth';
 import type { Actor } from './players';
+import { railOnLedger } from './rails';
 
 /** Vault sessions and cash counts (entities only; vault money movements follow with the ledger). */
 
@@ -68,7 +69,9 @@ export async function openVaultSession(db: Db, a: ScopedActor, input: { vaultId:
     if ((err as { constraint?: string }).constraint === 'vault_sessions_one_open_per_vault') throw new HttpError(409, 'Vault already has an open session');
     throw err;
   }
-  const count = await recordCashCount(db, a, { ...input.count, casinoId, context: 'VAULT_OPEN', vaultSessionId: s.id });
+  // On the ledger the opening count is blind and takes effect only after a second, blind count (cash-ops).
+  const onLedger = await railOnLedger(db, a.orgId, 'VAULT', casinoId);
+  const count = await recordCashCount(db, a, { ...input.count, ...(onLedger ? { blind: true } : {}), casinoId, context: 'VAULT_OPEN', vaultSessionId: s.id });
   await writeAudit(db as PoolClient, { orgId: a.orgId, casinoId, actorType: 'EMPLOYEE', actorId: a.employeeId, actorName: a.employeeEmail ?? null, action: 'vault.session_opened', entityType: 'vault_session', entityId: s.id, details: { vaultId: input.vaultId, countId: count.id, totalCents: count.total_cents } });
   return { session: s, count };
 }
@@ -76,6 +79,8 @@ export async function openVaultSession(db: Db, a: ScopedActor, input: { vaultId:
 export async function startVaultCount(db: Db, a: ScopedActor, sessionId: string) {
   const s = await lockSession(db, a, sessionId);
   move(s.status, 'COUNTING');
+  const pending = await db.query(`SELECT 1 FROM cash_movements WHERE vault_session_id = $1 AND status = 'REQUESTED' LIMIT 1`, [sessionId]);
+  if (pending.rowCount) throw new HttpError(409, 'Pending fills / drops must be confirmed or cancelled before the vault count');
   return (await db.query(`UPDATE vault_sessions SET status = 'COUNTING', counting_at = now() WHERE id = $1 RETURNING *`, [sessionId])).rows[0];
 }
 
@@ -84,6 +89,8 @@ export async function closeVaultSession(db: Db, a: ScopedActor, sessionId: strin
   const s = await lockSession(db, a, sessionId);
   move(s.status, 'CLOSED');
   const c = await recordCashCount(db, a, { blind: true, ...count, casinoId: s.casino_id, context: 'VAULT_CLOSE', vaultSessionId: s.id });
+  // On the ledger the session closes only when a second employee verifies this count (cash-ops.verifyVaultCount).
+  if (await railOnLedger(db, a.orgId, 'VAULT', s.casino_id)) return { session: s, count: c, pendingVerification: true };
   const r = await db.query(`UPDATE vault_sessions SET status = 'CLOSED', closed_by = $2, closed_at = now() WHERE id = $1 RETURNING *`, [sessionId, a.employeeId]);
   await writeAudit(db as PoolClient, { orgId: a.orgId, casinoId: s.casino_id, actorType: 'EMPLOYEE', actorId: a.employeeId ?? null, actorName: a.employeeEmail ?? null, action: 'vault.session_closed', entityType: 'vault_session', entityId: s.id, details: { countId: c.id, totalCents: c.total_cents } });
   return { session: r.rows[0], count: c };

@@ -69,7 +69,7 @@ after(async () => {
 
 test('006 applied; history untouched; no money, no cutover, every rail LEGACY', async () => {
   const applied = (await pool.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((r) => r.name);
-  assert.equal(applied.at(-1), '006_money_cutover.sql');
+  assert.ok(applied.includes('006_money_cutover.sql'));
   assert.deepEqual(await fingerprint(), before006);
   assert.deepEqual(await money(), { t: 0, c: 0, i: 0 });
   for (const rail of ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS'])

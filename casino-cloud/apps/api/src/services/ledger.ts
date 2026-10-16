@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeAudit, type PoolClient } from '@m1/database';
 import {
-  ACCOUNT_KINDS, ACCOUNT_KIND_RAIL, MONEY_TRANSACTIONS, MoneyError, accountKey, cents, postings as buildPostings,
+  ACCOUNT_KINDS, ACCOUNT_KIND_RAIL, CORRECTION_TYPES, MONEY_TRANSACTIONS, MoneyError, accountKey, cents, postings as buildPostings,
   type AccountKind, type AccountRef, type MoneyContext, type MoneyTransactionType, type Posting,
 } from '@m1/shared';
 import { HttpError } from '../auth';
@@ -146,9 +146,6 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 1. Org lock (the same lock writeAudit takes): keeps the lock order fixed and the audit chain linear.
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`audit:${input.orgId}`]);
 
-  // Opening balances belong to a rail's cutover. Once a rail is on the ledger, no other opening can touch it.
-  if (input.type === 'OPENING_BALANCE') await assertOpeningAllowed(db, input.orgId, list);
-
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
   const refs = (Object.keys(REF_COLUMNS) as Array<keyof typeof REF_COLUMNS>).map((k) => input.ctx[k] ?? null);
@@ -170,6 +167,10 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
     return { transaction: prev, entries: await loadEntries(db, prev.id), replayed: true };
   }
   const tx: MoneyTransactionRow = inserted.rows[0];
+
+  // Final rail rule (also enforced by the database): money moves only on rails that are on the ledger
+  // and not frozen. A replay of an existing transaction (above) is always answered.
+  await assertRails(db, input.orgId, input.type, input.ctx.casinoId, list);
 
   // 3. Accounts, then 4. lock their balances in ascending id order.
   const withIds = [];
@@ -216,14 +217,34 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   return { transaction: tx, entries: await loadEntries(db, tx.id), replayed: false };
 }
 
-async function assertOpeningAllowed(db: Db, orgId: string, list: Posting[]) {
-  const inCutover = (await db.query(`SELECT current_setting('m1.cutover_id', true) AS id`)).rows[0].id;
-  if (inCutover) return;
+/**
+ * The ledger guard at the service layer, with clear errors before the database guard:
+ *  - LEGACY rail: no ledger booking on its accounts;
+ *  - frozen rail (reconciliation mismatch) or GLOBAL freeze: only corrections;
+ *  - OPENING_BALANCE: only inside a rail cutover.
+ */
+async function assertRails(db: Db, orgId: string, type: MoneyTransactionType, casinoId: string, list: Posting[]) {
+  const correction = (CORRECTION_TYPES as readonly string[]).includes(type);
+  if (type === 'OPENING_BALANCE') {
+    const inCutover = (await db.query(`SELECT current_setting('m1.cutover_id', true) AS id`)).rows[0].id;
+    if (!inCutover) throw new HttpError(409, 'Opening balances are only created by a rail cutover');
+  }
+  const seen = new Set<string>();
+  const targets: Array<{ rail: string | null; casinoId: string | null; machineId: string | null }> = [{ rail: null, casinoId, machineId: null }];
   for (const p of list) {
     const rail = ACCOUNT_KIND_RAIL[p.account.kind];
-    if (!rail) continue;
-    const r = await db.query('SELECT money_rail_ledger($1, $2, $3, $4) AS ledger', [orgId, p.account.casinoId ?? null, rail, p.account.machineId ?? null]);
-    if (r.rows[0].ledger) throw new HttpError(409, `${rail} is on the ledger: opening balances are only created by its cutover`);
+    if (rail) targets.push({ rail, casinoId: p.account.casinoId ?? casinoId, machineId: p.account.machineId ?? null });
+  }
+  for (const t of targets) {
+    const key = `${t.rail}:${t.casinoId}:${t.machineId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const r = (await db.query(
+      'SELECT CASE WHEN $3::text IS NULL THEN true ELSE money_rail_ledger($1, $2, $3, $4) END AS ledger, money_rail_frozen($1, $2, $3, $4) AS frozen',
+      [orgId, t.casinoId, t.rail, t.machineId],
+    )).rows[0];
+    if (!correction && r.frozen) throw new HttpError(409, `${t.rail ?? 'Money'} is frozen after a reconciliation mismatch: only corrections are allowed`);
+    if (type !== 'OPENING_BALANCE' && !r.ledger) throw new HttpError(409, `${t.rail} money is not on the ledger for this ${t.rail === 'MACHINE' ? 'machine' : t.rail === 'CASHLESS' ? 'organisation' : 'casino'} (cutover pending)`);
   }
 }
 

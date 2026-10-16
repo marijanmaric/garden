@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { CUTOVER_RAILS, CUTOVER_SCOPE } from '@m1/shared';
-import { guard, scopeCasino } from '../auth';
+import { CUTOVER_RAILS, CUTOVER_SCOPE, RAIL_PRODUCTION_READY } from '@m1/shared';
+import { HttpError, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
 import { cutoverRail, dryRunCutover, railStatus, recordCutoverCount, verifyCutoverCount } from '../services/cutover';
@@ -37,6 +37,9 @@ export async function moneyRoutes(app: FastifyInstance) {
 
   app.post('/api/v1/money/cutover', { preHandler: guard('money.cutover') }, async (req, reply) => {
     const body = parseTarget(req);
+    // Only rails whose complete ledger operations are released may be cut over in production.
+    if (!RAIL_PRODUCTION_READY.includes(body.rail))
+      throw new HttpError(409, `${body.rail} cutover is not released yet: its ledger operations are not complete (dry run is available)`);
     return idempotent(req, reply, (db) => cutoverRail(db, scoped(req), body));
   });
 

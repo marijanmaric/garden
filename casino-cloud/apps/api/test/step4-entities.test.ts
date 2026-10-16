@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { withTransaction, type Pool, type PoolClient } from '@m1/database';
 import { APPROVAL_TRANSITIONS, HANDPAY_TRANSITIONS, TRANSFER_TRANSITIONS, VAULT_SESSION_TRANSITIONS, WALLET_TRANSITIONS, cents } from '@m1/shared';
 import { setupTestDatabase } from './helpers';
+import { createLedgerCasino, openLedgerShift } from './ledger-casino';
 
 let app: FastifyInstance;
 let pool: Pool;
@@ -28,6 +29,10 @@ let machines: Record<string, { id: string; code: string }>;
 let emp: Record<string, string>;
 let tokens: Record<string, string>;
 let cashierSession: string;
+// D7: wallet / cashless money runs on a casino cut over to the ledger; legacy flows stay on casinoA.
+let ledgerCasino: string;
+let ledgerSession: string;
+let lmachines: Record<string, { id: string; code: string }>;
 const tx = <T>(fn: (db: PoolClient) => Promise<T>) => withTransaction(pool, fn);
 const key = (p = 'k') => `${p}-${randomUUID()}`;
 const actor = (email: string) => ({ orgId, employeeId: emp[email], employeeEmail: email });
@@ -50,12 +55,12 @@ async function newPlayerWithCard() {
 async function deposit(walletId: string, playerId: string, amountCents: number) {
   await tx((db) => svc.ledger.executeMoneyTransaction(db, {
     orgId, type: 'CASH_DEPOSIT', dedupeKey: key('dep'), actor: { type: 'SYSTEM' },
-    ctx: { casinoId: casinoA, amountCents: cents(amountCents), playerId, walletId, cashierSessionId: cashierSession },
+    ctx: { casinoId: ledgerCasino, amountCents: cents(amountCents), playerId, walletId, cashierSessionId: ledgerSession },
   }));
 }
 
 const balances = (walletId: string) => svc.wallets.walletBalances(pool, orgId, walletId);
-const machineCredit = (machineId: string) => svc.ledger.getBalance(pool, orgId, { kind: 'MACHINE_CREDIT', casinoId: casinoA, machineId });
+const machineCredit = (machineId: string) => svc.ledger.getBalance(pool, orgId, { kind: 'MACHINE_CREDIT', casinoId: ledgerCasino, machineId });
 
 function post(user: string, url: string, payload: unknown, k = key()) {
   return app.inject({ method: 'POST', url, payload: payload as object, headers: { authorization: `Bearer ${tokens[user]}`, 'idempotency-key': k } });
@@ -91,6 +96,10 @@ before(async () => {
   cashierSession = (await post('cashier@example.com', '/api/v1/cashier/session/open', { cashDeskId: desks[0].id, openingBalance: 5000 })).json().id;
   assert.equal((await post('attendant@example.com', '/api/v1/cashier/session/open', { cashDeskId: desks[1].id, openingBalance: 5000 })).statusCode, 200);
   assert.equal((await post('manager@example.com', '/api/v1/cashier/session/open', { cashDeskId: desks[2].id, openingBalance: 5000 })).statusCode, 200);
+  const l = await createLedgerCasino(pool, { orgId, code: 'VIE-L4', machines: 9 });
+  ledgerCasino = l.id;
+  lmachines = Object.fromEntries(l.machines.map((m, i) => [`M00${i + 1}`, { id: m.id, code: m.code }]));
+  ledgerSession = await openLedgerShift(pool, l, { cashierEmail: 'admin@example.com', floatCents: 5_000_000 });
 });
 
 after(async () => {
@@ -125,9 +134,9 @@ describe('model consistency', () => {
 
   test('no circular foreign keys between entities and money transactions', async () => {
     const back = (await pool.query(`SELECT conrelid::regclass::text AS t FROM pg_constraint WHERE contype = 'f' AND confrelid = 'money_transactions'::regclass`)).rows.map((r) => r.t).sort();
-    // The ledger itself (entries, reversal), approvals, and since 006 the legacy projections (cash_transactions)
-    // and backfill items point at money transactions; none of them is referenced by a money transaction.
-    assert.deepEqual(back, ['approvals', 'cash_transactions', 'ledger_entries', 'money_backfill_items', 'money_transactions']);
+    // The ledger itself (entries, reversal), approvals, the legacy projections (cash_transactions, 006),
+    // backfill items (006), vault movements and count settlements (007) point at money transactions; none is referenced back.
+    assert.deepEqual(back, ['approvals', 'cash_movements', 'cash_transactions', 'count_settlements', 'ledger_entries', 'money_backfill_items', 'money_transactions']);
   });
 });
 
@@ -155,11 +164,11 @@ describe('wallet', () => {
   test('ACTIVE / BLOCKED / CLOSED with documented rules; CLOSED needs zero balance and is terminal', async () => {
     const p = await newPlayerWithCard();
     await tx((db) => svc.wallets.setWalletStatus(db, actor('manager@example.com'), p.walletId, 'BLOCKED', 'suspicious activity'));
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M001.id, requestKey: key() })), /Wallet status BLOCKED/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M001.id, requestKey: key() })), /Wallet status BLOCKED/);
     await tx((db) => svc.wallets.setWalletStatus(db, actor('manager@example.com'), p.walletId, 'ACTIVE', 'cleared'));
     await deposit(p.walletId, p.player.id, 500);
     await assert.rejects(tx((db) => svc.wallets.setWalletStatus(db, actor('manager@example.com'), p.walletId, 'CLOSED', 'player request')), /must be zero/);
-    await tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_WITHDRAWAL', dedupeKey: key(), actor: { type: 'SYSTEM' }, ctx: { casinoId: casinoA, amountCents: cents(500), playerId: p.player.id, walletId: p.walletId, cashierSessionId: cashierSession } }));
+    await tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_WITHDRAWAL', dedupeKey: key(), actor: { type: 'SYSTEM' }, ctx: { casinoId: ledgerCasino, amountCents: cents(500), playerId: p.player.id, walletId: p.walletId, cashierSessionId: ledgerSession } }));
     await tx((db) => svc.wallets.setWalletStatus(db, actor('manager@example.com'), p.walletId, 'CLOSED', 'player request'));
     await assert.rejects(pool.query(`UPDATE wallets SET status = 'ACTIVE' WHERE id = $1`, [p.walletId]), /cannot change from CLOSED/);
     await assert.rejects(pool.query('DELETE FROM wallets WHERE id = $1', [p.walletId]), /append-only/);
@@ -168,7 +177,7 @@ describe('wallet', () => {
   test('player status restrictions apply to the wallet', async () => {
     const p = await newPlayerWithCard();
     await tx((db) => svc.players.changePlayerStatus(db, actor('manager@example.com'), p.player.id, 'EXCLUDED', 'self exclusion'));
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M001.id, requestKey: key() })), /does not allow/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M001.id, requestKey: key() })), /does not allow/);
     const w = await svc.wallets.lockWallet(pool, orgId, p.walletId);
     svc.wallets.assertWalletOperation(w, 'WITHDRAW');
     svc.wallets.assertWalletOperation(w, 'FROM_MACHINE');
@@ -179,16 +188,16 @@ describe('wallet', () => {
 describe('cashless sessions and transfers', () => {
   test('session ties player, card, wallet and machine; card is only the identifier', async () => {
     const p = await newPlayerWithCard();
-    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M002.id, requestKey: key() }));
-    assert.deepEqual([session.player_id, session.card_id, session.wallet_id, session.machine_id, session.casino_id], [p.player.id, p.card!.id, p.walletId, machines.M002.id, casinoA]);
+    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M002.id, requestKey: key() }));
+    assert.deepEqual([session.player_id, session.card_id, session.wallet_id, session.machine_id, session.casino_id], [p.player.id, p.card!.id, p.walletId, lmachines.M002.id, ledgerCasino]);
     await tx((db) => svc.cashless.closeCashlessSession(db, actor('attendant@example.com'), session.id));
   });
 
   test('unknown, blocked and foreign-organisation inputs are rejected', async () => {
     const p = await newPlayerWithCard();
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: 'NOPE-0000', machineId: machines.M003.id, requestKey: key() })), /Unknown player card/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: 'NOPE-0000', machineId: lmachines.M003.id, requestKey: key() })), /Unknown player card/);
     await tx((db) => svc.players.setCardStatus(db, actor('manager@example.com'), p.card!.id, 'BLOCKED'));
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M003.id, requestKey: key() })), /blocked/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M003.id, requestKey: key() })), /blocked/);
     const casinoOrgB = (await pool.query('SELECT id FROM casinos WHERE org_id = $1', [orgB])).rows[0].id;
     const foreignMachine = (await pool.query(`INSERT INTO machines (org_id, casino_id, machine_code, asset_no) VALUES ($1,$2,'RIV-1','R01') RETURNING id`, [orgB, casinoOrgB])).rows[0].id;
     const q = await newPlayerWithCard();
@@ -196,41 +205,41 @@ describe('cashless sessions and transfers', () => {
     // Database guard: card of another player
     await assert.rejects(pool.query(
       `INSERT INTO cashless_sessions (org_id, casino_id, wallet_id, player_id, card_id, machine_id) VALUES ($1,$2,$3,$4,$5,$6)`,
-      [orgId, casinoA, q.walletId, q.player.id, p.card!.id, machines.M003.id],
+      [orgId, ledgerCasino, q.walletId, q.player.id, p.card!.id, lmachines.M003.id],
     ), /card does not belong/);
   });
 
   test('duplicate open requests are idempotent; one open session per machine and per wallet', async () => {
     const p = await newPlayerWithCard();
     const k = key('open');
-    const a = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M004.id, requestKey: k }));
-    const b = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M004.id, requestKey: k }));
+    const a = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M004.id, requestKey: k }));
+    const b = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M004.id, requestKey: k }));
     assert.equal(b.replayed, true);
     assert.equal(a.session.id, b.session.id);
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M005.id, requestKey: k })), /different session/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M005.id, requestKey: k })), /different session/);
     const q = await newPlayerWithCard();
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: q.cardNumber, machineId: machines.M004.id, requestKey: key() })), /Machine already has an open/);
-    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M006.id, requestKey: key() })), /Wallet already has an open/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: q.cardNumber, machineId: lmachines.M004.id, requestKey: key() })), /Machine already has an open/);
+    await assert.rejects(tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M006.id, requestKey: key() })), /Wallet already has an open/);
     await tx((db) => svc.cashless.closeCashlessSession(db, actor('attendant@example.com'), a.session.id));
   });
 
   test('wallet -> machine: REQUESTED only reserves, CONFIRMED moves money to the machine', async () => {
     const p = await newPlayerWithCard();
     await deposit(p.walletId, p.player.id, 10_000);
-    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M007.id, requestKey: key() }));
-    const creditBefore = await machineCredit(machines.M007.id);
+    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M007.id, requestKey: key() }));
+    const creditBefore = await machineCredit(lmachines.M007.id);
     const k = key('tr');
     const { transfer } = await tx((db) => svc.cashless.requestTransfer(db, actor('attendant@example.com'), { sessionId: session.id, direction: 'TO_MACHINE', amountCents: 3_000, requestKey: k }));
     assert.equal(transfer.status, 'REQUESTED');
     assert.deepEqual([(await balances(p.walletId)).available_cents, (await balances(p.walletId)).reserved_cents], [7_000, 3_000]);
-    assert.equal(await machineCredit(machines.M007.id), creditBefore, 'requested is not a completed movement');
+    assert.equal(await machineCredit(lmachines.M007.id), creditBefore, 'requested is not a completed movement');
     const replay = await tx((db) => svc.cashless.requestTransfer(db, actor('attendant@example.com'), { sessionId: session.id, direction: 'TO_MACHINE', amountCents: 3_000, requestKey: k }));
     assert.equal(replay.replayed, true);
     await assert.rejects(tx((db) => svc.cashless.confirmTransfer(db, system, { transferId: transfer.id })), /from REQUESTED to CONFIRMED/);
     await tx((db) => svc.cashless.markTransferSent(db, system, transfer.id));
     await tx((db) => svc.cashless.confirmTransfer(db, system, { transferId: transfer.id }));
     assert.deepEqual([(await balances(p.walletId)).available_cents, (await balances(p.walletId)).reserved_cents], [7_000, 0]);
-    assert.equal(await machineCredit(machines.M007.id), creditBefore + 3_000);
+    assert.equal(await machineCredit(lmachines.M007.id), creditBefore + 3_000);
     await assert.rejects(tx((db) => svc.cashless.endTransfer(db, system, transfer.id, 'FAILED', 'late')), /from CONFIRMED to FAILED/);
     await assert.rejects(pool.query(`UPDATE wallet_transfers SET status = 'FAILED' WHERE id = $1`, [transfer.id]), /cannot change from CONFIRMED/);
     const txs = (await pool.query('SELECT type FROM money_transactions WHERE transfer_id = $1 ORDER BY created_at', [transfer.id])).rows.map((r) => r.type);
@@ -241,7 +250,7 @@ describe('cashless sessions and transfers', () => {
   test('failed and expired transfers release the reservation; insufficient funds create no transfer', async () => {
     const p = await newPlayerWithCard();
     await deposit(p.walletId, p.player.id, 5_000);
-    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M008.id, requestKey: key() }));
+    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M008.id, requestKey: key() }));
     const req = (amountCents: number) => tx((db) => svc.cashless.requestTransfer(db, actor('attendant@example.com'), { sessionId: session.id, direction: 'TO_MACHINE', amountCents, requestKey: key() }));
     const a = await req(2_000);
     await assert.rejects(req(1_000), /transfer in progress/);
@@ -261,7 +270,7 @@ describe('cashless sessions and transfers', () => {
 
   test('machine -> wallet credits the confirmed amount, also for a blocked wallet', async () => {
     const p = await newPlayerWithCard();
-    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: machines.M009.id, requestKey: key() }));
+    const { session } = await tx((db) => svc.cashless.openCashlessSession(db, actor('attendant@example.com'), { cardNumber: p.cardNumber, machineId: lmachines.M009.id, requestKey: key() }));
     await tx((db) => svc.wallets.setWalletStatus(db, actor('manager@example.com'), p.walletId, 'BLOCKED', 'review'));
     const { transfer } = await tx((db) => svc.cashless.requestTransfer(db, actor('attendant@example.com'), { sessionId: session.id, direction: 'FROM_MACHINE', amountCents: 2_000, requestKey: key() }));
     assert.equal((await balances(p.walletId)).available_cents, 0, 'requested is not a completed movement');
@@ -447,7 +456,7 @@ describe('ticket holds', () => {
 describe('foreign keys and delete restrictions', () => {
   test('invalid references are rejected', async () => {
     const anyPlayer = (await pool.query('SELECT id FROM players WHERE org_id = $1 LIMIT 1', [orgId])).rows[0].id;
-    await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_DEPOSIT', dedupeKey: key(), actor: { type: 'SYSTEM' }, ctx: { casinoId: casinoA, amountCents: cents(100), playerId: anyPlayer, walletId: randomUUID(), cashierSessionId: cashierSession } })), /foreign key|another organisation|does not belong/);
+    await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId, type: 'CASH_DEPOSIT', dedupeKey: key(), actor: { type: 'SYSTEM' }, ctx: { casinoId: ledgerCasino, amountCents: cents(100), playerId: anyPlayer, walletId: randomUUID(), cashierSessionId: ledgerSession } })), /foreign key|another organisation|does not belong/);
     await assert.rejects(pool.query(`UPDATE machine_commands SET handpay_id = $1 WHERE id = (SELECT id FROM machine_commands LIMIT 1)`, [randomUUID()]), /foreign key/);
     await assert.rejects(pool.query(`UPDATE cashier_sessions SET vault_session_id = $1 WHERE id = $2`, [randomUUID(), cashierSession]), /foreign key|another casino/);
     await assert.rejects(pool.query(`INSERT INTO ledger_accounts (org_id, kind, vault_id, casino_id) VALUES ($1, 'VAULT', $2, $3)`, [orgId, randomUUID(), casinoA]), /foreign key|does not belong/);

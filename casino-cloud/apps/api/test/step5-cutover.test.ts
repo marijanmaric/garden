@@ -216,7 +216,7 @@ describe('VAULT', () => {
     await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, {
       orgId, type: 'OPENING_BALANCE', dedupeKey: `x-${randomUUID()}`, actor: { type: 'SYSTEM' },
       ctx: { casinoId: c.id, amountCents: cents(1), debit: { kind: 'VAULT', vaultId: c.vault }, credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: randomUUID() } },
-    })), /only created by its cutover/);
+    })), /only created by a rail cutover/);
     // forward-only: cutovers and items cannot be changed or deleted
     await assert.rejects(pool.query('DELETE FROM money_rail_cutovers WHERE id = $1', [done.cutoverId]));
     await assert.rejects(pool.query('UPDATE money_backfill_items SET amount_cents = 1 WHERE cutover_id = $1', [done.cutoverId]));
@@ -438,16 +438,17 @@ describe('TITO', () => {
     assert.equal((await one(`SELECT count(*)::int n FROM money_transactions WHERE casino_id = $1 AND type = 'OPENING_BALANCE' AND ticket_id IS NOT NULL`, [c.id])).n, 5);
   });
 
-  test('a pre-existing ledger balance on the rail stops the cutover', async () => {
+  test('no stray opening balance can exist before the cutover (service and database refuse it)', async () => {
     const c = await newCasino();
     await cashReady(c);
     await ticket(c, 1_000);
-    await tx((db) => svc.ledger.executeMoneyTransaction(db, {
+    await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, {
       orgId, type: 'OPENING_BALANCE', dedupeKey: `stray-${randomUUID()}`, actor: { type: 'SYSTEM' },
       ctx: { casinoId: c.id, amountCents: cents(1), debit: { kind: 'OPENING_EQUITY' }, credit: { kind: 'TICKET_LIABILITY' }, backfillSource: { table: 'tickets', id: randomUUID() } },
-    }));
+    })), /only created by a rail cutover/);
     const r = await dry('TITO', { casinoId: c.id });
-    assert.deepEqual(failed(r), ['ledger_empty_before_cutover']);
+    assert.equal(r.ok, true, JSON.stringify(failed(r)));
+    assert.ok(r.checks.some((x) => x.name === 'ledger_empty_before_cutover' && x.ok));
   });
 });
 
@@ -534,7 +535,9 @@ describe('HTTP and invariants', () => {
     assert.equal(res.statusCode, 403);
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover', headers: h('admin@example.com'), payload: { rail: 'VAULT', casinoId: casinoA } });
     assert.equal(res.statusCode, 409);
-    assert.ok(res.json().report.checks.some((x: { name: string; ok: boolean }) => x.name === 'vault:Main Vault:count_exists' && !x.ok));
+    assert.match(res.json().error, /not released yet/, 'production cutover only for released rails (Step 7a)');
+    res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover/dry-run', headers: h('admin@example.com'), payload: { rail: 'VAULT', casinoId: casinoA } });
+    assert.ok(res.json().checks.some((x: { name: string; ok: boolean }) => x.name === 'vault:Main Vault:count_exists' && !x.ok));
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover/dry-run', headers: h('admin@example.com'), payload: { rail: 'TITO', casinoId: casinoA } });
     assert.equal(res.statusCode, 200);
     assert.equal(res.json().ok, false);

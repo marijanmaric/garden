@@ -3,10 +3,17 @@ import { pool } from '../db';
 import { expireStaleTransfers } from './cashless';
 import { retryFailedHandpayResets } from './handpays';
 import { releaseExpiredHolds } from './ticket-holds';
+import { expireMovements } from './cash-ops';
+import { reconcileLedgerCasinos } from './reconciliation';
+import { bus } from '../bus';
+
+/** Continuous reconciliation of ledger casinos (CASH / VAULT / global invariants), default every 15 minutes. */
+const RECONCILE_EVERY_MS = Number(process.env.RECONCILE_INTERVAL_MS ?? 15 * 60_000);
 
 /**
  * Periodic housekeeping: expires TITO tickets, releases timed-out ticket holds, expires stale wallet
- * transfers (releasing reservations) and retries failed handpay machine resets.
+ * transfers (releasing reservations), expires unconfirmed vault fills / drops (no money moved),
+ * retries failed handpay machine resets and runs the scheduled reconciliation.
  */
 export function startMaintenance() {
   const tick = async () => {
@@ -23,7 +30,13 @@ export function startMaintenance() {
     await withTransaction(pool, (db) => releaseExpiredHolds(db));
     await withTransaction(pool, (db) => expireStaleTransfers(db));
     await withTransaction(pool, (db) => retryFailedHandpayResets(db));
+    await withTransaction(pool, (db) => expireMovements(db));
+    if (Date.now() - lastReconcile >= RECONCILE_EVERY_MS) {
+      lastReconcile = Date.now();
+      await reconcileLedgerCasinos(pool, (m) => bus.publish(m));
+    }
   };
+  let lastReconcile = 0;
   void tick().catch((err) => console.error('[maintenance]', err));
   const timer = setInterval(() => tick().catch((err) => console.error('[maintenance]', err)), 15_000);
   return () => clearInterval(timer);
