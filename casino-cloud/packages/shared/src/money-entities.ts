@@ -2,6 +2,7 @@
  * Money domain entities: states and allowed transitions. Business rules, not legal assumptions:
  * one central definition, enforced by the API services and mirrored by database triggers.
  */
+import type { TicketStatus } from './cash';
 import { playerCan, type PlayerCapability, type PlayerStatus } from './player';
 
 function transitions<S extends string>(map: Record<S, readonly S[]>) {
@@ -75,6 +76,20 @@ export const HANDPAY_TRANSITIONS = transitions<HandpayStatus>({
   VOIDED: [],
 });
 export const UNPAID_HANDPAY_STATUSES: readonly HandpayStatus[] = ['PENDING', 'APPROVED'];
+
+// ---- TITO tickets (Step 7c) ----------------------------------------------------------------------
+/**
+ * VALID <-> HELD moves no money (a hold is a reservation for one machine or cashier, released on
+ * reject / timeout). REDEEMED, EXPIRED, CANCELLED and VOID are final. HELD tickets never expire.
+ */
+export const TICKET_TRANSITIONS = transitions<TicketStatus>({
+  VALID: ['HELD', 'REDEEMED', 'EXPIRED', 'CANCELLED', 'VOID'],
+  HELD: ['VALID', 'REDEEMED'],
+  REDEEMED: [],
+  EXPIRED: [],
+  CANCELLED: [],
+  VOID: [],
+});
 
 // ---- Vault / cash counts / approvals ----------------------------------------------------------
 export const VAULT_SESSION_STATUSES = ['OPEN', 'COUNTING', 'CLOSED'] as const;

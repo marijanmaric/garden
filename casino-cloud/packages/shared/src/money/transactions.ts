@@ -78,7 +78,7 @@ export const MONEY_TRANSACTIONS: Record<MoneyTransactionType, MoneyTransactionDe
   TITO_ISSUE_CASHIER: { rail: 'TITO', label: 'Ticket sold at cashier', requires: ['cashierSession', 'ticket'], optional: ['player', 'wallet', 'card'], approval: NONE, idempotency: 'CLIENT_KEY', reversal: { kind: 'REVERSAL' } },
   TITO_REDEEM_CASHIER: { rail: 'TITO', label: 'Ticket paid at cashier', requires: ['cashierSession', 'ticket'], optional: ['player', 'wallet', 'card'], approval: { kind: 'LIMIT', setting: 'ticket_payout_approval_cents' }, idempotency: 'ENTITY', reversal: { kind: 'REVERSAL' } },
   TITO_REDEEM_MACHINE: { rail: 'TITO', label: 'Ticket accepted by machine', requires: ['machine', 'ticket'], optional: ['player', 'card'], approval: NONE, idempotency: 'ENTITY', reversal: { kind: 'NONE' } },
-  TITO_EXCEPTION: { rail: 'TITO', label: 'Ticket accepted without valid commit', requires: ['machine', 'ticket'], approval: NONE, idempotency: 'ENTITY', reversal: { kind: 'ADJUSTMENT_ONLY' } },
+  TITO_EXCEPTION: { rail: 'TITO', label: 'Ticket accepted without valid commit', requires: ['machine'], optional: ['ticket'], approval: NONE, idempotency: 'GATEWAY_EVENT', reversal: { kind: 'ADJUSTMENT_ONLY' } },
   TITO_EXPIRY: { rail: 'TITO', label: 'Ticket expired', requires: ['ticket'], approval: NONE, idempotency: 'SYSTEM', reversal: { kind: 'REVERSAL' } },
   TITO_CANCEL: { rail: 'TITO', label: 'Ticket cancelled by supervisor', requires: ['ticket'], optional: ['machine'], approval: { kind: 'FOUR_EYES' }, idempotency: 'CLIENT_KEY', reversal: { kind: 'REVERSAL' } },
   // ---- HANDPAY ----
@@ -106,7 +106,7 @@ export const MONEY_TRANSACTIONS: Record<MoneyTransactionType, MoneyTransactionDe
 /** Kinds that an ADJUSTMENT may touch. Income from gaming and opening equity are never adjusted directly. */
 export const ADJUSTABLE_KINDS: AccountKind[] = [
   'DRAWER', 'VAULT', 'CASHBOX', 'HOPPER', 'WALLET_AVAILABLE', 'TICKET_LIABILITY', 'HANDPAY_PAYABLE', 'MACHINE_CREDIT',
-  'CASH_SHORT_OVER', 'DROP_SHORT_OVER', 'VAULT_SHORT_OVER', 'TITO_ADJUSTMENT', 'TITO_EXCEPTION', 'CASHLESS_EXCEPTION',
+  'CASH_SHORT_OVER', 'DROP_SHORT_OVER', 'VAULT_SHORT_OVER', 'TITO_ADJUSTMENT', 'TITO_EXCEPTION', 'CASHLESS_EXCEPTION', 'LEGACY_FLOOR_CLEARING',
   'CARD_SETTLEMENT_RECEIVABLE', 'BANK_CLEARING',
 ];
 
@@ -130,6 +130,11 @@ export interface MoneyContext {
   payTo?: 'CASH' | 'WALLET';
   /** TITO_ISSUE_CASHIER: paid with cash (default) or from the wallet. */
   payFrom?: 'CASH' | 'WALLET';
+  /**
+   * TITO_ISSUE_MACHINE / TITO_REDEEM_MACHINE / TITO_EXCEPTION on a machine whose MACHINE rail is still
+   * LEGACY: the machine side is the machine's LEGACY_FLOOR_CLEARING account instead of MACHINE_CREDIT (D1).
+   */
+  floorClearing?: boolean;
   /** PETTY_CASH: taken from the vault (default) or a drawer. */
   source?: 'VAULT' | 'DRAWER';
   /** CASH_ADVANCE: fee charged on top of the amount handed out. */
@@ -175,7 +180,9 @@ export function postings(type: MoneyTransactionType, ctx: MoneyContext): Posting
   const drawer = (): AccountRef => need({ kind: 'DRAWER', casinoId: c, cashierSessionId: ctx.cashierSessionId }, 'cashierSession');
   const vault = (): AccountRef => need({ kind: 'VAULT', casinoId: c, vaultId: ctx.vaultId }, 'vault');
   const wallet = (kind: 'WALLET_AVAILABLE' | 'WALLET_RESERVED' = 'WALLET_AVAILABLE'): AccountRef => need({ kind, walletId: ctx.walletId }, 'wallet');
-  const machine = (kind: 'MACHINE_CREDIT' | 'CASHBOX' | 'HOPPER'): AccountRef => need({ kind, casinoId: c, machineId: ctx.machineId }, 'machine');
+  const machine = (kind: 'MACHINE_CREDIT' | 'CASHBOX' | 'HOPPER' | 'LEGACY_FLOOR_CLEARING'): AccountRef => need({ kind, casinoId: c, machineId: ctx.machineId }, 'machine');
+  /** The machine side of a ticket: MACHINE_CREDIT, or the D1 clearing account of a LEGACY machine. */
+  const ticketMachine = (): AccountRef => machine(ctx.floorClearing ? 'LEGACY_FLOOR_CLEARING' : 'MACHINE_CREDIT');
   const casino = (kind: AccountKind): AccountRef => ({ kind, casinoId: c });
   const cashOrWallet = (choice: 'CASH' | 'WALLET' | undefined) => (choice === 'WALLET' ? wallet() : drawer());
 
@@ -206,11 +213,11 @@ export function postings(type: MoneyTransactionType, ctx: MoneyContext): Posting
     case 'MACHINE_CASH_IN': result = move(machine('CASHBOX'), machine('MACHINE_CREDIT')); break;
     case 'MACHINE_CASH_OUT': result = move(machine('MACHINE_CREDIT'), machine('HOPPER')); break;
     case 'HOPPER_FILL': result = move(machine('HOPPER'), vault()); break;
-    case 'TITO_ISSUE_MACHINE': result = move(machine('MACHINE_CREDIT'), casino('TICKET_LIABILITY')); break;
+    case 'TITO_ISSUE_MACHINE': result = move(ticketMachine(), casino('TICKET_LIABILITY')); break;
     case 'TITO_ISSUE_CASHIER': result = move(cashOrWallet(ctx.payFrom), casino('TICKET_LIABILITY')); break;
     case 'TITO_REDEEM_CASHIER': result = move(casino('TICKET_LIABILITY'), cashOrWallet(ctx.payTo)); break;
-    case 'TITO_REDEEM_MACHINE': result = move(casino('TICKET_LIABILITY'), machine('MACHINE_CREDIT')); break;
-    case 'TITO_EXCEPTION': result = move(casino('TITO_EXCEPTION'), machine('MACHINE_CREDIT')); break;
+    case 'TITO_REDEEM_MACHINE': result = move(casino('TICKET_LIABILITY'), ticketMachine()); break;
+    case 'TITO_EXCEPTION': result = move(casino('TITO_EXCEPTION'), ticketMachine()); break;
     case 'TITO_EXPIRY': result = move(casino('TICKET_LIABILITY'), casino('EXPIRED_TICKET_INCOME')); break;
     case 'TITO_CANCEL': result = move(casino('TICKET_LIABILITY'), casino('TITO_ADJUSTMENT')); break;
     case 'HANDPAY_CREATE_JACKPOT': result = move(casino('GAMING_JACKPOT_EXPENSE'), casino('HANDPAY_PAYABLE')); break;

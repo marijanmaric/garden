@@ -62,3 +62,21 @@ export async function projectHandpayCash(
     moneyTransactionId: input.moneyTransactionId, sourceEventId: input.sourceEventId, machineId: input.machineId, playerId: input.playerId ?? undefined, reference: input.reference,
   });
 }
+
+/** A ledger ticket sale (TICKET_ISSUE, into the drawer) or cash payout (TICKET_PAYOUT, out of it) as the legacy drawer row. */
+export async function projectTicketCash(
+  db: Db,
+  session: SessionRow,
+  input: { type: 'TICKET_ISSUE' | 'TICKET_PAYOUT'; amountCents: number; moneyTransactionId: string; ticketId: string; reference: string; playerId?: string | null },
+) {
+  return addCashTx(db as PoolClient, session, input.type, input.amountCents / 100, {
+    moneyTransactionId: input.moneyTransactionId, ticketId: input.ticketId, reference: input.reference, playerId: input.playerId ?? undefined,
+  });
+}
+
+/** The reversal of a voided cash ticket sale (money back to the customer) as a negative legacy drawer row. */
+export async function projectTicketVoid(db: Db, session: SessionRow, input: { amountCents: number; moneyTransactionId: string; ticketId: string; reference: string }) {
+  return addCashTx(db as PoolClient, session, 'ADJUSTMENT', -input.amountCents / 100, {
+    moneyTransactionId: input.moneyTransactionId, ticketId: input.ticketId, reference: `Void ${input.reference}`,
+  });
+}

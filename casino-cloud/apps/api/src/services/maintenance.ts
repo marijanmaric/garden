@@ -3,6 +3,7 @@ import { pool } from '../db';
 import { expireStaleTransfers } from './cashless';
 import { replayDeferredHandpays, retryFailedHandpayResets } from './handpays';
 import { releaseExpiredHolds } from './ticket-holds';
+import { expireTicketsLedger, replayDeferredTito } from './tito';
 import { expireMovements } from './cash-ops';
 import { reconcileLedgerCasinos } from './reconciliation';
 import { bus } from '../bus';
@@ -27,10 +28,12 @@ export function startMaintenance() {
        )
        INSERT INTO ticket_events (org_id, ticket_id, action) SELECT org_id, id, 'EXPIRED' FROM expired`,
     );
+    await withTransaction(pool, (db) => expireTicketsLedger(db)); // TITO on the ledger: TITO_EXPIRY per ticket
     await withTransaction(pool, (db) => releaseExpiredHolds(db));
     await withTransaction(pool, (db) => expireStaleTransfers(db));
     await withTransaction(pool, (db) => retryFailedHandpayResets(db));
     await withTransaction(pool, (db) => replayDeferredHandpays(db)); // safety net; the freeze lift replays first
+    await withTransaction(pool, (db) => replayDeferredTito(db)); // same for ticket machine events
     await withTransaction(pool, (db) => expireMovements(db));
     if (Date.now() - lastReconcile >= RECONCILE_EVERY_MS) {
       lastReconcile = Date.now();

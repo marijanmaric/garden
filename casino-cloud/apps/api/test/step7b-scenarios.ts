@@ -509,15 +509,19 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       assert.equal((await pay('cashier@example.com', 4)).statusCode, 200);
     });
 
-    test('a LEGACY HANDPAY rail with CASH on the ledger refuses payment (no mixing); production cutover stays locked until TITO', async () => {
+    test('a LEGACY HANDPAY rail with CASH on the ledger refuses payment (no mixing); production cutover released once TITO is implemented (7c)', async () => {
       const l = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7BL${Date.now() % 100000}`, rails: ['VAULT', 'CASH'], machines: 1 });
       const ev = (await one(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES (gen_random_uuid(),$1,$2,$3,'JACKPOT',20,now()) RETURNING event_id`, [c.orgId, l.id, l.machines[0].id])).event_id;
       const h = await tx((db) => svc.handpays.ensureHandpayForJackpot(db as never, { orgId: c.orgId, casinoId: l.id, machineId: l.machines[0].id, eventId: ev, amountCents: 2_000 }));
       assert.deepEqual(await txsOf(h!.id), [], 'legacy rail: no ledger booking');
       await assert.rejects(tx((db) => svc.handpays.payHandpay(db as never, actor('manager@example.com', [l.id]), h!.id)), /HANDPAY is not: cut over the HANDPAY rail first/);
+      // 7b: refused with "maintenance window ... missing for TITO"; since 7c the window is complete: the release gate
+      // passes and the real cutover runs its data checks (here it aborts on the test handpay, nothing is booked)
       const cut = await post('admin@example.com', '/api/v1/money/cutover', { rail: 'HANDPAY', casinoId: l.id });
       assert.equal(cut.statusCode, 409);
-      assert.match(cut.json().error, /maintenance window with VAULT, CASH, TITO, .*missing for TITO \(maintenance-window dependency, not a technical one/);
+      assert.doesNotMatch(cut.json().error, /not released yet/);
+      assert.match(cut.json().error, /HANDPAY cutover aborted/);
+      assert.deepEqual(await txsOf(h!.id), [], 'an aborted cutover books nothing');
     });
 
     test('historical handpays: unmapped legacy payments block the cutover until classified by four eyes with evidence', async () => {

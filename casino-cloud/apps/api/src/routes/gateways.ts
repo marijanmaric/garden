@@ -8,6 +8,8 @@ import { pool } from '../db';
 import { ingestEvents } from '../services/ingest';
 import { authenticateGateway, heartbeat } from '../services/gateway';
 import { confirmHandpayReset } from '../services/handpays';
+import { holdTicket, releaseTicketHold } from '../services/ticket-holds';
+import { assertHoldAllowed } from '../services/tito';
 
 const eventSchema = z.object({
   eventId: z.string().uuid(),
@@ -18,6 +20,7 @@ const eventSchema = z.object({
   win: z.number().min(0).max(10_000_000).optional(),
   playerCardId: z.string().max(64).optional(),
   ticketBarcode: z.string().max(64).optional(),
+  holdId: z.string().uuid().optional(),
   errorCode: z.string().max(64).optional(),
   message: z.string().max(500).optional(),
   source: z.string().max(40).optional(),
@@ -43,6 +46,26 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const gw = await gatewayAuth(req);
     const { events } = z.object({ events: z.array(eventSchema).max(1000) }).parse(req.body);
     return ingestEvents(gw, events);
+  });
+
+  // ---- TITO validation: a machine scans a ticket, the system holds it for that machine (no money).
+  // The machine commits with its TITO_IN event (holdId = the accept ack) or releases the hold on reject.
+  app.post('/api/v1/gateway/tickets/hold', async (req) => {
+    const gw = await gatewayAuth(req);
+    const body = z.object({ machineId: z.string().min(1).max(64), barcode: z.string().trim().regex(/^\d{6,30}$/) }).parse(req.body);
+    return withTransaction(pool, async (db) => {
+      const m = (await db.query('SELECT id FROM machines WHERE org_id = $1 AND casino_id = $2 AND machine_code = $3', [gw.orgId, gw.casinoId, body.machineId])).rows[0];
+      if (!m) return { ok: false, reason: 'UNKNOWN_MACHINE' };
+      const blocked = await assertHoldAllowed(db, gw.orgId, gw.casinoId);
+      if (blocked) return { ok: false, reason: blocked };
+      return holdTicket(db, { orgId: gw.orgId, barcode: body.barcode, machineId: m.id });
+    });
+  });
+
+  app.post('/api/v1/gateway/tickets/release', async (req) => {
+    const gw = await gatewayAuth(req);
+    const body = z.object({ holdId: z.string().uuid(), reason: z.string().max(200).default('machine rejected') }).parse(req.body);
+    return { released: await withTransaction(pool, (db) => releaseTicketHold(db, { orgId: gw.orgId, holdId: body.holdId, reason: body.reason })) };
   });
 
   app.post('/api/v1/gateway/commands/:id/result', async (req) => {

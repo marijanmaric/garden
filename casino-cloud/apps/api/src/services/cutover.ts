@@ -7,6 +7,7 @@ import {
 import { HttpError } from '../auth';
 import { executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
 import { railOnLedger } from './rails';
+import { unexplainedFloorClearing } from './tito';
 import { countTotal, recordCashCount, type CountInput } from './vault';
 
 /**
@@ -366,6 +367,14 @@ async function planTito(ctx: Ctx): Promise<RailPlan> {
     `UPDATE tickets SET status = 'EXPIRED', status_reason = 'Expiry date reached' WHERE casino_id = $1 AND status = 'VALID' AND expires_at <= now() RETURNING id`, p,
   )).rows;
   for (const r of expired) await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, details) VALUES ($1,$2,'EXPIRED','{"source": "cutover"}')`, [orgId, r.id]);
+
+  // D1: an unexplained LEGACY_FLOOR_CLEARING balance anywhere in the organisation blocks further TITO cutovers.
+  const clearing = (await unexplainedFloorClearing(db, { orgId })).map((r) => r.id);
+  const explained = clearing.length
+    ? (await db.query(`SELECT item_key FROM reconciliation_resolutions WHERE org_id = $1 AND item_key = ANY($2)`, [orgId, clearing.map((m) => `floor_clearing:${m}`)])).rows.map((r) => r.item_key)
+    : [];
+  const unexplained = clearing.filter((m) => !explained.includes(`floor_clearing:${m}`));
+  check(ctx, 'floor_clearing_explained', unexplained.length === 0, { machines: unexplained });
 
   const outstanding = (await db.query(
     `SELECT id, status, amount_cents FROM tickets WHERE casino_id = $1 AND status IN ('VALID', 'HELD') ORDER BY issued_at, id`, p,

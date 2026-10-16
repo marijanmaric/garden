@@ -11,6 +11,7 @@ import { closeVaultSession, openVaultSession, startVaultCount } from '../service
 import { decideApproval } from '../services/approvals';
 import { decideHandpayApproval } from '../services/handpays';
 import { decideException } from '../services/handpay-exceptions';
+import { decideTicketApproval } from '../services/tito';
 
 /**
  * Step 7a: ledger-backed vault and drawer operations, approvals, reconciliation, freezes, day close.
@@ -134,6 +135,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
       if (ap.action === 'RECONCILIATION_RESOLUTION') return decideResolution(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'HANDPAY_PAY') return decideHandpayApproval(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'HANDPAY_EXCEPTION') return decideException(db, actorOf(req), id, body.decision, body.note);
+      if (ap.action === 'TITO_REDEEM_CASHIER' || ap.action === 'TITO_CANCEL' || ap.action === 'TITO_VOID') return decideTicketApproval(db, actorOf(req), id, body.decision, body.note);
       return { approval: await decideApproval(db, actorOf(req), id, body.decision, body.note) };
     });
   });

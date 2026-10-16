@@ -5,6 +5,7 @@ import { pool } from '../db';
 import { openAlert, resolveAlerts } from './alerts';
 import { cardRejectionMessage, resolveCard } from './players';
 import { confirmHandpayReset, handleJackpotEvent } from './handpays';
+import { handleTitoMachineEvent, titoOnLedger } from './tito';
 
 export interface GatewayIdentity {
   id: string;
@@ -142,6 +143,14 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
     case 'TITO_OUT': {
       await ledger(LEDGER_MAP[type]!, amount ?? 0);
       await db.query(`UPDATE machine_meters SET ${METER_MAP[type]} = ${METER_MAP[type]} + $2, updated_at = now() WHERE machine_id = $1`, [m.id, amount ?? 0]);
+      if ((type === 'TITO_OUT' || type === 'TITO_IN') && (await titoOnLedger(db, gw.orgId, gw.casinoId))) {
+        // Step 7c: ticket money on the ledger (booked, deferred while frozen, or late on its own business date).
+        await handleTitoMachineEvent(db, {
+          ...ctx, label, eventId, type, barcode: ev.ticketBarcode ?? null, holdId: ev.holdId ?? null,
+          amountCents: amount === undefined || amount === null ? null : Math.round(amount * 100), occurredAt: timestamp,
+        }, out);
+        break;
+      }
       if (type === 'TITO_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
       if (type === 'TITO_IN' && ev.ticketBarcode) await redeemMachineTicket(db, ctx, ev, label, out);
       break;

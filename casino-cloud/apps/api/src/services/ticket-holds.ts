@@ -4,7 +4,7 @@ import { HttpError } from '../auth';
 
 /**
  * TITO hold: SCAN -> VALIDATE -> HOLD -> ACCEPT -> COMMIT. This step provides validate, hold and
- * release (incl. timeout recovery). COMMIT (redemption with money) moves to the ledger later.
+ * release (incl. timeout recovery). COMMIT (redemption with money) is the machine's TITO_IN event (Step 7c, tito.ts).
  * A hold is an atomic conditional update: only one caller can hold a VALID ticket.
  */
 
@@ -49,6 +49,9 @@ export async function releaseExpiredHolds(db: Db) {
   const r = await db.query(
     `UPDATE tickets t SET status = 'VALID', hold_id = NULL, hold_until = NULL, hold_machine_id = NULL, hold_source = NULL
      WHERE t.status = 'HELD' AND t.hold_until + make_interval(secs => COALESCE((SELECT tito_hold_grace_seconds FROM casino_money_settings s WHERE s.casino_id = t.casino_id), 120)) < now()
+       -- the machine's accept ack is recorded but deferred (TITO frozen): the hold stays until the replay commits it
+       AND NOT EXISTS (SELECT 1 FROM deferred_money_events d JOIN machine_events e ON e.event_id = d.event_id
+                       WHERE d.status = 'PENDING' AND d.kind = 'TITO_IN' AND e.payload->>'holdId' = t.hold_id::text)
      RETURNING t.id, t.org_id`,
   );
   for (const row of r.rows) await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, details) VALUES ($1,$2,'HOLD_EXPIRED','{}')`, [row.org_id, row.id]);

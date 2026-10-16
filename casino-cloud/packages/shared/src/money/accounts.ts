@@ -34,6 +34,9 @@ export const ACCOUNT_KINDS = {
   BANK_CLEARING: { class: 'ASSET', scope: 'CASINO', owner: 'NONE', allowNegative: true, description: 'Cash in transit to or from the bank' },
   TITO_EXCEPTION: { class: 'ASSET', scope: 'CASINO', owner: 'NONE', allowNegative: true, description: 'Tickets accepted by a machine without a valid commit (under investigation)' },
   CASHLESS_EXCEPTION: { class: 'ASSET', scope: 'ORG', owner: 'NONE', allowNegative: true, description: 'Wallet transfers confirmed after expiry (under investigation)' },
+  // D1 (Step 7c): TITO on the ledger while a machine is still LEGACY. Temporary, per machine, fully attributable to
+  // that machine's ticket events, reconciled continuously; target balance 0 once the machine is cut over.
+  LEGACY_FLOOR_CLEARING: { class: 'ASSET', scope: 'CASINO', owner: 'MACHINE', allowNegative: true, description: 'Tickets printed / accepted by a machine that is not on the ledger yet (D1 clearing)' },
   // Liabilities
   WALLET_AVAILABLE: { class: 'LIABILITY', scope: 'ORG', owner: 'WALLET', allowNegative: false, description: 'Player wallet, available balance' },
   WALLET_RESERVED: { class: 'LIABILITY', scope: 'ORG', owner: 'WALLET', allowNegative: false, description: 'Player wallet, reserved for transfers in progress' },

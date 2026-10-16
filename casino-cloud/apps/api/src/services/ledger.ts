@@ -174,7 +174,7 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
   const refs = (Object.keys(REF_COLUMNS) as Array<keyof typeof REF_COLUMNS>).map((k) => input.ctx[k] ?? null);
-  const options = { payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents, backfillSource: input.ctx.backfillSource };
+  const options = { payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents, backfillSource: input.ctx.backfillSource, floorClearing: input.ctx.floorClearing };
   const inserted = await db.query(
     `INSERT INTO money_transactions (org_id, casino_id, type, amount_cents, dedupe_key, request_hash,
        player_id, wallet_id, card_id, machine_id, cashier_session_id, vault_id, ticket_id, handpay_id, transfer_id,

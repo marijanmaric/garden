@@ -6,6 +6,10 @@ import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
 import { addCashTx, newBarcode, requireOpenSession } from '../services/cashier';
+import { requireUsableCard } from '../services/players';
+import { redeemTicket, requestTicketApproval, sellTicket, titoOnLedger } from '../services/tito';
+
+const moneyActor = (req: FastifyRequest) => ({ orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip, casinoIds: req.auth.casinoIds });
 
 const TICKET_SELECT = `
   SELECT t.*, mi.asset_no AS issued_machine, mr.asset_no AS redeemed_machine,
@@ -93,9 +97,15 @@ export async function ticketRoutes(app: FastifyInstance) {
 
   /** Cashier pays out a ticket from the drawer. Atomic: a ticket can only ever be redeemed once. */
   app.post('/api/v1/tickets/redeem', { preHandler: guard('ticket.payout') }, async (req, reply) => {
-    const { barcode } = z.object({ barcode: barcodeSchema }).parse(req.body);
+    const { barcode, payTo, playerCard } = z.object({ barcode: barcodeSchema, payTo: z.enum(['CASH', 'WALLET']).default('CASH'), playerCard: z.string().max(40).optional() }).parse(req.body);
     const result = await idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
+      if (await titoOnLedger(db, req.auth.orgId, session.casino_id)) {
+        // Step 7c: TITO_REDEEM_CASHIER (cash or wallet), approval above the payout limit.
+        const card = playerCard ? await requireUsableCard(db, req.auth.orgId, playerCard) : null;
+        return redeemTicket(db, moneyActor(req), { barcode, payTo, playerId: card?.player.id ?? null, cardId: card?.card.id ?? null });
+      }
+      if (payTo !== 'CASH') throw new HttpError(409, 'Wallet ticket payouts need the TITO rail on the ledger');
       const r = await db.query(
         `UPDATE tickets SET status = 'REDEEMED', redeemed_at = now(), redeemed_by_employee = $3, redeemed_session_id = $4
          WHERE org_id = $1 AND casino_id = $5 AND barcode = $2 AND status = 'VALID' AND expires_at > now() RETURNING *`,
@@ -117,9 +127,16 @@ export async function ticketRoutes(app: FastifyInstance) {
 
   /** Cashier sells a ticket for cash (player takes it to a machine). */
   app.post('/api/v1/tickets/issue', { preHandler: guard('ticket.payout') }, async (req, reply) => {
-    const { amount } = z.object({ amount: z.number().positive().max(100000) }).parse(req.body);
+    const { amount, payFrom, playerCard } = z.object({ amount: z.number().positive().max(100000), payFrom: z.enum(['CASH', 'WALLET']).default('CASH'), playerCard: z.string().max(40).optional() }).parse(req.body);
     return idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
+      if (await titoOnLedger(db, req.auth.orgId, session.casino_id)) {
+        // Step 7c: TITO_ISSUE_CASHIER, paid with cash or from the player's wallet.
+        const card = playerCard ? await requireUsableCard(db, req.auth.orgId, playerCard) : null;
+        const sold = await sellTicket(db, moneyActor(req), { amountCents: Math.round(amount * 100), payFrom, playerId: card?.player.id ?? null, cardId: card?.card.id ?? null });
+        return { ...sold.ticket, moneyTransactionId: sold.moneyTransaction.id };
+      }
+      if (payFrom !== 'CASH') throw new HttpError(409, 'Wallet ticket sales need the TITO rail on the ledger');
       const r = await db.query(
         `INSERT INTO tickets (org_id, casino_id, barcode, amount, issued_by_employee, expires_at)
          SELECT $1, $2, $3, $4, $5, now() + make_interval(days => c.ticket_expiry_days) FROM casinos c WHERE c.id = $2 RETURNING *`,
@@ -142,6 +159,9 @@ export async function ticketRoutes(app: FastifyInstance) {
       const { reason } = reasonBody.parse(req.body);
       return idempotent(req, reply, async (db) => {
         const t = await loadTicket(db, req, id);
+        // Step 7c: on the ledger a cancellation / void is a four-eyes request, executed when a second person approves.
+        if (await titoOnLedger(db, req.auth.orgId, t.casino_id))
+          return { id, status: t.status, approval: await requestTicketApproval(db, moneyActor(req), id, action === 'cancel' ? 'TITO_CANCEL' : 'TITO_VOID', reason) };
         requireValid(t);
         await db.query('UPDATE tickets SET status = $2, status_reason = $3 WHERE id = $1', [id, status, reason]);
         await ticketEvent(db, req.auth.orgId, id, event, req.auth.sub, { reason });
@@ -150,6 +170,12 @@ export async function ticketRoutes(app: FastifyInstance) {
       });
     });
   }
+
+  /** Step 7c: four-eyes approval request for a ticket payout above the casino's limit (decided under /api/v1/approvals/:id/decide). */
+  app.post('/api/v1/tickets/:id/approval-request', { preHandler: guard('ticket.payout') }, async (req, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return idempotent(req, reply, async (db) => requestTicketApproval(db, moneyActor(req), id, 'TITO_REDEEM_CASHIER'));
+  });
 
   app.post('/api/v1/tickets/:id/reprint', { preHandler: guard('ticket.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
@@ -169,6 +195,8 @@ export async function ticketRoutes(app: FastifyInstance) {
     const { amount, reason } = z.object({ amount: z.number().positive().max(100000), reason: z.string().trim().min(3).max(300) }).parse(req.body);
     return idempotent(req, reply, async (db) => {
       const t = await loadTicket(db, req, id);
+      if (await titoOnLedger(db, req.auth.orgId, t.casino_id))
+        throw new HttpError(409, 'On the ledger an amount correction is a four-eyes cancellation plus a new ticket sale');
       requireValid(t);
       await db.query(`UPDATE tickets SET status = 'CANCELLED', status_reason = $2 WHERE id = $1`, [id, `Replaced: ${reason}`]);
       const n = await db.query(

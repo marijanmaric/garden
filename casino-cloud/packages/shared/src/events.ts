@@ -69,6 +69,8 @@ export interface MachineEvent {
   win?: number;
   playerCardId?: string;
   ticketBarcode?: string;
+  /** TITO_IN: the hold the machine committed (accept ack of a ticket held for this machine). */
+  holdId?: string;
   errorCode?: string;
   message?: string;
   /** Source adapter key, kept for traceability only. */

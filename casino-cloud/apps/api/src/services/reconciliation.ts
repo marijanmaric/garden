@@ -7,9 +7,11 @@ import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import type { CashActor } from './cash-ops';
 import { checkLedgerInvariants } from './ledger';
 import { replayDeferredHandpays } from './handpays';
+import { replayDeferredTito, unexplainedFloorClearing } from './tito';
 
 /**
- * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY).
+ * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY;
+ * Step 7c: TITO incl. the D1 floor clearing).
  *
  * Every failed check is CRITICAL: an alert is raised and the affected rail is FROZEN for the
  * casino (a global invariant freezes the whole organisation). A frozen rail takes only corrections;
@@ -22,7 +24,7 @@ type Db = Pick<PoolClient, 'query'>;
 
 export interface ReconCheck {
   key: string;
-  rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'GLOBAL';
+  rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'TITO' | 'GLOBAL';
   ok: boolean;
   items: string[];
   resolved: string[];
@@ -37,7 +39,7 @@ export interface ReconResult {
 
 const rows = async (db: Db, sql: string, params: unknown[]) => (await db.query(sql, params)).rows;
 
-async function cutoverTime(db: Db, orgId: string, casinoId: string, rail: 'CASH' | 'VAULT' | 'HANDPAY'): Promise<string | null> {
+async function cutoverTime(db: Db, orgId: string, casinoId: string, rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'TITO'): Promise<string | null> {
   const r = await rows(db, `SELECT as_of FROM money_rail_cutovers WHERE org_id = $1 AND casino_id = $2 AND rail = $3 AND created_txid <> pg_current_xact_id()`, [orgId, casinoId, rail]);
   return r[0]?.as_of ?? null;
 }
@@ -157,14 +159,14 @@ async function handpayChecks(db: Db, casinoId: string, since: string) {
       // a deferred jackpot must not stay pending once its rail is no longer frozen
       key: 'handpay.no_stale_deferred_events',
       items: await ids(
-        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING'
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'HANDPAY' AND d.status = 'PENDING'
            AND NOT money_rail_frozen(d.org_id, d.casino_id, 'HANDPAY', NULL) ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
       // a replayed jackpot is booked on the business date of its occurred_at, never moved to the replay day
       key: 'handpay.deferred_business_date',
       items: await ids(
-        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PROCESSED'
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'HANDPAY' AND d.status = 'PROCESSED'
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = d.event_id AND t.type = 'HANDPAY_CREATE_JACKPOT'
                              AND t.handpay_id = d.handpay_id AND t.business_date = d.business_date AND t.amount_cents = d.amount_cents)
          ORDER BY d.event_id`, 'deferred_event', [casinoId]),
@@ -177,6 +179,68 @@ async function handpayChecks(db: Db, casinoId: string, since: string) {
             OR (h.casino_id = $1 AND h.created_at > $2 AND h.status = 'VOIDED' AND NOT EXISTS (
                  SELECT 1 FROM money_transactions r JOIN money_transactions c ON c.id = r.reversal_of WHERE c.handpay_id = h.id AND c.type = 'HANDPAY_CREATE_JACKPOT'))
          ORDER BY h.id`, 'handpay'),
+    },
+  ];
+}
+
+/**
+ * TITO (Step 7c): the ticket liability equals the outstanding (VALID + HELD) tickets; every ticket's
+ * liability bookings net to its state; every money-moving ticket machine event since the cutover is
+ * booked or deferred; deferred records are not stale and keep their business date; the D1 clearing is
+ * fully attributable to legacy machines' own ticket events.
+ */
+async function titoChecks(db: Db, casinoId: string, since: string) {
+  const p = [casinoId, since];
+  const ids = async (sql: string, prefix: string, params: unknown[] = p) => (await rows(db, sql, params)).map((r) => `${prefix}:${r.id}`);
+  return [
+    {
+      key: 'tito.liability_matches_tickets',
+      items: await ids(
+        `SELECT c.id FROM casinos c WHERE c.id = $1
+           AND COALESCE((SELECT sum(amount_cents) FROM tickets WHERE casino_id = c.id AND status IN ('VALID', 'HELD')), 0)
+           <> COALESCE((SELECT -b.balance_cents FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id WHERE a.casino_id = c.id AND a.kind = 'TICKET_LIABILITY'), 0)`,
+        'ticket_liability', [casinoId]),
+    },
+    {
+      // per ticket: liability credited once (issue / opening), released once (redeem / expiry / cancel / void)
+      key: 'tito.ticket_bookings_match_state',
+      items: await ids(
+        `WITH booked AS (
+           SELECT mt.ticket_id, COALESCE(-sum(le.amount_cents) FILTER (WHERE a.kind = 'TICKET_LIABILITY'), 0)::bigint AS open_cents
+           FROM money_transactions mt JOIN ledger_entries le ON le.transaction_id = mt.id JOIN ledger_accounts a ON a.id = le.account_id
+           WHERE mt.casino_id = $1 AND mt.ticket_id IS NOT NULL GROUP BY mt.ticket_id)
+         SELECT t.id FROM tickets t LEFT JOIN booked b ON b.ticket_id = t.id
+         WHERE t.casino_id = $1 AND (t.issued_at > $2 OR b.ticket_id IS NOT NULL)
+           AND COALESCE(b.open_cents, 0) <> CASE WHEN t.status IN ('VALID', 'HELD') THEN t.amount_cents ELSE 0 END
+         ORDER BY t.id`, 'ticket'),
+    },
+    {
+      // durability: every ticket printed / accepted by a machine since the cutover is booked or deferred
+      key: 'tito.machine_events_accounted',
+      items: await ids(
+        `SELECT e.event_id AS id FROM machine_events e WHERE e.casino_id = $1 AND e.received_at > $2
+           AND e.type IN ('TITO_OUT', 'TITO_IN') AND e.payload->>'ticketBarcode' IS NOT NULL AND (e.type = 'TITO_IN' OR e.amount > 0)
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
+           AND NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
+         ORDER BY e.event_id`, 'ticket_event'),
+    },
+    {
+      key: 'tito.no_stale_deferred_events',
+      items: await ids(
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'TITO' AND d.status = 'PENDING'
+           AND NOT money_rail_frozen(d.org_id, d.casino_id, 'TITO', NULL) ORDER BY d.event_id`, 'deferred_event', [casinoId]),
+    },
+    {
+      // a replayed ticket event is booked on the business date of its occurred_at, never on the replay day
+      key: 'tito.deferred_business_date',
+      items: await ids(
+        `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'TITO' AND d.status = 'PROCESSED' AND d.money_transaction_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = d.business_date)
+         ORDER BY d.event_id`, 'deferred_event', [casinoId]),
+    },
+    {
+      key: 'tito.floor_clearing_attributable',
+      items: (await unexplainedFloorClearing(db, { casinoId })).map((r) => `floor_clearing:${r.id}`),
     },
   ];
 }
@@ -209,6 +273,8 @@ export async function runReconciliation(
     if (vaultSince) for (const c of await vaultChecks(db, casinoId, vaultSince)) raw.push({ ...c, rail: 'VAULT' });
     const handpaySince = await cutoverTime(db, orgId, casinoId, 'HANDPAY');
     if (handpaySince) for (const c of await handpayChecks(db, casinoId, handpaySince)) raw.push({ ...c, rail: 'HANDPAY' });
+    const titoSince = await cutoverTime(db, orgId, casinoId, 'TITO');
+    if (titoSince) for (const c of await titoChecks(db, casinoId, titoSince)) raw.push({ ...c, rail: 'TITO' });
   }
   const inv = await checkLedgerInvariants(db, orgId);
   raw.push({ key: 'global.ledger_invariants', rail: 'GLOBAL', items: inv.ok ? [] : [`ledger:${orgId}`] });
@@ -225,7 +291,7 @@ export async function runReconciliation(
     [orgId, casinoId, input.trigger, ok, JSON.stringify(checks), input.employeeId ?? null]))[0];
 
   const frozen: ReconResult['frozen'] = [];
-  for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'GLOBAL'] as const) {
+  for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'TITO', 'GLOBAL'] as const) {
     const failed = checks.filter((c) => c.rail === rail && !c.ok);
     if (!failed.length) continue;
     const reason = failed.map((c) => `${c.key} (${c.items.length})`).join(', ');
@@ -258,8 +324,9 @@ export async function liftFreeze(db: Db, a: CashActor, freezeId: string, reason:
   await rows(db, 'UPDATE money_rail_freezes SET lifted_at = now(), lifted_by = $2, lift_reason = $3, lift_run_id = $4 WHERE id = $1', [freezeId, a.employeeId, reason, result.runId]);
   // Money events deferred while frozen continue now, in the same transaction (before any day close).
   const replayed = f.rail === 'HANDPAY' || f.rail === 'GLOBAL' ? await replayDeferredHandpays(db, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }) : [];
+  const replayedTickets = f.rail === 'TITO' || f.rail === 'GLOBAL' ? await replayDeferredTito(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }, out) : [];
   await writeAudit(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id, actorType: 'EMPLOYEE', actorId: a.employeeId, actorName: a.employeeEmail ?? null, ip: a.ip ?? null, action: 'money.freeze_lifted', entityType: 'money_rail_freeze', entityId: freezeId, details: { rail: f.rail, reason, runId: result.runId } });
-  return { lifted: true as const, result, replayed };
+  return { lifted: true as const, result, replayed, replayedTickets };
 }
 
 /** Step 1 of a four-eyes explanation of one reconciliation item. */
@@ -311,7 +378,7 @@ export async function closeBusinessDay(db: Db, a: CashActor, input: { casinoId: 
 
 /** Scheduled: every casino with CASH or VAULT on the ledger, each in its own transaction. */
 export async function reconcileLedgerCasinos(pool: Pool, publish: (m: BusMessage) => void = () => {}) {
-  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT', 'HANDPAY')`)).rows;
+  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT', 'HANDPAY', 'TITO')`)).rows;
   const results = [];
   for (const c of casinos) {
     const out: BusMessage[] = [];

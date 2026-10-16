@@ -58,8 +58,8 @@ export const MACHINE_MONEY_EVENT_TYPES = ['CASH_IN', 'CASH_OUT', 'TITO_IN', 'TIT
 /** Machine event types that put cash into the cashbox (legacy COIN_IN = canonical CASH_IN). */
 export const CASHBOX_IN_EVENT_TYPES = ['CASH_IN', 'COIN_IN'] as const;
 
-/** Rails whose ledger-backed operations are implemented (7a: VAULT, CASH; 7b: HANDPAY). */
-export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDPAY', 'CASHLESS'];
+/** Rails whose ledger-backed operations are implemented (7a: VAULT, CASH; 7b: HANDPAY; 7c: TITO). */
+export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS'];
 
 /*
  * Three different kinds of dependency between rails, kept apart on purpose:

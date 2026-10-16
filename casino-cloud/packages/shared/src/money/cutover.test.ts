@@ -13,7 +13,7 @@ test('cutover order is acyclic and complete', () => {
 
 test('every money-holding account kind belongs to exactly one rail; suspense and P&L kinds to none', () => {
   const unowned = ACCOUNT_KIND_KEYS.filter((k) => !ACCOUNT_KIND_RAIL[k] && ['ASSET', 'LIABILITY'].includes(ACCOUNT_KINDS[k].class));
-  assert.deepEqual(unowned.sort(), ['BANK_CLEARING', 'CARD_SETTLEMENT_RECEIVABLE', 'CASHLESS_EXCEPTION', 'TITO_EXCEPTION']);
+  assert.deepEqual(unowned.sort(), ['BANK_CLEARING', 'CARD_SETTLEMENT_RECEIVABLE', 'CASHLESS_EXCEPTION', 'LEGACY_FLOOR_CLEARING', 'TITO_EXCEPTION']);
   assert.ok(!ACCOUNT_KIND_RAIL.OPENING_EQUITY && !ACCOUNT_KIND_RAIL.GAMING_RESULT);
 });
 
@@ -23,7 +23,7 @@ test('every legacy cash transaction type is mapped to the rails it moves money o
 });
 
 test('dependencies: HANDPAY needs CASH technically, never TITO; TITO only through the maintenance window', async () => {
-  const { RAIL_PRODUCTION_READY, RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_PREREQUISITES, railRelease, railReleaseBlockers } = await import('./cutover');
+  const { RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_PREREQUISITES, railRelease, railReleaseBlockers } = await import('./cutover');
   const { MONEY_TRANSACTIONS, postings } = await import('./transactions');
   const { ACCOUNT_KIND_RAIL } = await import('./cutover');
   // A: derived from the posting matrix: every rail a HANDPAY posting touches
@@ -38,10 +38,36 @@ test('dependencies: HANDPAY needs CASH technically, never TITO; TITO only throug
   assert.deepEqual([...RAIL_IMPLEMENTATION_REQUIRES.HANDPAY], ['CASH']);
   // B: the cutover prerequisite
   assert.deepEqual([...CUTOVER_PREREQUISITES.HANDPAY], ['CASH']);
-  // C: TITO appears only as a missing rail of the shared maintenance window
+  // C: TITO was only a missing rail of the shared maintenance window; since 7c the window is complete
   const r = railRelease('HANDPAY');
-  assert.deepEqual([r.implementationMissing, r.windowMissing, r.released], [[], ['TITO'], false]);
-  assert.deepEqual(railReleaseBlockers('HANDPAY'), ['TITO']);
+  assert.deepEqual([r.implementationMissing, r.windowMissing, r.released], [[], [], true]);
+  assert.deepEqual(railReleaseBlockers('HANDPAY'), []);
   assert.deepEqual(railRelease('CASHLESS').released, true);
-  assert.deepEqual([...RAIL_PRODUCTION_READY], ['CASHLESS']);
+});
+
+test('7c: the maintenance window VAULT, CASH, HANDPAY, TITO is released; MACHINE (7d) stays locked', async () => {
+  const { RAIL_PRODUCTION_READY, railRelease, maintenanceWindowOf } = await import('./cutover');
+  assert.deepEqual([...maintenanceWindowOf('TITO')], ['VAULT', 'CASH', 'HANDPAY', 'TITO']);
+  for (const rail of ['VAULT', 'CASH', 'HANDPAY', 'TITO'] as const) assert.equal(railRelease(rail).released, true, rail);
+  assert.deepEqual([...RAIL_PRODUCTION_READY], ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS']);
+  assert.deepEqual(railRelease('MACHINE').implementationMissing, ['MACHINE']);
+});
+
+test('7c: TITO postings touch TICKET_LIABILITY and CASH / CASHLESS / MACHINE, or the D1 clearing of a legacy machine', async () => {
+  const { postings } = await import('./transactions');
+  const base = { casinoId: 'c', amountCents: 250 as never, machineId: 'm', ticketId: 't', cashierSessionId: 's', walletId: 'w' };
+  const kinds = (type: Parameters<typeof postings>[0], extra: Record<string, unknown> = {}) => postings(type, { ...base, ...extra }).map((p) => `${p.account.kind}${p.amountCents > 0 ? '+' : '-'}`);
+  assert.deepEqual(kinds('TITO_ISSUE_MACHINE'), ['MACHINE_CREDIT+', 'TICKET_LIABILITY-']);
+  assert.deepEqual(kinds('TITO_ISSUE_MACHINE', { floorClearing: true }), ['LEGACY_FLOOR_CLEARING+', 'TICKET_LIABILITY-']);
+  assert.deepEqual(kinds('TITO_REDEEM_MACHINE', { floorClearing: true }), ['TICKET_LIABILITY+', 'LEGACY_FLOOR_CLEARING-']);
+  assert.deepEqual(kinds('TITO_EXCEPTION', { floorClearing: true, ticketId: undefined }), ['TITO_EXCEPTION+', 'LEGACY_FLOOR_CLEARING-']);
+  assert.deepEqual(kinds('TITO_ISSUE_CASHIER'), ['DRAWER+', 'TICKET_LIABILITY-']);
+  assert.deepEqual(kinds('TITO_ISSUE_CASHIER', { payFrom: 'WALLET' }), ['WALLET_AVAILABLE+', 'TICKET_LIABILITY-']);
+  assert.deepEqual(kinds('TITO_REDEEM_CASHIER'), ['TICKET_LIABILITY+', 'DRAWER-']);
+  assert.deepEqual(kinds('TITO_REDEEM_CASHIER', { payTo: 'WALLET' }), ['TICKET_LIABILITY+', 'WALLET_AVAILABLE-']);
+  assert.deepEqual(kinds('TITO_EXPIRY'), ['TICKET_LIABILITY+', 'EXPIRED_TICKET_INCOME-']);
+  assert.deepEqual(kinds('TITO_CANCEL'), ['TICKET_LIABILITY+', 'TITO_ADJUSTMENT-']);
+  // the clearing account is per machine and never belongs to a rail
+  assert.equal(ACCOUNT_KINDS.LEGACY_FLOOR_CLEARING.owner, 'MACHINE');
+  assert.equal(ACCOUNT_KIND_RAIL.LEGACY_FLOOR_CLEARING, undefined);
 });
