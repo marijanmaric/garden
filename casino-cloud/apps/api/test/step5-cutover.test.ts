@@ -545,11 +545,11 @@ describe('HTTP and invariants', () => {
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover', headers: h('admin@example.com'), payload: { rail: 'VAULT', casinoId: casinoA } });
     assert.equal(res.statusCode, 409);
     assert.match(res.json().error, /VAULT cutover aborted: .*count_exists/);
-    // MACHINE (7d) is still not released for production
+    // since 7d MACHINE is released too: the real cutover runs and refuses on its prerequisites
     const machine = (await one('SELECT id FROM machines WHERE casino_id = $1 LIMIT 1', [casinoA])).id;
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover', headers: h('admin@example.com'), payload: { rail: 'MACHINE', machineId: machine } });
     assert.equal(res.statusCode, 409);
-    assert.match(res.json().error, /not released yet/, 'production cutover only for released rails');
+    assert.match(res.json().error, /MACHINE cutover aborted: prerequisite:VAULT, prerequisite:TITO/);
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover/dry-run', headers: h('admin@example.com'), payload: { rail: 'VAULT', casinoId: casinoA } });
     assert.ok(res.json().checks.some((x: { name: string; ok: boolean }) => x.name === 'vault:Main Vault:count_exists' && !x.ok));
     res = await app.inject({ method: 'POST', url: '/api/v1/money/cutover/dry-run', headers: h('admin@example.com'), payload: { rail: 'TITO', casinoId: casinoA } });

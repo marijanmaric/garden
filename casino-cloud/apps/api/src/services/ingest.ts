@@ -6,6 +6,8 @@ import { openAlert, resolveAlerts } from './alerts';
 import { cardRejectionMessage, resolveCard } from './players';
 import { confirmHandpayReset, handleJackpotEvent } from './handpays';
 import { handleTitoMachineEvent, titoOnLedger } from './tito';
+import { recordEventException, withEventException } from './event-exceptions';
+import { handleCreditMeter, handleMachineMoneyEvent, machineOnLedger } from './machine-money';
 
 export interface GatewayIdentity {
   id: string;
@@ -18,6 +20,8 @@ export interface IngestResult {
   accepted: number;
   duplicates: number;
   rejected: string[];
+  /** Step 7d: events stored, but their money part was rejected (deterministic business error, no money moved). */
+  exceptions: Array<{ eventId: string; code: string; message: string }>;
 }
 
 /** Maps a financial event onto the ledger entry type it produces. */
@@ -41,12 +45,19 @@ const METER_MAP: Partial<Record<MachineEvent['type'], string>> = {
  * transaction and is idempotent on eventId, so a gateway can safely resend its offline queue.
  */
 export async function ingestEvents(gw: GatewayIdentity, events: WireMachineEvent[]): Promise<IngestResult> {
-  const result: IngestResult = { accepted: 0, duplicates: 0, rejected: [] };
+  const result: IngestResult = { accepted: 0, duplicates: 0, rejected: [], exceptions: [] };
   // Legacy names (COIN_IN, TICKET_OUT, ...) are translated here; nothing behind this point sees them.
   const sorted = events.map((e) => normalizeEvent(e) as MachineEvent).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   for (const ev of sorted) {
     const out: BusMessage[] = [];
-    const outcome = await withTransaction(pool, (db) => processEvent(db, gw, ev, out));
+    const outcome = await withTransaction(pool, async (db) => {
+      const o = await processEvent(db, gw, ev, out);
+      if (o === 'accepted') {
+        const x = (await db.query('SELECT code, message FROM machine_event_exceptions WHERE event_id = $1', [ev.eventId])).rows[0];
+        if (x) result.exceptions.push({ eventId: ev.eventId, code: x.code, message: x.message });
+      }
+      return o;
+    });
     if (outcome === 'accepted') {
       result.accepted++;
       out.forEach((m) => bus.publish(m));
@@ -143,12 +154,25 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
     case 'TITO_OUT': {
       await ledger(LEDGER_MAP[type]!, amount ?? 0);
       await db.query(`UPDATE machine_meters SET ${METER_MAP[type]} = ${METER_MAP[type]} + $2, updated_at = now() WHERE machine_id = $1`, [m.id, amount ?? 0]);
+      const exEvent = { ...ctx, eventId, type, label };
       if ((type === 'TITO_OUT' || type === 'TITO_IN') && (await titoOnLedger(db, gw.orgId, gw.casinoId))) {
         // Step 7c: ticket money on the ledger (booked, deferred while frozen, or late on its own business date).
-        await handleTitoMachineEvent(db, {
-          ...ctx, label, eventId, type, barcode: ev.ticketBarcode ?? null, holdId: ev.holdId ?? null,
-          amountCents: amount === undefined || amount === null ? null : Math.round(amount * 100), occurredAt: timestamp,
-        }, out);
+        // Step 7d: a ticket event that cannot be booked is a recorded exception, never an HTTP 500.
+        await withEventException(db, exEvent, 'TITO', out, async () => {
+          const r = await handleTitoMachineEvent(db, {
+            ...ctx, label, eventId, type, barcode: ev.ticketBarcode ?? null, holdId: ev.holdId ?? null,
+            amountCents: amount === undefined || amount === null ? null : Math.round(amount * 100), occurredAt: timestamp,
+          }, out);
+          if (r.outcome === 'DUPLICATE_BARCODE' || r.outcome === 'EXCEPTION_UNBOOKED' || r.outcome === 'UNBOOKED')
+            await recordEventException(db, exEvent, 'TITO', r.outcome, r.outcome === 'DUPLICATE_BARCODE' ? `ticket barcode ${ev.ticketBarcode} already exists` : 'ticket event without a bookable amount', out);
+        });
+        break;
+      }
+      if ((type === 'CASH_IN' || type === 'CASH_OUT') && (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id))) {
+        // Step 7d: machine cash on the ledger (cashbox / hopper <-> machine credit)
+        await withEventException(db, exEvent, 'MACHINE', out, () => handleMachineMoneyEvent(db, {
+          ...ctx, label, eventId, type, amountCents: amount === undefined || amount === null ? null : Math.round(amount * 100), transferId: null, occurredAt: timestamp,
+        }, out));
         break;
       }
       if (type === 'TITO_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
@@ -164,17 +188,33 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       // integer cents once, here at the boundary.
       // On a frozen HANDPAY rail the event is kept as a deferred money event and replayed after the lift.
       if ((amount ?? 0) > 0) {
-        const r = await handleJackpotEvent(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) });
-        if (r.deferred)
+        const r = await withEventException(db, { ...ctx, eventId, type, label }, 'HANDPAY', out,
+          () => handleJackpotEvent(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) }));
+        if (r?.deferred)
           await openAlert(db, {
             ...ctx, type: 'HANDPAY_DEFERRED', severity: 'WARNING',
-            message: r.reason === 'FROZEN'
+            message: r!.reason === 'FROZEN'
               ? `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; handpay deferred while HANDPAY is frozen`
-              : `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; its business date cannot be booked (${r.reason}), pending explicit handling`,
+              : `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; its business date cannot be booked (${r!.reason}), pending explicit handling`,
           }, out);
       }
       break;
     }
+    case 'CASHLESS_IN':
+    case 'CASHLESS_OUT':
+      // Step 7d: the machine's ack of a wallet transfer; money only for a machine on the ledger
+      if (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id))
+        await withEventException(db, { ...ctx, eventId, type, label }, 'CASHLESS', out, () => handleMachineMoneyEvent(db, {
+          ...ctx, label, eventId, type, amountCents: amount === undefined || amount === null ? null : Math.round(amount * 100), transferId: ev.transferId ?? null, occurredAt: timestamp,
+        }, out));
+      break;
+    case 'CREDIT_METER':
+      // Step 7d / D3: gaming settlement only at a reliable meter or a verified zero-credit state
+      if (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id))
+        await withEventException(db, { ...ctx, eventId, type, label }, 'MACHINE', out, () => handleCreditMeter(db, {
+          ...ctx, label, eventId, creditCents: ev.creditCents ?? null, occurredAt: timestamp,
+        }));
+      break;
     case 'JACKPOT_RESET':
       if (isNewer) flags.jackpotPending = false;
       await resolveAlerts(db, { ...ctx, type: 'JACKPOT' }, out);

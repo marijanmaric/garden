@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { withTransaction, writeAudit } from '@m1/database';
 import { MACHINE_STATUSES, WIRE_EVENT_TYPES } from '@m1/shared';
-import { actor, guard, scopeCasino } from '../auth';
+import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus } from '../bus';
 import { pool } from '../db';
 import { ingestEvents } from '../services/ingest';
@@ -10,6 +10,7 @@ import { authenticateGateway, heartbeat } from '../services/gateway';
 import { confirmHandpayReset } from '../services/handpays';
 import { holdTicket, releaseTicketHold } from '../services/ticket-holds';
 import { assertHoldAllowed } from '../services/tito';
+import { closeCashlessSession, endTransfer, markTransferSent, openCashlessSession, requestTransfer } from '../services/cashless';
 
 const eventSchema = z.object({
   eventId: z.string().uuid(),
@@ -21,6 +22,8 @@ const eventSchema = z.object({
   playerCardId: z.string().max(64).optional(),
   ticketBarcode: z.string().max(64).optional(),
   holdId: z.string().uuid().optional(),
+  transferId: z.string().uuid().optional(),
+  creditCents: z.number().int().min(0).max(1e13).optional(),
   errorCode: z.string().max(64).optional(),
   message: z.string().max(500).optional(),
   source: z.string().max(40).optional(),
@@ -66,6 +69,59 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const gw = await gatewayAuth(req);
     const body = z.object({ holdId: z.string().uuid(), reason: z.string().max(200).default('machine rejected') }).parse(req.body);
     return { released: await withTransaction(pool, (db) => releaseTicketHold(db, { orgId: gw.orgId, holdId: body.holdId, reason: body.reason })) };
+  });
+
+  // ---- Step 7d cashless at the machine: the player's card opens a session, the machine requests a transfer
+  // (wallet -> machine reserves, nothing reaches the machine yet), the machine's CASHLESS_IN / CASHLESS_OUT
+  // event with transferId is the confirmation; a failure or the timeout releases the reservation.
+  const sessionOfGateway = async (db: { query: typeof pool.query }, gw: { orgId: string; casinoId: string }, sessionId: string) => {
+    const s = (await db.query('SELECT id FROM cashless_sessions WHERE id = $1 AND org_id = $2 AND casino_id = $3', [sessionId, gw.orgId, gw.casinoId])).rows[0];
+    if (!s) throw new HttpError(404, 'Cashless session not found');
+  };
+  app.post('/api/v1/gateway/cashless/sessions', async (req) => {
+    const gw = await gatewayAuth(req);
+    const body = z.object({ machineId: z.string().min(1).max(64), cardNumber: z.string().min(1).max(64), requestKey: z.string().min(8).max(128) }).parse(req.body);
+    return withTransaction(pool, async (db) => {
+      const m = (await db.query('SELECT id FROM machines WHERE org_id = $1 AND casino_id = $2 AND machine_code = $3', [gw.orgId, gw.casinoId, body.machineId])).rows[0];
+      if (!m) throw new HttpError(404, 'Machine not found');
+      return openCashlessSession(db, { orgId: gw.orgId }, { cardNumber: body.cardNumber, machineId: m.id, requestKey: `gw:${body.requestKey}` });
+    });
+  });
+  app.post('/api/v1/gateway/cashless/sessions/:id/close', async (req) => {
+    const gw = await gatewayAuth(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return withTransaction(pool, async (db) => {
+      await sessionOfGateway(db as never, gw, id);
+      return closeCashlessSession(db, { orgId: gw.orgId }, id, 'card removed');
+    });
+  });
+  app.post('/api/v1/gateway/cashless/transfers', async (req) => {
+    const gw = await gatewayAuth(req);
+    const body = z.object({ sessionId: z.string().uuid(), direction: z.enum(['TO_MACHINE', 'FROM_MACHINE']), amountCents: z.number().int().positive().max(1e13), requestKey: z.string().min(8).max(128) }).parse(req.body);
+    return withTransaction(pool, async (db) => {
+      await sessionOfGateway(db as never, gw, body.sessionId);
+      return requestTransfer(db, { orgId: gw.orgId }, { sessionId: body.sessionId, direction: body.direction, amountCents: body.amountCents, requestKey: `gw:${body.requestKey}` });
+    });
+  });
+  const transferOfGateway = async (db: { query: typeof pool.query }, gw: { orgId: string; casinoId: string }, id: string) => {
+    if (!(await db.query('SELECT 1 FROM wallet_transfers WHERE id = $1 AND org_id = $2 AND casino_id = $3', [id, gw.orgId, gw.casinoId])).rowCount) throw new HttpError(404, 'Transfer not found');
+  };
+  app.post('/api/v1/gateway/cashless/transfers/:id/sent', async (req) => {
+    const gw = await gatewayAuth(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return withTransaction(pool, async (db) => {
+      await transferOfGateway(db as never, gw, id);
+      return markTransferSent(db, { orgId: gw.orgId }, id);
+    });
+  });
+  app.post('/api/v1/gateway/cashless/transfers/:id/fail', async (req) => {
+    const gw = await gatewayAuth(req);
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    const { reason } = z.object({ reason: z.string().min(1).max(200) }).parse(req.body);
+    return withTransaction(pool, async (db) => {
+      await transferOfGateway(db as never, gw, id);
+      return endTransfer(db, { orgId: gw.orgId }, id, 'FAILED', reason);
+    });
   });
 
   app.post('/api/v1/gateway/commands/:id/result', async (req) => {

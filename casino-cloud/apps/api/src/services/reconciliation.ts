@@ -8,10 +8,11 @@ import type { CashActor } from './cash-ops';
 import { checkLedgerInvariants } from './ledger';
 import { replayDeferredHandpays } from './handpays';
 import { replayDeferredTito, unexplainedFloorClearing } from './tito';
+import { replayDeferredMachine } from './machine-money';
 
 /**
  * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY;
- * Step 7c: TITO incl. the D1 floor clearing).
+ * Step 7c: TITO incl. the D1 floor clearing; Step 7d: MACHINE per machine, CASHLESS per organisation).
  *
  * Every failed check is CRITICAL: an alert is raised and the affected rail is FROZEN for the
  * casino (a global invariant freezes the whole organisation). A frozen rail takes only corrections;
@@ -24,7 +25,7 @@ type Db = Pick<PoolClient, 'query'>;
 
 export interface ReconCheck {
   key: string;
-  rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'TITO' | 'GLOBAL';
+  rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'TITO' | 'MACHINE' | 'CASHLESS' | 'GLOBAL';
   ok: boolean;
   items: string[];
   resolved: string[];
@@ -35,6 +36,8 @@ export interface ReconResult {
   ok: boolean;
   checks: ReconCheck[];
   frozen: Array<{ id: string; rail: FreezeRail }>;
+  /** MACHINE items: the machine each item belongs to (per-machine freezes and lifts). */
+  machineOf?: Record<string, string>;
 }
 
 const rows = async (db: Db, sql: string, params: unknown[]) => (await db.query(sql, params)).rows;
@@ -95,8 +98,8 @@ async function vaultChecks(db: Db, casinoId: string, since: string) {
       items: await ids(
         `SELECT m.id FROM cash_movements m JOIN money_transactions t ON t.id = m.money_transaction_id
          WHERE m.casino_id = $1 AND m.requested_at > $2 AND m.status = 'CONFIRMED'
-           AND (t.amount_cents <> m.amount_cents OR t.type <> CASE m.kind WHEN 'FILL' THEN 'VAULT_FILL' ELSE 'VAULT_DROP' END
-                OR t.cashier_session_id <> m.cashier_session_id OR t.vault_id <> m.vault_id)
+           AND (t.amount_cents <> m.amount_cents OR t.type <> CASE m.kind WHEN 'FILL' THEN 'VAULT_FILL' WHEN 'HOPPER_FILL' THEN 'HOPPER_FILL' ELSE 'VAULT_DROP' END
+                OR t.cashier_session_id IS DISTINCT FROM m.cashier_session_id OR t.machine_id IS DISTINCT FROM m.machine_id OR t.vault_id <> m.vault_id)
          ORDER BY m.id`, 'movement'),
     },
     {
@@ -168,7 +171,7 @@ async function handpayChecks(db: Db, casinoId: string, since: string) {
       items: await ids(
         `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'HANDPAY' AND d.status = 'PROCESSED'
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = d.event_id AND t.type = 'HANDPAY_CREATE_JACKPOT'
-                             AND t.handpay_id = d.handpay_id AND t.business_date = d.business_date AND t.amount_cents = d.amount_cents)
+                             AND t.handpay_id = d.handpay_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date) AND t.amount_cents = d.amount_cents)
          ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
@@ -221,26 +224,110 @@ async function titoChecks(db: Db, casinoId: string, since: string) {
         `SELECT e.event_id AS id FROM machine_events e WHERE e.casino_id = $1 AND e.received_at > $2
            AND e.type IN ('TITO_OUT', 'TITO_IN') AND e.payload->>'ticketBarcode' IS NOT NULL AND (e.type = 'TITO_IN' OR e.amount > 0)
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
-           AND NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
+           AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
+                OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
          ORDER BY e.event_id`, 'ticket_event'),
     },
     {
       key: 'tito.no_stale_deferred_events',
       items: await ids(
         `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'TITO' AND d.status = 'PENDING'
-           AND NOT money_rail_frozen(d.org_id, d.casino_id, 'TITO', NULL) ORDER BY d.event_id`, 'deferred_event', [casinoId]),
+           AND NOT money_rail_frozen(d.org_id, d.casino_id, 'TITO', NULL)
+           -- 7d: a ticket event of a frozen ledger machine legitimately waits for that machine
+           AND NOT (money_rail_ledger(d.org_id, d.casino_id, 'MACHINE', d.machine_id) AND money_rail_frozen(d.org_id, d.casino_id, 'MACHINE', d.machine_id))
+         ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
       // a replayed ticket event is booked on the business date of its occurred_at, never on the replay day
       key: 'tito.deferred_business_date',
       items: await ids(
         `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'TITO' AND d.status = 'PROCESSED' AND d.money_transaction_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = d.business_date)
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date))
          ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
       key: 'tito.floor_clearing_attributable',
       items: (await unexplainedFloorClearing(db, { casinoId })).map((r) => `floor_clearing:${r.id}`),
+    },
+  ];
+}
+
+/**
+ * MACHINE (Step 7d), for machines on the MACHINE ledger since their cutover: every machine money event is
+ * booked, deferred or an (unexplained = reported) exception; deferred records are not stale and keep
+ * their business date; ledger collections are booked. Items carry their machine (per-machine freeze).
+ */
+async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, string>) {
+  const items = async (sql: string, prefix: string) => (await rows(db, sql, [casinoId])).map((r) => {
+    const key = `${prefix}:${r.id}`;
+    machineOf.set(key, r.machine_id);
+    return key;
+  });
+  const onLedger = `JOIN money_rail_cutovers mc ON mc.rail = 'MACHINE' AND mc.machine_id = e.machine_id AND mc.created_txid <> pg_current_xact_id()`;
+  return [
+    {
+      key: 'machine.events_accounted',
+      items: await items(
+        `SELECT e.event_id AS id, e.machine_id FROM machine_events e ${onLedger}
+         WHERE e.casino_id = $1 AND e.received_at > mc.as_of AND e.type IN ('CASH_IN', 'CASH_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
+           AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
+                OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
+         ORDER BY e.event_id`, 'machine_event'),
+    },
+    {
+      key: 'machine.no_stale_deferred_events',
+      items: await items(
+        `SELECT d.event_id AS id, d.machine_id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'MACHINE' AND d.status = 'PENDING'
+           AND NOT money_rail_frozen(d.org_id, d.casino_id, 'MACHINE', d.machine_id)
+           AND NOT (d.kind IN ('CASHLESS_IN', 'CASHLESS_OUT') AND money_rail_frozen(d.org_id, d.casino_id, 'CASHLESS', NULL))
+         ORDER BY d.event_id`, 'deferred_event'),
+    },
+    {
+      key: 'machine.deferred_business_date',
+      items: await items(
+        `SELECT d.event_id AS id, d.machine_id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'MACHINE' AND d.status = 'PROCESSED' AND d.money_transaction_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date))
+         ORDER BY d.event_id`, 'deferred_event'),
+    },
+    {
+      key: 'machine.collections_booked',
+      items: await items(
+        `SELECT c.id, c.machine_id FROM cash_collections c JOIN money_rail_cutovers mc ON mc.rail = 'MACHINE' AND mc.machine_id = c.machine_id
+         WHERE c.casino_id = $1 AND c.created_at > mc.as_of AND (c.money_transaction_id IS NULL
+           OR NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = c.money_transaction_id AND t.machine_id = c.machine_id))
+         ORDER BY c.id`, 'collection'),
+    },
+  ];
+}
+
+/**
+ * CASHLESS (Step 7d, organisation-wide): every wallet's reserved balance equals its active wallet -> machine
+ * transfers; every transfer is booked to its state (one confirmation, a release for a failed / expired
+ * reservation).
+ */
+async function cashlessChecks(db: Db, orgId: string, since: string) {
+  const ids = async (sql: string, prefix: string) => (await rows(db, sql, [orgId, since])).map((r) => `${prefix}:${r.id}`);
+  return [
+    {
+      key: 'cashless.reserved_matches_active_transfers',
+      items: await ids(
+        `SELECT w.id FROM wallets w WHERE w.org_id = $1 AND $2::timestamptz IS NOT NULL
+           AND COALESCE((SELECT -b.balance_cents FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id WHERE a.wallet_id = w.id AND a.kind = 'WALLET_RESERVED'), 0)
+           <> COALESCE((SELECT sum(t.amount_cents) FROM wallet_transfers t WHERE t.wallet_id = w.id AND t.direction = 'TO_MACHINE' AND t.status IN ('REQUESTED', 'SENT')), 0)
+         ORDER BY w.id`, 'wallet'),
+    },
+    {
+      key: 'cashless.transfers_booked',
+      items: await ids(
+        `SELECT t.id FROM wallet_transfers t WHERE t.org_id = $1 AND t.requested_at > $2
+           AND ((t.status IN ('CONFIRMED', 'LATE_CONFIRMED')
+                 AND (SELECT count(*) FROM money_transactions m WHERE m.transfer_id = t.id AND m.amount_cents = t.confirmed_amount_cents
+                        AND m.type IN ('WALLET_TO_MACHINE_CONFIRM', 'MACHINE_TO_WALLET', 'WALLET_TO_MACHINE_LATE_CONFIRM')) <> 1)
+             OR (t.direction = 'TO_MACHINE' AND t.status IN ('FAILED', 'EXPIRED', 'LATE_CONFIRMED')
+                 AND EXISTS (SELECT 1 FROM money_transactions m WHERE m.transfer_id = t.id AND m.type = 'WALLET_TO_MACHINE_RESERVE')
+                 AND NOT EXISTS (SELECT 1 FROM money_transactions m WHERE m.transfer_id = t.id AND m.type = 'WALLET_TO_MACHINE_RELEASE')))
+         ORDER BY t.id`, 'transfer'),
     },
   ];
 }
@@ -255,6 +342,17 @@ async function freeze(db: Db, orgId: string, casinoId: string | null, rail: Free
   return r[0]?.id as string | undefined;
 }
 
+/** MACHINE freezes are per machine: other machines (and other rails) continue. */
+async function freezeMachine(db: Db, orgId: string, casinoId: string, machineId: string, reason: string, runId: string) {
+  const r = await rows(db,
+    `INSERT INTO money_rail_freezes (org_id, rail, casino_id, machine_id, reason, reconciliation_run_id)
+     SELECT $1, 'MACHINE', $2, $3, $4, $5 WHERE NOT EXISTS (
+       SELECT 1 FROM money_rail_freezes WHERE org_id = $1 AND rail = 'MACHINE' AND casino_id = $2 AND (machine_id = $3 OR machine_id IS NULL) AND lifted_at IS NULL)
+     RETURNING id`,
+    [orgId, casinoId, machineId, reason, runId]);
+  return r[0]?.id as string | undefined;
+}
+
 /**
  * Runs the CASH / VAULT checks of a casino (only for rails on the ledger) plus the global ledger
  * invariants. Mismatches freeze the affected rail and raise an alert, in the same transaction.
@@ -266,6 +364,7 @@ export async function runReconciliation(
 ): Promise<ReconResult> {
   const { orgId, casinoId } = input;
   const raw: Array<{ key: string; rail: ReconCheck['rail']; items: string[] }> = [];
+  const machineOf = new Map<string, string>();
   if (casinoId) {
     const cashSince = await cutoverTime(db, orgId, casinoId, 'CASH');
     if (cashSince) for (const c of await cashChecks(db, casinoId, cashSince)) raw.push({ ...c, rail: 'CASH' });
@@ -275,7 +374,10 @@ export async function runReconciliation(
     if (handpaySince) for (const c of await handpayChecks(db, casinoId, handpaySince)) raw.push({ ...c, rail: 'HANDPAY' });
     const titoSince = await cutoverTime(db, orgId, casinoId, 'TITO');
     if (titoSince) for (const c of await titoChecks(db, casinoId, titoSince)) raw.push({ ...c, rail: 'TITO' });
+    for (const c of await machineChecks(db, casinoId, machineOf)) raw.push({ ...c, rail: 'MACHINE' });
   }
+  const cashlessSince = (await rows(db, `SELECT as_of FROM money_rail_cutovers WHERE org_id = $1 AND rail = 'CASHLESS' AND created_txid <> pg_current_xact_id()`, [orgId]))[0]?.as_of;
+  if (cashlessSince) for (const c of await cashlessChecks(db, orgId, cashlessSince)) raw.push({ ...c, rail: 'CASHLESS' });
   const inv = await checkLedgerInvariants(db, orgId);
   raw.push({ key: 'global.ledger_invariants', rail: 'GLOBAL', items: inv.ok ? [] : [`ledger:${orgId}`] });
 
@@ -291,12 +393,19 @@ export async function runReconciliation(
     [orgId, casinoId, input.trigger, ok, JSON.stringify(checks), input.employeeId ?? null]))[0];
 
   const frozen: ReconResult['frozen'] = [];
-  for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'TITO', 'GLOBAL'] as const) {
+  for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'TITO', 'MACHINE', 'CASHLESS', 'GLOBAL'] as const) {
     const failed = checks.filter((c) => c.rail === rail && !c.ok);
     if (!failed.length) continue;
     const reason = failed.map((c) => `${c.key} (${c.items.length})`).join(', ');
-    const id = await freeze(db, orgId, rail === 'GLOBAL' ? null : casinoId, rail, reason, run.id);
-    if (id) frozen.push({ id, rail });
+    if (rail === 'MACHINE') {
+      for (const machineId of [...new Set(failed.flatMap((c) => c.items.map((i) => machineOf.get(i)!)))]) {
+        const id = await freezeMachine(db, orgId, casinoId!, machineId, reason, run.id);
+        if (id) frozen.push({ id, rail });
+      }
+    } else {
+      const id = await freeze(db, orgId, rail === 'GLOBAL' || rail === 'CASHLESS' ? null : casinoId, rail, reason, run.id);
+      if (id) frozen.push({ id, rail });
+    }
     const alertCasino = casinoId ?? (await rows(db, 'SELECT id FROM casinos WHERE org_id = $1 ORDER BY created_at, id LIMIT 1', [orgId]))[0]?.id;
     if (alertCasino)
       await openAlert(db as PoolClient, {
@@ -309,7 +418,7 @@ export async function runReconciliation(
     action: 'money.reconciliation', entityType: 'reconciliation_run', entityId: run.id,
     details: { ok, failed: checks.filter((c) => !c.ok).map((c) => c.key), frozen: frozen.map((f) => f.rail) },
   });
-  return { runId: run.id, ok, checks, frozen };
+  return { runId: run.id, ok, checks, frozen, machineOf: Object.fromEntries(machineOf) };
 }
 
 /** Lifts a freeze after a clean run of its rail (and of the global invariants). */
@@ -319,14 +428,16 @@ export async function liftFreeze(db: Db, a: CashActor, freezeId: string, reason:
   if (!f || (f.casino_id && !a.casinoIds.includes(f.casino_id))) throw new HttpError(404, 'Freeze not found');
   if (f.lifted_at) throw new HttpError(409, 'Freeze already lifted');
   const result = await runReconciliation(db, { orgId: a.orgId, casinoId: f.casino_id, trigger: 'LIFT', employeeId: a.employeeId }, out);
-  const blocking = result.checks.filter((c) => !c.ok && (c.rail === f.rail || c.rail === 'GLOBAL'));
+  const blocking = result.checks.filter((c) => !c.ok && (c.rail === 'GLOBAL'
+    || (c.rail === f.rail && (f.rail !== 'MACHINE' || !f.machine_id || c.items.some((i) => result.machineOf?.[i] === f.machine_id)))));
   if (blocking.length) return { lifted: false as const, result };
   await rows(db, 'UPDATE money_rail_freezes SET lifted_at = now(), lifted_by = $2, lift_reason = $3, lift_run_id = $4 WHERE id = $1', [freezeId, a.employeeId, reason, result.runId]);
   // Money events deferred while frozen continue now, in the same transaction (before any day close).
   const replayed = f.rail === 'HANDPAY' || f.rail === 'GLOBAL' ? await replayDeferredHandpays(db, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }) : [];
-  const replayedTickets = f.rail === 'TITO' || f.rail === 'GLOBAL' ? await replayDeferredTito(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }, out) : [];
+  const replayedTickets = ['TITO', 'MACHINE', 'GLOBAL'].includes(f.rail) ? await replayDeferredTito(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }, out) : [];
+  const replayedMachine = ['MACHINE', 'CASHLESS', 'GLOBAL'].includes(f.rail) ? await replayDeferredMachine(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id ?? undefined }, out) : [];
   await writeAudit(db as PoolClient, { orgId: a.orgId, casinoId: f.casino_id, actorType: 'EMPLOYEE', actorId: a.employeeId, actorName: a.employeeEmail ?? null, ip: a.ip ?? null, action: 'money.freeze_lifted', entityType: 'money_rail_freeze', entityId: freezeId, details: { rail: f.rail, reason, runId: result.runId } });
-  return { lifted: true as const, result, replayed, replayedTickets };
+  return { lifted: true as const, result, replayed, replayedTickets, replayedMachine };
 }
 
 /** Step 1 of a four-eyes explanation of one reconciliation item. */
@@ -378,7 +489,7 @@ export async function closeBusinessDay(db: Db, a: CashActor, input: { casinoId: 
 
 /** Scheduled: every casino with CASH or VAULT on the ledger, each in its own transaction. */
 export async function reconcileLedgerCasinos(pool: Pool, publish: (m: BusMessage) => void = () => {}) {
-  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT', 'HANDPAY', 'TITO')`)).rows;
+  const casinos = (await pool.query(`SELECT DISTINCT org_id, casino_id FROM money_rail_cutovers WHERE rail IN ('CASH', 'VAULT', 'HANDPAY', 'TITO', 'MACHINE')`)).rows;
   const results = [];
   for (const c of casinos) {
     const out: BusMessage[] = [];

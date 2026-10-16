@@ -4,6 +4,7 @@ import { expireStaleTransfers } from './cashless';
 import { replayDeferredHandpays, retryFailedHandpayResets } from './handpays';
 import { releaseExpiredHolds } from './ticket-holds';
 import { expireTicketsLedger, replayDeferredTito } from './tito';
+import { replayDeferredMachine } from './machine-money';
 import { expireMovements } from './cash-ops';
 import { reconcileLedgerCasinos } from './reconciliation';
 import { bus } from '../bus';
@@ -34,6 +35,7 @@ export function startMaintenance() {
     await withTransaction(pool, (db) => retryFailedHandpayResets(db));
     await withTransaction(pool, (db) => replayDeferredHandpays(db)); // safety net; the freeze lift replays first
     await withTransaction(pool, (db) => replayDeferredTito(db)); // same for ticket machine events
+    await withTransaction(pool, (db) => replayDeferredMachine(db)); // and machine money events (7d)
     await withTransaction(pool, (db) => expireMovements(db));
     if (Date.now() - lastReconcile >= RECONCILE_EVERY_MS) {
       lastReconcile = Date.now();

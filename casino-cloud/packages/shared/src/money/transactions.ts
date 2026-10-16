@@ -150,7 +150,8 @@ export interface MoneyContext {
 
 /** Legacy source of an opening balance: one row of a legacy table, used at most once. */
 export interface BackfillSource {
-  table: 'cash_counts' | 'tickets' | 'handpays';
+  /** ledger_accounts (Step 7d): a machine's D1 LEGACY_FLOOR_CLEARING account, closed by its MACHINE cutover. */
+  table: 'cash_counts' | 'tickets' | 'handpays' | 'ledger_accounts';
   id: string;
 }
 

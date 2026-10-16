@@ -4,7 +4,7 @@ import { HttpError } from '../auth';
 import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
 import { requireUsableCard, type Actor } from './players';
 import { assertWalletOperation, lockWallet, walletOfPlayer } from './wallets';
-import { requireRailOnLedger } from './rails';
+import { railOnLedger, requireRailOnLedger } from './rails';
 
 /**
  * Cashless sessions (wallet play on one machine) and wallet transfers (wallet <-> machine).
@@ -119,6 +119,10 @@ export async function requestTransfer(db: Db, a: Actor, input: { sessionId: stri
   const s = (await db.query('SELECT * FROM cashless_sessions WHERE id = $1 AND org_id = $2 FOR NO KEY UPDATE', [input.sessionId, a.orgId])).rows[0];
   if (!s) throw new HttpError(404, 'Cashless session not found');
   if (s.status !== 'OPEN') throw new HttpError(409, 'Cashless session is closed');
+  // 7d: the machine side of a transfer is MACHINE_CREDIT, so the machine must be on the ledger (no reservation otherwise)
+  if (!(await railOnLedger(db, a.orgId, 'MACHINE', s.casino_id, s.machine_id))) throw new HttpError(409, 'MACHINE money is not on the ledger for this machine (cutover pending)');
+  if ((await db.query(`SELECT money_rail_frozen($1, $2, 'MACHINE', $3) AS f`, [a.orgId, s.casino_id, s.machine_id])).rows[0].f)
+    throw new HttpError(409, 'MACHINE is frozen after a reconciliation mismatch: no new transfers');
   const wallet = await lockWallet(db, a.orgId, s.wallet_id);
   assertWalletOperation(wallet, input.direction === 'TO_MACHINE' ? 'TO_MACHINE' : 'FROM_MACHINE');
   const timeout = (await db.query('SELECT transfer_timeout_seconds FROM casino_money_settings WHERE casino_id = $1', [s.casino_id])).rows[0]?.transfer_timeout_seconds ?? 60;
@@ -159,28 +163,35 @@ export async function markTransferSent(db: Db, a: Actor, transferId: string) {
   return (await db.query(`UPDATE wallet_transfers SET status = 'SENT', sent_at = now() WHERE id = $1 RETURNING *`, [transferId])).rows[0];
 }
 
-/** The machine confirmed the transfer. Only now does money reach (or leave) the machine. */
-export async function confirmTransfer(db: Db, a: Actor, input: { transferId: string; ackEventId?: string | null; confirmedAmountCents?: number }) {
+/**
+ * The machine confirmed the transfer (its ack event). Only now does money reach (or leave) the machine.
+ * Step 7d: an ack after FAILED / EXPIRED (reservation already released) is LATE_CONFIRMED: wallet ->
+ * machine is booked from CASHLESS_EXCEPTION (the wallet is not charged twice), machine -> wallet with the
+ * released amount; both are alerted by the caller. businessDate only for a validated deferred replay.
+ */
+export async function confirmTransfer(db: Db, a: Actor, input: { transferId: string; ackEventId?: string | null; confirmedAmountCents?: number; businessDate?: string | null }) {
   const t = await lockTransfer(db, a.orgId, input.transferId);
-  if (t.status === 'CONFIRMED') {
-    if ((input.ackEventId ?? null) === t.ack_event_id) return { transfer: t, replayed: true };
+  if (t.status === 'CONFIRMED' || t.status === 'LATE_CONFIRMED') {
+    if ((input.ackEventId ?? null) === t.ack_event_id) return { transfer: t, replayed: true, late: t.status === 'LATE_CONFIRMED', moneyTransactionId: null as string | null };
     throw new HttpError(409, 'Transfer already confirmed');
   }
-  assertTransition(t, 'CONFIRMED');
+  const late = t.status === 'FAILED' || t.status === 'EXPIRED';
+  if (!late) assertTransition(t, 'CONFIRMED');
   const amount = t.direction === 'TO_MACHINE' ? t.amount_cents : cents(input.confirmedAmountCents ?? t.amount_cents);
   if (amount <= 0) throw new HttpError(400, 'Confirmed amount must be positive');
   if (t.direction === 'TO_MACHINE' && input.confirmedAmountCents !== undefined && input.confirmedAmountCents !== t.amount_cents)
     throw new HttpError(409, 'A wallet to machine transfer is confirmed for its full amount');
-  await executeMoneyTransaction(db, {
-    orgId: a.orgId, type: t.direction === 'TO_MACHINE' ? 'WALLET_TO_MACHINE_CONFIRM' : 'MACHINE_TO_WALLET', ctx: ledgerCtx(t, amount),
-    dedupeKey: entityDedupeKey('transfer', t.id, 'confirm'), actor: moneyActor(a), sourceEventId: input.ackEventId ?? null,
+  const type = t.direction === 'FROM_MACHINE' ? 'MACHINE_TO_WALLET' as const : late ? 'WALLET_TO_MACHINE_LATE_CONFIRM' as const : 'WALLET_TO_MACHINE_CONFIRM' as const;
+  const r = await executeMoneyTransaction(db, {
+    orgId: a.orgId, type, ctx: ledgerCtx(t, amount), dedupeKey: entityDedupeKey('transfer', t.id, 'confirm'), actor: moneyActor(a),
+    sourceEventId: input.ackEventId ?? null, businessDate: input.businessDate ?? null, reason: late ? `Confirmed after ${t.status}` : null,
   });
-  const r = await db.query(
-    `UPDATE wallet_transfers SET status = 'CONFIRMED', confirmed_amount_cents = $2, ack_event_id = $3, completed_at = now() WHERE id = $1 RETURNING *`,
-    [t.id, amount, input.ackEventId ?? null],
+  const updated = await db.query(
+    `UPDATE wallet_transfers SET status = $4, confirmed_amount_cents = $2, ack_event_id = $3, completed_at = now() WHERE id = $1 RETURNING *`,
+    [t.id, amount, input.ackEventId ?? null, late ? 'LATE_CONFIRMED' : 'CONFIRMED'],
   );
-  await audit(db, a, 'cashless.transfer_confirmed', 'wallet_transfer', t.id, { direction: t.direction, amountCents: amount });
-  return { transfer: r.rows[0] as TransferRow, replayed: false };
+  await audit(db, a, late ? 'cashless.transfer_late_confirmed' : 'cashless.transfer_confirmed', 'wallet_transfer', t.id, { direction: t.direction, amountCents: amount, previousStatus: t.status, transactionId: r.transaction.id });
+  return { transfer: updated.rows[0] as TransferRow, replayed: false, late, moneyTransactionId: r.transaction.id as string };
 }
 
 /** FAILED or EXPIRED: a reserved amount goes back to the wallet's available balance. */

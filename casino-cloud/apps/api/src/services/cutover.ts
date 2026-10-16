@@ -109,6 +109,8 @@ interface PlannedOpening {
   /** The rail account that receives the opening balance (the other side is OPENING_EQUITY). */
   account: AccountRef;
   amountCents: number;
+  /** Which side the account is booked on; default: assets (vault) debit, liabilities credit. */
+  side?: 'DEBIT' | 'CREDIT';
   refs: { vaultId?: string; cashierSessionId?: string; machineId?: string; ticketId?: string; handpayId?: string };
 }
 
@@ -445,6 +447,12 @@ async function planMachine(ctx: Ctx): Promise<RailPlan> {
     `SELECT (SELECT count(*)::int FROM cashless_sessions WHERE machine_id = $1 AND status = 'OPEN') AS sessions,
        (SELECT count(*)::int FROM wallet_transfers WHERE machine_id = $1 AND status IN ('REQUESTED', 'SENT')) AS transfers`, [machineId]);
   check(ctx, `${label}:no_cashless_activity`, busy.sessions === 0 && busy.transfers === 0, busy);
+  // 7d: nothing of the machine may wait: no pending deferred money event, no unexplained event exception
+  const waiting = await one<{ deferred: number; exceptions: number }>(db,
+    `SELECT (SELECT count(*)::int FROM deferred_money_events WHERE machine_id = $1 AND status = 'PENDING') AS deferred,
+       (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.machine_id = $1
+          AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('machine_event:' || x.event_id, 'ticket_event:' || x.event_id))) AS exceptions`, [machineId]);
+  check(ctx, `${label}:no_pending_machine_events`, waiting.deferred === 0 && waiting.exceptions === 0, waiting);
 
   const openings: PlannedOpening[] = [];
   let collected = 0;
@@ -464,6 +472,20 @@ async function planMachine(ctx: Ctx): Promise<RailPlan> {
     if (vaultId)
       openings.push({ source: { table: 'cash_counts', id: count!.id }, account: { kind: 'VAULT', casinoId: casinoId!, vaultId }, amountCents: collected, refs: { vaultId, machineId: machineId! } });
   }
+  // D1 (7c): the machine's floor clearing (tickets printed / accepted while it was LEGACY) is closed by this
+  // cutover against opening equity, like the collected cash: target balance 0 once the machine is on the ledger.
+  const clearing = await one<{ id: string; balance_cents: number } | undefined>(db,
+    `SELECT a.id, b.balance_cents::bigint AS balance_cents FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id
+     WHERE a.org_id = $1 AND a.kind = 'LEGACY_FLOOR_CLEARING' AND a.machine_id = $2`, [orgId, machineId]);
+  const clearingCents = Number(clearing?.balance_cents ?? 0);
+  const unexplained = (await unexplainedFloorClearing(db, { casinoId: casinoId! })).filter((r) => r.id === machineId);
+  check(ctx, `${label}:floor_clearing_attributable`, unexplained.length === 0, { machine: machineId });
+  ctx.legacy.floor_clearing = clearingCents;
+  if (clearing && clearingCents !== 0)
+    openings.push({
+      source: { table: 'ledger_accounts', id: clearing.id }, account: { kind: 'LEGACY_FLOOR_CLEARING', casinoId: casinoId!, machineId: machineId! },
+      amountCents: Math.abs(clearingCents), side: clearingCents > 0 ? 'CREDIT' : 'DEBIT', refs: { machineId: machineId! },
+    });
   const vaultBefore = vaultId ? await balance(ctx, { kind: 'VAULT', casinoId: casinoId!, vaultId }) : 0;
   return {
     openings,
@@ -475,6 +497,9 @@ async function planMachine(ctx: Ctx): Promise<RailPlan> {
       }
       const gaming = await one<{ n: number }>(db, `SELECT count(*)::int n FROM money_transactions WHERE machine_id = $1 AND type = 'GAMING_SETTLEMENT'`, [machineId]);
       check(ctx, 'reconcile:no_gaming_in_ledger', gaming.n === 0, gaming);
+      const left = await one<{ b: number } | undefined>(db,
+        `SELECT b.balance_cents::bigint AS b FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id WHERE a.kind = 'LEGACY_FLOOR_CLEARING' AND a.machine_id = $1`, [machineId]);
+      check(ctx, 'reconcile:floor_clearing_zero', Number(left?.b ?? 0) === 0, { ledger: Number(left?.b ?? 0) });
       const moved = vaultId ? (await balance(ctx, { kind: 'VAULT', casinoId: casinoId!, vaultId })) - vaultBefore : 0;
       ctx.ledger.vault_received = moved;
       check(ctx, 'reconcile:collection_in_vault', moved === collected, { ledger: moved, collected });
@@ -585,7 +610,7 @@ export async function cutoverRail(db: Db, actor: CutoverActor, target: CutoverTa
         ctx: {
           casinoId: casinoId!, amountCents: cents(o.amountCents), backfillSource: o.source, ...o.refs,
           // Assets (vault) are debited, liabilities (tickets, handpays) credited; OPENING_EQUITY is the other side.
-          ...(o.account.kind === 'VAULT' ? { debit: o.account, credit: { kind: 'OPENING_EQUITY' } } : { debit: { kind: 'OPENING_EQUITY' }, credit: o.account }),
+          ...((o.side ?? (o.account.kind === 'VAULT' ? 'DEBIT' : 'CREDIT')) === 'DEBIT' ? { debit: o.account, credit: { kind: 'OPENING_EQUITY' } } : { debit: { kind: 'OPENING_EQUITY' }, credit: o.account }),
         },
       });
       if (r.replayed) throw new HttpError(409, `Opening balance for ${o.source.table} ${o.source.id} already exists`);

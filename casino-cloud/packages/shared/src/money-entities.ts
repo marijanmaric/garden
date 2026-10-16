@@ -50,15 +50,20 @@ export type CashlessSessionStatus = (typeof CASHLESS_SESSION_STATUSES)[number];
 // ---- Wallet transfer -------------------------------------------------------------------------
 export const TRANSFER_DIRECTIONS = ['TO_MACHINE', 'FROM_MACHINE'] as const;
 export type TransferDirection = (typeof TRANSFER_DIRECTIONS)[number];
-export const TRANSFER_STATUSES = ['REQUESTED', 'SENT', 'CONFIRMED', 'FAILED', 'EXPIRED'] as const;
+export const TRANSFER_STATUSES = ['REQUESTED', 'SENT', 'CONFIRMED', 'FAILED', 'EXPIRED', 'LATE_CONFIRMED'] as const;
 export type TransferStatus = (typeof TRANSFER_STATUSES)[number];
-/** REQUESTED is never a completed money movement: only CONFIRMED moves money to/from the machine. */
+/**
+ * REQUESTED is never a completed money movement: only CONFIRMED moves money to/from the machine.
+ * LATE_CONFIRMED (Step 7d): the machine confirmed after the transfer had failed / expired (reservation
+ * already released): booked as an exception, never silently as a normal transfer.
+ */
 export const TRANSFER_TRANSITIONS = transitions<TransferStatus>({
   REQUESTED: ['SENT', 'FAILED', 'EXPIRED'],
   SENT: ['CONFIRMED', 'FAILED', 'EXPIRED'],
   CONFIRMED: [],
-  FAILED: [],
-  EXPIRED: [],
+  FAILED: ['LATE_CONFIRMED'],
+  EXPIRED: ['LATE_CONFIRMED'],
+  LATE_CONFIRMED: [],
 });
 export const ACTIVE_TRANSFER_STATUSES: readonly TransferStatus[] = ['REQUESTED', 'SENT'];
 

@@ -45,12 +45,13 @@ test('dependencies: HANDPAY needs CASH technically, never TITO; TITO only throug
   assert.deepEqual(railRelease('CASHLESS').released, true);
 });
 
-test('7c: the maintenance window VAULT, CASH, HANDPAY, TITO is released; MACHINE (7d) stays locked', async () => {
+test('7c/7d: the maintenance window VAULT, CASH, HANDPAY, TITO is released; MACHINE is released per machine since 7d', async () => {
   const { RAIL_PRODUCTION_READY, railRelease, maintenanceWindowOf } = await import('./cutover');
   assert.deepEqual([...maintenanceWindowOf('TITO')], ['VAULT', 'CASH', 'HANDPAY', 'TITO']);
   for (const rail of ['VAULT', 'CASH', 'HANDPAY', 'TITO'] as const) assert.equal(railRelease(rail).released, true, rail);
-  assert.deepEqual([...RAIL_PRODUCTION_READY], ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS']);
-  assert.deepEqual(railRelease('MACHINE').implementationMissing, ['MACHINE']);
+  assert.deepEqual([...maintenanceWindowOf('MACHINE')], ['MACHINE']);
+  assert.deepEqual(railRelease('MACHINE'), { rail: 'MACHINE', implementationMissing: [], cutoverPrerequisites: ['VAULT', 'TITO', 'HANDPAY', 'CASHLESS'], windowMissing: [], released: true });
+  assert.deepEqual([...RAIL_PRODUCTION_READY], ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE']);
 });
 
 test('7c: TITO postings touch TICKET_LIABILITY and CASH / CASHLESS / MACHINE, or the D1 clearing of a legacy machine', async () => {

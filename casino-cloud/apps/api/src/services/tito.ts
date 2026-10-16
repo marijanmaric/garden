@@ -3,6 +3,7 @@ import { cents } from '@m1/shared';
 import { HttpError } from '../auth';
 import type { BusMessage } from '../bus';
 import { openAlert } from './alerts';
+import { recordEventException } from './event-exceptions';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { newBarcode, requireOpenSession, type SessionRow } from './cashier';
 import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type MoneyActor } from './ledger';
@@ -57,8 +58,12 @@ export type TicketApprovalAction = 'TITO_REDEEM_CASHIER' | 'TITO_CANCEL' | 'TITO
 
 export const titoOnLedger = (db: Db, orgId: string, casinoId: string) => railOnLedger(db, orgId, 'TITO', casinoId);
 
-async function titoFrozen(db: Db, orgId: string, casinoId: string): Promise<boolean> {
-  return (await db.query(`SELECT money_rail_frozen($1, $2, 'TITO', NULL) AS f`, [orgId, casinoId])).rows[0].f;
+async function titoFrozen(db: Db, orgId: string, casinoId: string, machineId?: string | null): Promise<boolean> {
+  // 7d: the ticket side of a machine on the MACHINE ledger is its MACHINE_CREDIT, so a frozen machine defers too
+  return (await db.query(
+    `SELECT money_rail_frozen($1, $2, 'TITO', NULL)
+       OR ($3::uuid IS NOT NULL AND money_rail_ledger($1, $2, 'MACHINE', $3) AND money_rail_frozen($1, $2, 'MACHINE', $3)) AS f`,
+    [orgId, casinoId, machineId ?? null])).rows[0].f;
 }
 
 /** D1: a machine that is not on the ledger yet books its ticket side on its LEGACY_FLOOR_CLEARING account. */
@@ -113,7 +118,7 @@ export function titoEventMovesMoney(ev: Pick<TitoMachineEvent, 'type' | 'barcode
  */
 export async function handleTitoMachineEvent(db: PoolClient, ev: TitoMachineEvent, out: BusMessage[]) {
   if (!titoEventMovesMoney(ev)) return { deferred: false as const, outcome: 'NO_MONEY' };
-  const frozen = await titoFrozen(db, ev.orgId, ev.casinoId);
+  const frozen = await titoFrozen(db, ev.orgId, ev.casinoId, ev.machineId);
   const day: number = frozen ? 0 : (await db.query(
     `SELECT sign(($2::timestamptz AT TIME ZONE timezone)::date - (now() AT TIME ZONE timezone)::date)::int AS day FROM casinos WHERE id = $1`, [ev.casinoId, ev.occurredAt],
   )).rows[0].day;
@@ -154,7 +159,7 @@ async function deferredAmount(db: Db, ev: TitoMachineEvent): Promise<number | nu
 }
 
 /** Books one ticket machine event. businessDate only for the replay of a deferred record (validated by the ledger). */
-async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, businessDate: string | null, out: BusMessage[]): Promise<{ outcome: string; ticketId: string | null; moneyTransactionId: string | null }> {
+export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, businessDate: string | null, out: BusMessage[]): Promise<{ outcome: string; ticketId: string | null; moneyTransactionId: string | null }> {
   const clearing = await floorClearing(db, ev.orgId, ev.casinoId, ev.machineId);
   const machineCtx = { casinoId: ev.casinoId, machineId: ev.machineId, floorClearing: clearing || undefined };
 
@@ -234,6 +239,7 @@ export async function replayDeferredTito(db: PoolClient, filter: { orgId?: strin
      JOIN machine_events e ON e.event_id = d.event_id JOIN machines m ON m.id = d.machine_id
      WHERE d.status = 'PENDING' AND d.rail = 'TITO' AND ($1::uuid IS NULL OR d.org_id = $1) AND ($2::uuid IS NULL OR d.casino_id = $2) AND ($3::uuid IS NULL OR d.event_id = $3)
        AND NOT money_rail_frozen(d.org_id, d.casino_id, 'TITO', NULL)
+       AND NOT (money_rail_ledger(d.org_id, d.casino_id, 'MACHINE', d.machine_id) AND money_rail_frozen(d.org_id, d.casino_id, 'MACHINE', d.machine_id))
        AND NOT (d.last_error IS NOT NULL AND EXISTS (SELECT 1 FROM business_day_closes b WHERE b.casino_id = d.casino_id AND b.business_date = d.business_date))
      ORDER BY d.occurred_at, d.event_id FOR UPDATE OF d SKIP LOCKED`,
     [filter.orgId ?? null, filter.casinoId ?? null, filter.eventId ?? null],
@@ -247,6 +253,9 @@ export async function replayDeferredTito(db: PoolClient, filter: { orgId?: strin
     await db.query('SAVEPOINT deferred_tito');
     try {
       const r = await processTitoEvent(db, ev, d.business_date, out);
+      // 7d: a replayed ticket event that cannot be booked is a recorded exception (reported until explained)
+      if (r.outcome === 'DUPLICATE_BARCODE' || r.outcome === 'EXCEPTION_UNBOOKED')
+        await recordEventException(db, { ...ev, label: ev.label }, 'TITO', r.outcome, r.outcome === 'DUPLICATE_BARCODE' ? `ticket barcode ${ev.barcode} already exists` : 'ticket event without a bookable amount', out);
       await db.query(
         `UPDATE deferred_money_events SET status = 'PROCESSED', replayed_at = now(), ticket_id = $2, money_transaction_id = $3, attempts = attempts + 1, last_error = NULL WHERE event_id = $1`,
         [d.event_id, r.ticketId, r.moneyTransactionId],
@@ -503,7 +512,10 @@ export async function unexplainedFloorClearing(db: Db, scope: { orgId?: string; 
                AND EXISTS (SELECT 1 FROM machine_events e WHERE e.event_id = t.source_event_id AND e.machine_id = a.machine_id
                              AND e.type = CASE t.type WHEN 'TITO_ISSUE_MACHINE' THEN 'TITO_OUT' ELSE 'TITO_IN' END))
              OR (t.type = 'ADJUSTMENT' AND t.approved_by IS NOT NULL)
-             OR t.type = 'REVERSAL')))
+             OR t.type = 'REVERSAL'
+             -- 7d: the closing opening balance of the machine's own MACHINE cutover
+             OR (t.type = 'OPENING_BALANCE' AND EXISTS (SELECT 1 FROM money_backfill_items i
+                   WHERE i.money_transaction_id = t.id AND i.source_table = 'ledger_accounts' AND i.source_id = a.id::text)))))
      ORDER BY a.machine_id`,
     [scope.orgId ?? null, scope.casinoId ?? null],
   )).rows as Array<{ id: string; casino_id: string; balance_cents: number }>;

@@ -259,9 +259,25 @@ Every booking is balanced (shared postings + database zero-sum check) and every 
 LEDGER, unfrozen rail (service guard + `ledger_entries` trigger), so a mixed state can stop legacy operations but
 cannot produce a ledger movement on a legacy rail. The window C is operational, not a database switch.
 
-**Open for Step 7d (machine scope):** a duplicate or otherwise invalid ticket machine event on a machine whose MACHINE
-rail is on the ledger currently fails the ingest transaction (HTTP 500, no money moved, event not stored). 7d must turn
-expected domain errors into a deterministic business error per event, keep it auditable, and never move money.
+### Machine money and cashless on the ledger (migration 011, Step 7d)
+
+- Machine on the MACHINE ledger (per machine, after a verified empty collection; the cutover also closes its D1 floor
+  clearing): CASH_IN → MACHINE_CASH_IN, CASH_OUT → MACHINE_CASH_OUT (hopper), CASHLESS_IN / CASHLESS_OUT with
+  `transferId` = the machine's ack of a wallet transfer, CREDIT_METER → D3 gaming settlement (reliable meter or verified
+  zero-credit state only, never estimated, otherwise unreconciled).
+- Cashless at the machine: `/gateway/cashless/sessions`, `/gateway/cashless/transfers` (+ `/:id/sent`, `/:id/fail`).
+  Wallet → machine reserves first; the ack moves it; an ack after FAILED / EXPIRED is LATE_CONFIRMED from
+  CASHLESS_EXCEPTION (alerted, the wallet is never charged twice). Cashier ↔ wallet: `/cashier/wallet/deposit|withdraw`
+  (approval above the limits, KYC above the threshold, drawer projection).
+- Hopper fills (`/machines/:id/hopper-fills`, confirmed at the machine) and ledger collections (`/machines/:id/collections/count`,
+  blind second count `/machines/collections/counts/:id/verify`: difference + drop booked; nothing on a mismatch).
+- Machine events whose money part cannot be booked (duplicate barcode, unknown transfer, empty hopper, closed day, ...) are
+  stored with an immutable exception record: a deterministic business rejection (`exceptions` in the ingest response),
+  audited and alerted, never an HTTP 500 and never a booking; reconciliation reports them until explained by four eyes.
+- Frozen machine (per machine) or CASHLESS: machine money events are deferred and replayed exactly once on the date of
+  `occurred_at`, like jackpots and tickets. A deferred event whose business date is closed is booked only through the
+  four-eyes late-event booking (`/money/deferred/:eventId/late-booking`) on today's open date; the original date stays.
+- Reconciliation adds MACHINE (per-machine freeze) and CASHLESS (organisation-wide) checks.
 
 ### Accounting definitions
 

@@ -63,6 +63,8 @@ export async function cashRoutes(app: FastifyInstance) {
     const result = await idempotent(req, reply, async (db) => {
       const m = await db.query('SELECT id, asset_no, casino_id FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3) FOR NO KEY UPDATE', [body.machineId, req.auth.orgId, req.auth.casinoIds]);
       if (!m.rowCount) throw new HttpError(404, 'Machine not found');
+      if ((await db.query(`SELECT money_rail_ledger($1, $2, 'MACHINE', $3) AS l`, [req.auth.orgId, m.rows[0].casino_id, body.machineId])).rows[0].l)
+        throw new HttpError(409, 'This machine is on the ledger: collect with a verified count (/api/v1/machines/:id/collections/count)');
       const exp = await expectedDrop(req.auth.orgId, body.machineId);
       const difference = round2(body.countedCash + body.countedTickets - exp.cash - exp.tickets);
       const r = await db.query(

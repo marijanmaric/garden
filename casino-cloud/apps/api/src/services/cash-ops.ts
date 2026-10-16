@@ -64,7 +64,7 @@ async function lockSession(db: Db, orgId: string, sessionId: string): Promise<Se
 // ---- vault sessions and counts ---------------------------------------------------------------
 
 /** The vault's current session, usable for money only after its opening count was verified. */
-async function readyVaultSession(db: Db, vaultId: string) {
+export async function readyVaultSession(db: Db, vaultId: string) {
   const s = await one(db,
     `SELECT s.*, EXISTS (SELECT 1 FROM cash_counts c JOIN count_settlements cs ON cs.count_id = c.id
                          WHERE c.vault_session_id = s.id AND c.context = 'VAULT_OPEN') AS verified
@@ -75,7 +75,7 @@ async function readyVaultSession(db: Db, vaultId: string) {
   return s;
 }
 
-async function mainVaultOf(db: Db, casinoId: string): Promise<string> {
+export async function mainVaultOf(db: Db, casinoId: string): Promise<string> {
   const v = await one(db, 'SELECT id FROM vaults WHERE casino_id = $1 AND active ORDER BY created_at, id LIMIT 1', [casinoId]);
   if (!v) throw new HttpError(409, 'Casino has no vault');
   return v.id;
@@ -211,6 +211,7 @@ export async function confirmMovement(db: Db, a: CashActor, movementId: string, 
   if (m.status === 'CONFIRMED' && m.decided_by === a.employeeId) return { movement: m, replayed: true };
   if (m.status !== 'REQUESTED') throw new HttpError(409, `Movement is ${m.status}`);
   if (m.requested_by === a.employeeId) throw new HttpError(409, 'The requester cannot confirm the own movement');
+  if ((m.kind as string) === 'HOPPER_FILL') throw new HttpError(409, 'A hopper fill is confirmed at the machine (/api/v1/machines/hopper-fills/:id/confirm)');
   const session = await lockSession(db, a.orgId, m.cashier_session_id);
   if (m.kind === 'FILL' && session.employee_id !== a.employeeId) throw new HttpError(403, 'Only the receiving cashier can confirm a fill');
   if (m.kind === 'DROP' && session.employee_id === a.employeeId) throw new HttpError(409, 'A drop is confirmed by the vault');

@@ -11,6 +11,7 @@ export const MACHINE_EVENT_TYPES = [
   'TITO_OUT', // ticket printed
   'CASHLESS_IN', // wallet -> machine transfer completed on the machine
   'CASHLESS_OUT', // machine -> wallet transfer completed on the machine
+  'CREDIT_METER', // machine reports its credit meter (Step 7d: gaming settlement, D3)
   'JACKPOT',
   'JACKPOT_RESET',
   'MACHINE_ERROR',
@@ -71,6 +72,10 @@ export interface MachineEvent {
   ticketBarcode?: string;
   /** TITO_IN: the hold the machine committed (accept ack of a ticket held for this machine). */
   holdId?: string;
+  /** CASHLESS_IN / CASHLESS_OUT: the wallet transfer the machine completed (its ack). */
+  transferId?: string;
+  /** CREDIT_METER: the machine's credit meter in integer cents. */
+  creditCents?: number;
   errorCode?: string;
   message?: string;
   /** Source adapter key, kept for traceability only. */

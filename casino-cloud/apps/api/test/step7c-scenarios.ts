@@ -482,11 +482,19 @@ export function registerStep7cScenarios(get: () => Ctx7c) {
       assert.equal((await post('cashier@example.com', '/api/v1/tickets/issue', { amount: 5 })).statusCode, 200);
     });
 
-    test('D1: clearing left on a machine that moved to the ledger is unexplained, blocks further TITO cutovers until explained by four eyes', async () => {
+    test('D1: the MACHINE cutover closes the clearing; clearing left on a ledger machine is unexplained and blocks further TITO cutovers until explained', async () => {
+      // 7d: the machine cutover closes the floor clearing against opening equity (target 0)
+      const z = await newCasino('7CZ');
+      await printed(0, 6, { casino: z });
+      assert.equal(await clearing(m(0, z).id, z.id), 600);
+      await cutoverCasinoRails(c.pool as never, z, ['CASHLESS', 'MACHINE']);
+      assert.equal(await clearing(m(0, z).id, z.id), 0);
+      assert.deepEqual(await svc.tito.unexplainedFloorClearing(c.pool as never, { casinoId: z.id }), []);
+      // a machine that reached the ledger around the cutover service keeps its clearing: unexplained
       const x = await newCasino('7CX');
       await printed(0, 6, { casino: x });
-      assert.equal(await clearing(m(0, x).id, x.id), 600);
-      await cutoverCasinoRails(c.pool as never, x, ['CASHLESS', 'MACHINE']);
+      await q(`INSERT INTO money_rail_cutovers (id, org_id, rail, casino_id, machine_id, business_date, actor_type, opening_count, opening_total_cents, legacy_totals, ledger_totals, checks)
+               VALUES (gen_random_uuid(), $1, 'MACHINE', $2, $3, current_date, 'SYSTEM', 0, 0, '{}', '{}', '[]')`, [c.orgId, x.id, m(0, x).id]);
       assert.deepEqual((await svc.tito.unexplainedFloorClearing(c.pool as never, { casinoId: x.id })).map((r) => r.id), [m(0, x).id]);
       const run = await recon(x.id);
       assert.deepEqual(run.checks.find((k: { key: string }) => k.key === 'tito.floor_clearing_attributable').items, [`floor_clearing:${m(0, x).id}`]);
@@ -494,11 +502,11 @@ export function registerStep7cScenarios(get: () => Ctx7c) {
       const admin = { orgId: c.orgId, employeeId: c.emp['admin@example.com'], casinoIds: [y.id] };
       let dry = await svc.cutover.dryRunCutover(c.pool as never, admin, { rail: 'TITO', casinoId: y.id });
       assert.deepEqual(dry.checks.find((k) => k.name === 'floor_clearing_explained'), { name: 'floor_clearing_explained', ok: false, detail: { machines: [m(0, x).id] } });
-      const req = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: x.id, itemKey: `floor_clearing:${m(0, x).id}`, explanation: 'Ticket printed while the machine was legacy; transferred in the machine cutover (7d)' });
+      const req = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: x.id, itemKey: `floor_clearing:${m(0, x).id}`, explanation: 'Machine reached the ledger without its cutover; clearing booked off by a correction' });
       assert.ok((await post('accounting@example.com', `/api/v1/approvals/${req.json().id}/decide`, { decision: 'APPROVED' })).json().resolution);
       dry = await svc.cutover.dryRunCutover(c.pool as never, admin, { rail: 'TITO', casinoId: y.id });
       assert.equal(dry.checks.find((k) => k.name === 'floor_clearing_explained')!.ok, true);
-      assert.equal((await lift(run.frozen[0].id, 'explained')).json().lifted, true);
+      for (const f of run.frozen) assert.equal((await lift(f.id, 'explained')).json().lifted, true);
     });
 
     describe('rail dependency matrix (mixed LEDGER / LEGACY states)', () => {

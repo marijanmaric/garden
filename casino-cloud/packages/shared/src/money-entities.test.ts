@@ -15,7 +15,9 @@ test('wallet rules combine wallet state and player status', () => {
 test('a requested transfer is not a completed movement; terminal states stay terminal', () => {
   assert.equal(TRANSFER_TRANSITIONS.can('REQUESTED', 'CONFIRMED'), false);
   assert.equal(TRANSFER_TRANSITIONS.can('SENT', 'CONFIRMED'), true);
-  for (const t of ['CONFIRMED', 'FAILED', 'EXPIRED'] as const) assert.deepEqual(TRANSFER_TRANSITIONS.map[t], []);
+  for (const t of ['CONFIRMED', 'LATE_CONFIRMED'] as const) assert.deepEqual(TRANSFER_TRANSITIONS.map[t], []);
+  // 7d: a failed / expired transfer can only be confirmed late (exception booking), never become CONFIRMED
+  for (const t of ['FAILED', 'EXPIRED'] as const) assert.deepEqual(TRANSFER_TRANSITIONS.map[t], ['LATE_CONFIRMED']);
 });
 
 test('handpay: PENDING -> APPROVED -> PAID -> MACHINE_RESET, VOIDED only before payment', () => {

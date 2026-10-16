@@ -588,7 +588,14 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       assert.equal(r.statusCode, 409);
       assert.match(r.json().error, /Business date .* is closed/);
       assert.equal((await handpayOf(eventId)).status, 'PENDING');
-      assert.equal((await jackpot(7, 46)).res.statusCode, 409);
+      // 7b: the jackpot event was refused with HTTP 409; since 7d the event is kept and its money part is a
+      // recorded, deterministic business rejection (no handpay, no booking, reported by reconciliation)
+      const closed = await jackpot(7, 46);
+      assert.equal(closed.res.statusCode, 200);
+      assert.equal(closed.res.json().exceptions[0].code, 'HTTP_409');
+      assert.match(closed.res.json().exceptions[0].message, /Business date .* is closed/);
+      assert.equal(await handpayOf(closed.eventId), undefined);
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [closed.eventId])).length, 0);
     });
 
     test('business date of a live jackpot = occurred_at (not received_at): delayed by one and three days, same day, closed day', async () => {
