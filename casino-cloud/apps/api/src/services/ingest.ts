@@ -166,7 +166,12 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       if ((amount ?? 0) > 0) {
         const r = await handleJackpotEvent(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) });
         if (r.deferred)
-          await openAlert(db, { ...ctx, type: 'HANDPAY_DEFERRED', severity: 'WARNING', message: `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; handpay deferred while HANDPAY is frozen` }, out);
+          await openAlert(db, {
+            ...ctx, type: 'HANDPAY_DEFERRED', severity: 'WARNING',
+            message: r.reason === 'FROZEN'
+              ? `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; handpay deferred while HANDPAY is frozen`
+              : `Jackpot €${(amount ?? 0).toFixed(2)} on ${label} recorded; its business date cannot be booked (${r.reason}), pending explicit handling`,
+          }, out);
       }
       break;
     }

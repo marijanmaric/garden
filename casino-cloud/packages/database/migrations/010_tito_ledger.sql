@@ -55,15 +55,17 @@ CREATE TRIGGER ledger_entries_floor_clearing_guard BEFORE INSERT ON ledger_entri
 -- ---------------------------------------------------------------------------------------------
 -- Deferred money events (009) extended to TITO machine events: a ticket printed (TITO_OUT) or
 -- accepted (TITO_IN) by a machine while TITO is frozen is recorded and replayed after the lift,
--- exactly once (event id), on the business date of occurred_at. LATE_EVENT: an event whose business
--- date is not today goes through the same validated path (never moved silently to today).
+-- exactly once (event id), on the business date of occurred_at.
 -- ---------------------------------------------------------------------------------------------
 ALTER TABLE deferred_money_events DROP CONSTRAINT deferred_money_events_rail_check;
 ALTER TABLE deferred_money_events ADD CONSTRAINT deferred_money_events_rail_check CHECK (rail IN ('HANDPAY', 'TITO'));
 ALTER TABLE deferred_money_events DROP CONSTRAINT deferred_money_events_kind_check;
 ALTER TABLE deferred_money_events ADD CONSTRAINT deferred_money_events_kind_check CHECK (
   (rail = 'HANDPAY' AND kind = 'JACKPOT') OR (rail = 'TITO' AND kind IN ('TITO_OUT', 'TITO_IN')));
-ALTER TABLE deferred_money_events ADD CONSTRAINT deferred_money_events_reason_check CHECK (reason IN ('FROZEN', 'LATE_EVENT'));
+-- FROZEN: the rail is frozen. LATE_EVENT / EARLY_EVENT: occurred_at is on an earlier / later business date than
+-- the receipt (delayed delivery / machine clock ahead): booked on the date of occurred_at through the validated
+-- replay path, never silently on the receipt date (applies to jackpots and ticket events alike).
+ALTER TABLE deferred_money_events ADD CONSTRAINT deferred_money_events_reason_check CHECK (reason IN ('FROZEN', 'LATE_EVENT', 'EARLY_EVENT'));
 ALTER TABLE deferred_money_events
   ADD COLUMN ticket_id uuid REFERENCES tickets(id),
   ADD COLUMN money_transaction_id uuid REFERENCES money_transactions(id);

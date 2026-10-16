@@ -89,19 +89,29 @@ export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; ca
 
 /**
  * Entry point for a jackpot machine event (ingestion). The machine event itself is already stored.
- * HANDPAY rail on the ledger and frozen: the jackpot is recorded as a deferred money event (no handpay,
- * no booking); it is replayed after the freeze is lifted. Otherwise the handpay is created now.
+ * The economic business date is the casino date of occurred_at; received_at is receipt metadata only.
+ *  - HANDPAY frozen: recorded as a deferred money event (no handpay, no booking), replayed after the lift.
+ *  - occurred_at on another business date than today (delayed event, or a machine clock ahead): recorded
+ *    with reason LATE_EVENT / EARLY_EVENT and booked now on the date of occurred_at through the same
+ *    validated replay path. A closed date is never bypassed: the record stays PENDING and is reported.
+ *  - otherwise (occurred today): the handpay is created and booked now, on today = the occurred date.
  * The deferred record takes occurred_at / received_at / business_date from the machine event (009 trigger).
  */
 export async function handleJackpotEvent(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number }) {
   if (await handpayOnLedger(db, { org_id: input.orgId, casino_id: input.casinoId })) {
-    const frozen = (await db.query(`SELECT money_rail_frozen($1, $2, 'HANDPAY', NULL) AS f`, [input.orgId, input.casinoId])).rows[0].f;
-    if (frozen) {
+    const s = (await db.query(
+      `SELECT money_rail_frozen($1, $2, 'HANDPAY', NULL) AS frozen,
+         sign((e.occurred_at AT TIME ZONE c.timezone)::date - (now() AT TIME ZONE c.timezone)::date)::int AS day
+       FROM machine_events e JOIN casinos c ON c.id = $2 WHERE e.event_id = $3`,
+      [input.orgId, input.casinoId, input.eventId],
+    )).rows[0];
+    if (s.frozen || s.day !== 0) {
+      const reason = s.frozen ? 'FROZEN' : s.day < 0 ? 'LATE_EVENT' : 'EARLY_EVENT';
       const r = await db.query(
         `INSERT INTO deferred_money_events (event_id, org_id, casino_id, machine_id, rail, kind, amount_cents, reason)
-         VALUES ($1, $2, $3, $4, 'HANDPAY', 'JACKPOT', $5, 'FROZEN')
+         VALUES ($1, $2, $3, $4, 'HANDPAY', 'JACKPOT', $5, $6)
          ON CONFLICT (event_id) DO NOTHING RETURNING *`,
-        [input.eventId, input.orgId, input.casinoId, input.machineId, input.amountCents],
+        [input.eventId, input.orgId, input.casinoId, input.machineId, input.amountCents, reason],
       );
       const d = r.rows[0];
       if (d)
@@ -110,10 +120,13 @@ export async function handleJackpotEvent(db: Db, input: { orgId: string; casinoI
           action: 'handpay.deferred', entityType: 'machine_event', entityId: input.eventId,
           details: { machineId: input.machineId, amountCents: input.amountCents, reason: d.reason, occurredAt: d.occurred_at, receivedAt: d.received_at, businessDate: d.business_date },
         });
-      return { deferred: r.rowCount === 1, handpay: undefined };
+      if (s.frozen) return { deferred: r.rowCount === 1, reason, handpay: undefined };
+      const done = await replayDeferredHandpays(db, { eventId: input.eventId });
+      const handpay = done.length ? ((await db.query('SELECT * FROM handpays WHERE id = $1', [done[0].handpayId])).rows[0] as HandpayRow) : undefined;
+      return { deferred: !done.length, reason, handpay };
     }
   }
-  return { deferred: false, handpay: await ensureHandpayForJackpot(db, input) };
+  return { deferred: false, reason: null, handpay: await ensureHandpayForJackpot(db, input) };
 }
 
 /**
@@ -124,15 +137,15 @@ export async function handleJackpotEvent(db: Db, input: { orgId: string; casinoI
  * business date is already closed) stays PENDING with last_error - the closed-date guard is never
  * bypassed - and reconciliation reports it (handpay.no_stale_deferred_events) for explicit handling.
  */
-export async function replayDeferredHandpays(db: Db, filter: { orgId?: string; casinoId?: string } = {}) {
+export async function replayDeferredHandpays(db: Db, filter: { orgId?: string; casinoId?: string; eventId?: string } = {}) {
   const due = (await db.query(
     `SELECT d.*, d.business_date::text AS business_date FROM deferred_money_events d
-     WHERE d.status = 'PENDING' AND d.rail = 'HANDPAY' AND ($1::uuid IS NULL OR d.org_id = $1) AND ($2::uuid IS NULL OR d.casino_id = $2)
+     WHERE d.status = 'PENDING' AND d.rail = 'HANDPAY' AND ($1::uuid IS NULL OR d.org_id = $1) AND ($2::uuid IS NULL OR d.casino_id = $2) AND ($3::uuid IS NULL OR d.event_id = $3)
        AND NOT money_rail_frozen(d.org_id, d.casino_id, 'HANDPAY', NULL)
        -- a record already refused for a closed date is not retried on every tick (reconciliation reports it)
        AND NOT (d.last_error IS NOT NULL AND EXISTS (SELECT 1 FROM business_day_closes b WHERE b.casino_id = d.casino_id AND b.business_date = d.business_date))
      ORDER BY d.occurred_at, d.event_id FOR UPDATE OF d SKIP LOCKED`,
-    [filter.orgId ?? null, filter.casinoId ?? null],
+    [filter.orgId ?? null, filter.casinoId ?? null, filter.eventId ?? null],
   )).rows;
   const done = [];
   for (const d of due) {

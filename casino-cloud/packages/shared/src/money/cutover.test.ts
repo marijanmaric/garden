@@ -71,3 +71,25 @@ test('7c: TITO postings touch TICKET_LIABILITY and CASH / CASHLESS / MACHINE, or
   assert.equal(ACCOUNT_KINDS.LEGACY_FLOOR_CLEARING.owner, 'MACHINE');
   assert.equal(ACCOUNT_KIND_RAIL.LEGACY_FLOOR_CLEARING, undefined);
 });
+
+test('7c rail matrix: every HANDPAY and TITO posting touches only its own rail, its implementation dependencies, CASHLESS (wallet option) and the machine side', async () => {
+  const { postings, MONEY_TRANSACTIONS } = await import('./transactions');
+  const { RAIL_IMPLEMENTATION_REQUIRES } = await import('./cutover');
+  const variants = [{}, { payTo: 'WALLET' }, { payFrom: 'WALLET' }, { floorClearing: true }];
+  for (const [type, def] of Object.entries(MONEY_TRANSACTIONS)) {
+    if (def.rail !== 'HANDPAY' && def.rail !== 'TITO') continue;
+    const own = def.rail;
+    const allowed = new Set<string>([own, ...RAIL_IMPLEMENTATION_REQUIRES[own], 'CASHLESS', 'MACHINE']);
+    for (const v of variants)
+      for (const p of postings(type as never, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', ticketId: 't', handpayId: 'h', cashierSessionId: 's', walletId: 'w', ...v } as never)) {
+        const rail = ACCOUNT_KIND_RAIL[p.account.kind];
+        if (rail) assert.ok(allowed.has(rail), `${type} touches ${rail}`);
+      }
+  }
+  // HANDPAY never touches TITO, TITO never touches HANDPAY
+  for (const [type, def] of Object.entries(MONEY_TRANSACTIONS))
+    for (const v of variants)
+      if (def.rail === 'HANDPAY' || def.rail === 'TITO')
+        for (const p of postings(type as never, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', ticketId: 't', handpayId: 'h', cashierSessionId: 's', walletId: 'w', ...v } as never))
+          assert.notEqual(ACCOUNT_KIND_RAIL[p.account.kind], def.rail === 'HANDPAY' ? 'TITO' : 'HANDPAY', type);
+});

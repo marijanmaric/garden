@@ -591,6 +591,51 @@ export function registerStep7bScenarios(get: () => Ctx7b) {
       assert.equal((await jackpot(7, 46)).res.statusCode, 409);
     });
 
+    test('business date of a live jackpot = occurred_at (not received_at): delayed by one and three days, same day, closed day', async () => {
+      const b = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7BJ${Date.now() % 100000}`, rails: ['VAULT', 'CASH', 'HANDPAY'], machines: 1, gateway: true });
+      const send = async (hoursAgo: number, amount: number) => {
+        const eventId = randomUUID();
+        const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': b.gateway!.deviceId, 'x-gateway-key': b.gateway!.key },
+          payload: { events: [{ eventId, type: 'JACKPOT', machineId: b.machines[0].code, timestamp: new Date(Date.now() - hoursAgo * 3600_000).toISOString(), amount }] } });
+        assert.equal(r.json().accepted, 1, r.body);
+        return eventId;
+      };
+      const day = async (offset: number) => (await one(`SELECT ((now() AT TIME ZONE timezone)::date + $2::int)::text AS d FROM casinos WHERE id = $1`, [b.id, offset])).d as string;
+      const booked = async (eventId: string) => (await q(`SELECT t.business_date::text AS d FROM money_transactions t JOIN handpays h ON h.id = t.handpay_id
+        WHERE h.source_event_id = $1 AND t.type = 'HANDPAY_CREATE_JACKPOT'`, [eventId])).map((r) => r.d);
+      const dates = async (eventId: string) => one(`SELECT (e.occurred_at AT TIME ZONE c.timezone)::date::text AS occurred, (e.received_at AT TIME ZONE c.timezone)::date::text AS received
+        FROM machine_events e JOIN casinos c ON c.id = e.casino_id WHERE e.event_id = $1`, [eventId]);
+      // occurred on business day A (yesterday), received on business day B (today): booked on A
+      const a = await send(24, 31);
+      assert.deepEqual(await dates(a), { occurred: await day(-1), received: await day(0) });
+      assert.deepEqual(await booked(a), [await day(-1)], 'booked on the occurred day, not on the receipt day');
+      const da = await one(`SELECT status, reason, business_date::text AS bd, received_at IS NOT NULL AS r, replayed_at IS NOT NULL AS p FROM deferred_money_events WHERE event_id = $1`, [a]);
+      assert.deepEqual(da, { status: 'PROCESSED', reason: 'LATE_EVENT', bd: await day(-1), r: true, p: true });
+      // delayed by three days
+      const late3 = await send(72, 32);
+      assert.deepEqual(await booked(late3), [await day(-3)]);
+      // same day: booked today, no deferred record
+      const now = await send(0, 33);
+      assert.deepEqual(await booked(now), [await day(0)]);
+      assert.equal((await q('SELECT 1 FROM deferred_money_events WHERE event_id = $1', [now])).length, 0);
+      // a resend is a duplicate: still exactly one creation booking
+      assert.equal((await q(`SELECT 1 FROM money_transactions WHERE source_event_id = $1`, [a])).length, 1);
+      // a closed occurred day is never bypassed: recorded, not booked, reported
+      const closedDay = await day(-5);
+      const runId = (await one(`INSERT INTO reconciliation_runs (org_id, casino_id, trigger, ok, checks) VALUES ($1,$2,'MANUAL',true,'[]') RETURNING id`, [c.orgId, b.id])).id;
+      await q(`INSERT INTO business_day_closes (casino_id, business_date, org_id, closed_by, reconciliation_run_id) VALUES ($1,$2,$3,$4,$5)`, [b.id, closedDay, c.orgId, c.emp['manager@example.com'], runId]);
+      const closed = await send(120, 34);
+      assert.equal(await handpayOf(closed), undefined);
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [closed])).length, 0, 'never moved to the receipt day');
+      const dc = await one(`SELECT status, reason, business_date::text AS bd, last_error FROM deferred_money_events WHERE event_id = $1`, [closed]);
+      assert.deepEqual([dc.status, dc.reason, dc.bd], ['PENDING', 'LATE_EVENT', closedDay]);
+      assert.match(dc.last_error, /Business date .* is closed/);
+      assert.match((await one(`SELECT message FROM alerts WHERE casino_id = $1 AND type = 'HANDPAY_DEFERRED'`, [b.id])).message, /pending explicit handling/);
+      const run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: b.id })).json();
+      assert.deepEqual(run.checks.find((k: { key: string }) => k.key === 'handpay.no_stale_deferred_events').items, [`deferred_event:${closed}`]);
+      assert.deepEqual(run.checks.find((k: { key: string }) => k.key === 'handpay.deferred_business_date').items, []);
+    });
+
     test('end state: ledger invariants hold; every paid handpay has exactly one payment booking', async () => {
       assert.equal((await svc.ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
       const bad = await q(`SELECT h.id FROM handpays h WHERE h.casino_id = $1 AND h.status IN ('PAID', 'MACHINE_RESET')

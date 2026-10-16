@@ -501,6 +501,100 @@ export function registerStep7cScenarios(get: () => Ctx7c) {
       assert.equal((await lift(run.frozen[0].id, 'explained')).json().lifted, true);
     });
 
+    describe('rail dependency matrix (mixed LEDGER / LEGACY states)', () => {
+      /** Simulates a cutover row written around the cutover service (defence in depth: the money guards must still hold). */
+      const forceRail = (casinoId: string, rail: string, machineId: string | null = null) => q(
+        `INSERT INTO money_rail_cutovers (id, org_id, rail, casino_id, machine_id, business_date, actor_type, opening_count, opening_total_cents, legacy_totals, ledger_totals, checks)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, current_date, 'SYSTEM', 0, 0, '{}', '{}', '[]')`, [c.orgId, rail, casinoId, machineId]);
+      const book = (type: string, ctx: Record<string, unknown>) => tx((db) => svc.ledger.executeMoneyTransaction(db, {
+        orgId: c.orgId, type: type as never, dedupeKey: `matrix-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { amountCents: cents(500), ...ctx } as never,
+      }));
+      const admin = (casinoId: string) => ({ orgId: c.orgId, employeeId: c.emp['admin@example.com'], casinoIds: [casinoId] });
+      const prerequisite = async (casinoId: string, rail: 'HANDPAY' | 'TITO' | 'MACHINE', machineId?: string) =>
+        (await svc.cutover.dryRunCutover(c.pool as never, admin(casinoId), { rail, casinoId, machineId })).checks.filter((k) => k.name.startsWith('prerequisite:') && !k.ok).map((k) => k.name);
+      const kindsOf = async (txId: string) => (await q(`SELECT DISTINCT a.kind FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = $1 ORDER BY a.kind`, [txId])).map((r) => r.kind);
+
+      test('HANDPAY LEDGER + TITO LEGACY: allowed; handpay money never touches TITO; ticket money stays legacy-only and a legacy ticket cash row is refused', async () => {
+        const x = await newCasino('7MA', ['VAULT', 'CASH', 'HANDPAY']);
+        const ev = (await one(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES (gen_random_uuid(),$1,$2,$3,'JACKPOT',20,now()) RETURNING event_id`, [c.orgId, x.id, m(0, x).id])).event_id;
+        const h = await tx((db) => import('../src/services/handpays').then((hp) => hp.ensureHandpayForJackpot(db as never, { orgId: c.orgId, casinoId: x.id, machineId: m(0, x).id, eventId: ev, amountCents: 2_000 })));
+        const create = await one(`SELECT id FROM money_transactions WHERE handpay_id = $1`, [h!.id]);
+        assert.deepEqual(await kindsOf(create.id), ['GAMING_JACKPOT_EXPENSE', 'HANDPAY_PAYABLE']);
+        const t = (await one(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,5,now() + interval '1 day') RETURNING id`, [c.orgId, x.id, barcode()])).id;
+        await assert.rejects(book('TITO_ISSUE_MACHINE', { casinoId: x.id, machineId: m(0, x).id, ticketId: t, floorClearing: true }), /TITO money is not on the ledger/);
+        const session = (await one(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,0) RETURNING id`, [c.orgId, x.id, x.desk, c.emp['tech@example.com']])).id;
+        await assert.rejects(c.pool.query(`INSERT INTO cash_transactions (org_id, casino_id, session_id, employee_id, type, amount, ticket_id) VALUES ($1,$2,$3,$4,'TICKET_ISSUE',5,$5)`,
+          [c.orgId, x.id, session, c.emp['tech@example.com'], t]), /CASH money is on the ledger/);
+        assert.equal((await q('SELECT 1 FROM money_transactions WHERE ticket_id = $1', [t])).length, 0);
+      });
+
+      test('TITO LEDGER + HANDPAY LEGACY: allowed; ticket money never touches HANDPAY; handpay money stays legacy-only and a legacy cash payment is refused', async () => {
+        const x = await newCasino('7MB', ['VAULT', 'CASH', 'TITO']);
+        const { code } = await printed(0, 5, { casino: x });
+        const issue = await one(`SELECT id FROM money_transactions WHERE ticket_id = $1`, [(await ticket(code)).id]);
+        assert.deepEqual(await kindsOf(issue.id), ['LEGACY_FLOOR_CLEARING', 'TICKET_LIABILITY']);
+        const ev = (await one(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES (gen_random_uuid(),$1,$2,$3,'JACKPOT',20,now()) RETURNING event_id`, [c.orgId, x.id, m(0, x).id])).event_id;
+        const hp = await import('../src/services/handpays');
+        const h = await tx((db) => hp.ensureHandpayForJackpot(db as never, { orgId: c.orgId, casinoId: x.id, machineId: m(0, x).id, eventId: ev, amountCents: 2_000 }));
+        assert.equal((await q('SELECT 1 FROM money_transactions WHERE handpay_id = $1', [h!.id])).length, 0, 'legacy HANDPAY: no ledger booking');
+        await assert.rejects(book('HANDPAY_CREATE_JACKPOT', { casinoId: x.id, machineId: m(0, x).id, handpayId: h!.id }), /HANDPAY money is not on the ledger/);
+        await assert.rejects(tx((db) => hp.payHandpay(db as never, { orgId: c.orgId, employeeId: c.emp['manager@example.com'] }, h!.id)), /Cash is on the ledger but HANDPAY is not/);
+      });
+
+      test('HANDPAY LEDGER + CASH LEGACY: refused by the cutover (prerequisite CASH); even if forced, no payment can touch the legacy drawer', async () => {
+        const x = await createCasinoShell(c.pool as never, { orgId: c.orgId, code: `7MC${Date.now() % 100000}`, machines: 1 });
+        await cutoverCasinoRails(c.pool as never, x, ['VAULT']);
+        assert.deepEqual(await prerequisite(x.id, 'HANDPAY'), ['prerequisite:CASH']);
+        await forceRail(x.id, 'HANDPAY');
+        const session = (await one(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,0) RETURNING id`, [c.orgId, x.id, x.desk, c.emp['floor@example.com']])).id;
+        const ev = (await one(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES (gen_random_uuid(),$1,$2,$3,'JACKPOT',5,now()) RETURNING event_id`, [c.orgId, x.id, m(0, x).id])).event_id;
+        // a handpay without its ledger booking is refused outright (006 guard on the forced HANDPAY rail)
+        await assert.rejects(c.pool.query(`INSERT INTO handpays (org_id, casino_id, machine_id, source_event_id, kind, amount_cents) VALUES ($1,$2,$3,$4,'JACKPOT',500)`, [c.orgId, x.id, m(0, x).id, ev]), /HANDPAY is on the ledger/);
+        // the liability alone is balanced (HANDPAY + expense); its cash payment needs the legacy drawer and is refused: all rolls back
+        const hp = await import('../src/services/handpays');
+        await assert.rejects(tx(async (db) => {
+          const h = await hp.ensureHandpayForJackpot(db as never, { orgId: c.orgId, casinoId: x.id, machineId: m(0, x).id, eventId: ev, amountCents: 500 });
+          await svc.ledger.executeMoneyTransaction(db, { orgId: c.orgId, type: 'HANDPAY_PAY', dedupeKey: `m-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { casinoId: x.id, amountCents: cents(500), machineId: m(0, x).id, handpayId: h!.id, cashierSessionId: session } });
+        }), /CASH money is not on the ledger/);
+        assert.equal((await q('SELECT 1 FROM handpays WHERE source_event_id = $1', [ev])).length, 0);
+        await assert.rejects(c.pool.query(`INSERT INTO cash_transactions (org_id, casino_id, session_id, employee_id, type, amount, machine_id, source_event_id) VALUES ($1,$2,$3,$4,'HANDPAY',-5,$5,$6)`,
+          [c.orgId, x.id, session, c.emp['floor@example.com'], m(0, x).id, ev]), /HANDPAY money is on the ledger/);
+        assert.equal((await svc.ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
+      });
+
+      test('TITO LEDGER + CASH LEGACY: refused by the cutover (prerequisite CASH); even if forced, no ticket sale / payout can touch the legacy drawer', async () => {
+        const x = await createCasinoShell(c.pool as never, { orgId: c.orgId, code: `7MD${Date.now() % 100000}`, machines: 1 });
+        await cutoverCasinoRails(c.pool as never, x, ['VAULT']);
+        assert.deepEqual(await prerequisite(x.id, 'TITO'), ['prerequisite:CASH']);
+        await forceRail(x.id, 'TITO');
+        const session = (await one(`INSERT INTO cashier_sessions (org_id, casino_id, cash_desk_id, employee_id, opening_balance) VALUES ($1,$2,$3,$4,0) RETURNING id`, [c.orgId, x.id, x.desk, c.emp['accounting@example.com']])).id;
+        const t = (await one(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,5,now() + interval '1 day') RETURNING id`, [c.orgId, x.id, barcode()]).catch(() => null))?.id;
+        assert.equal(t, undefined, 'a ticket without its ledger transaction is refused on a TITO ledger rail');
+        const t2 = await tx(async (db) => {
+          const id = (await db.query(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,5,now() + interval '1 day') RETURNING id`, [c.orgId, x.id, barcode()])).rows[0].id;
+          await assert.rejects(svc.ledger.executeMoneyTransaction(db, { orgId: c.orgId, type: 'TITO_ISSUE_CASHIER', dedupeKey: `m-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { casinoId: x.id, amountCents: cents(500), ticketId: id, cashierSessionId: session } }), /CASH money is not on the ledger/);
+          return id;
+        }).catch((e) => e);
+        assert.ok(t2 instanceof Error, 'the transaction cannot commit a ticket without money');
+        assert.equal((await svc.ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
+      });
+
+      test('MACHINE LEDGER + TITO LEGACY: refused by the cutover (prerequisite TITO); even if forced, ticket events of that machine cannot move money', async () => {
+        const x = await newCasino('7ME', ['VAULT', 'CASH', 'HANDPAY', 'CASHLESS']);
+        assert.ok((await prerequisite(x.id, 'MACHINE', m(0, x).id)).includes('prerequisite:TITO'));
+        await forceRail(x.id, 'MACHINE', m(0, x).id);
+        await assert.rejects(c.pool.query(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at, payload) VALUES (gen_random_uuid(),$1,$2,$3,'TITO_OUT',5,now(),'{"ticketBarcode":"123456789"}')`,
+          [c.orgId, x.id, m(0, x).id]), /machine money is on the ledger/);
+        const code = barcode();
+        await assert.rejects(tx(async (db) => {
+          const id = (await db.query(`INSERT INTO tickets (org_id, casino_id, barcode, amount, expires_at) VALUES ($1,$2,$3,5,now() + interval '1 day') RETURNING id`, [c.orgId, x.id, code])).rows[0].id;
+          await svc.ledger.executeMoneyTransaction(db, { orgId: c.orgId, type: 'TITO_ISSUE_MACHINE', dedupeKey: `m-${randomUUID()}`, actor: { type: 'SYSTEM' }, ctx: { casinoId: x.id, amountCents: cents(500), ticketId: id, machineId: m(0, x).id } });
+        }), /TITO money is not on the ledger/);
+        assert.equal(await ticket(code), undefined, 'rolled back completely');
+        assert.equal((await svc.ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
+      });
+    });
+
     test('end state: ledger invariants hold; liability = outstanding tickets; every ticket booked to its state', async () => {
       assert.equal((await svc.ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
       assert.equal(await liability(), await outstanding());

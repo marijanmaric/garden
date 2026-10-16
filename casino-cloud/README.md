@@ -228,7 +228,40 @@ organisation, MACHINE per machine. The migration itself moves nothing; every rai
   HISTORICAL / DISPUTED by two employees with evidence (`/api/v1/handpays/legacy-exceptions`); no ledger money and
   no cash movement is created for history.
 - Reconciliation adds HANDPAY (payable = open handpays, payments and creations booked once); mismatch freezes HANDPAY.
-- Production cutover: HANDPAY needs CASH, CASH needs TITO, so it stays locked until 7c.
+- Business date of a jackpot = casino date of `occurred_at` (`received_at` is receipt metadata, `replayed_at` replay
+  metadata). A jackpot whose `occurred_at` is on another day than its receipt (delayed delivery, clock ahead) or that
+  arrives while HANDPAY is frozen is recorded as a deferred money event and booked on that date through the validated
+  replay path; a closed date is never bypassed (the record stays pending and is reported by reconciliation).
+
+### TITO on the ledger (migration 010, Step 7c)
+
+- Machine prints (TITO_OUT) → ticket VALID + TITO_ISSUE_MACHINE. Scan → `POST /gateway/tickets/hold` (no money) →
+  accept ack = TITO_IN with `holdId` → TITO_REDEEM_MACHINE; reject → `/gateway/tickets/release`; timeouts release.
+- Cashier sale / payout (cash or wallet) with LegacyProjection rows; payout above `ticket_payout_approval_cents` needs a
+  four-eyes approval (`/tickets/:id/approval-request`), the approver cannot pay. Cancel and void (cashier sale only)
+  are four-eyes requests executed on approval. Expiry is TITO_EXPIRY per ticket (HELD tickets never expire).
+- A machine accept without a liability (unknown, final, held elsewhere) is TITO_EXCEPTION with the reported amount.
+- D1: a machine that is still LEGACY books its ticket side on its own LEGACY_FLOOR_CLEARING account (database guard,
+  reconciled; an unexplained balance blocks further TITO cutovers until explained by four eyes; target 0 in 7d).
+- Frozen TITO / off-day events: deferred and replayed exactly once on the date of `occurred_at` (as jackpots).
+
+**Rail dependency matrix** (A = technical, B = cutover prerequisite, C = maintenance window):
+
+| State | Technically allowed | Protection | Unbalanced money possible | Cutover operationally |
+|---|---|---|---|---|
+| HANDPAY LEDGER + TITO LEGACY | yes | handpay postings never touch TITO; legacy ticket cash rows refused (CASH on ledger); TITO bookings refused (rail guard, service + DB) | no | window C: legacy ticket sale / payout stops until TITO follows |
+| TITO LEDGER + HANDPAY LEGACY | yes | ticket postings never touch HANDPAY; legacy handpay cash payment refused (CASH on ledger); HANDPAY bookings refused | no | window C: legacy handpay payment stops until HANDPAY follows |
+| HANDPAY LEDGER + CASH LEGACY | no (B: HANDPAY needs CASH) | cutover prerequisite; if forced: handpay rows need their booking, drawer bookings refused by the rail guard, all roll back | no | not reachable |
+| TITO LEDGER + CASH LEGACY | no (B: TITO needs CASH) | cutover prerequisite; if forced: tickets need their booking, drawer bookings refused | no | not reachable |
+| MACHINE LEDGER + TITO LEGACY | no (B: MACHINE needs TITO) | cutover prerequisite; if forced: machine money events need a booking, TICKET_LIABILITY bookings refused | no | not reachable |
+
+Every booking is balanced (shared postings + database zero-sum check) and every account it touches must be on a
+LEDGER, unfrozen rail (service guard + `ledger_entries` trigger), so a mixed state can stop legacy operations but
+cannot produce a ledger movement on a legacy rail. The window C is operational, not a database switch.
+
+**Open for Step 7d (machine scope):** a duplicate or otherwise invalid ticket machine event on a machine whose MACHINE
+rail is on the ledger currently fails the ingest transaction (HTTP 500, no money moved, event not stored). 7d must turn
+expected domain errors into a deterministic business error per event, keep it auditable, and never move money.
 
 ### Accounting definitions
 

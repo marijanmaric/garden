@@ -106,17 +106,18 @@ export function titoEventMovesMoney(ev: Pick<TitoMachineEvent, 'type' | 'barcode
 
 /**
  * Entry point from ingestion (TITO on the ledger). The machine event is already stored.
- * Frozen TITO: recorded as a deferred money event (no ticket change, no booking). An event of an
- * earlier business date: recorded with reason LATE_EVENT and booked now on that date (validated by
- * the ledger), or kept pending if that date is closed. Otherwise booked now.
+ * Frozen TITO: recorded as a deferred money event (no ticket change, no booking). An event whose
+ * occurred_at is on another business date than today: recorded with reason LATE_EVENT / EARLY_EVENT and
+ * booked now on the date of occurred_at (validated by the ledger), or kept pending if that date is closed
+ * (or still in the future). Otherwise booked now (today = the occurred date).
  */
 export async function handleTitoMachineEvent(db: PoolClient, ev: TitoMachineEvent, out: BusMessage[]) {
   if (!titoEventMovesMoney(ev)) return { deferred: false as const, outcome: 'NO_MONEY' };
   const frozen = await titoFrozen(db, ev.orgId, ev.casinoId);
-  const late = !frozen && (await db.query(
-    `SELECT ($2::timestamptz AT TIME ZONE timezone)::date < (now() AT TIME ZONE timezone)::date AS late FROM casinos WHERE id = $1`, [ev.casinoId, ev.occurredAt],
-  )).rows[0].late;
-  if (frozen || late) {
+  const day: number = frozen ? 0 : (await db.query(
+    `SELECT sign(($2::timestamptz AT TIME ZONE timezone)::date - (now() AT TIME ZONE timezone)::date)::int AS day FROM casinos WHERE id = $1`, [ev.casinoId, ev.occurredAt],
+  )).rows[0].day;
+  if (frozen || day !== 0) {
     const amount = await deferredAmount(db, ev);
     if (!amount) {
       // Never estimated: without an amount the event stays unbooked; reconciliation reports it.
@@ -126,7 +127,7 @@ export async function handleTitoMachineEvent(db: PoolClient, ev: TitoMachineEven
     const r = await db.query(
       `INSERT INTO deferred_money_events (event_id, org_id, casino_id, machine_id, rail, kind, amount_cents, reason)
        VALUES ($1,$2,$3,$4,'TITO',$5,$6,$7) ON CONFLICT (event_id) DO NOTHING RETURNING *`,
-      [ev.eventId, ev.orgId, ev.casinoId, ev.machineId, ev.type, amount, frozen ? 'FROZEN' : 'LATE_EVENT'],
+      [ev.eventId, ev.orgId, ev.casinoId, ev.machineId, ev.type, amount, frozen ? 'FROZEN' : day < 0 ? 'LATE_EVENT' : 'EARLY_EVENT'],
     );
     const d = r.rows[0];
     if (d)
@@ -167,6 +168,8 @@ async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, businessDa
     if (!t) {
       // A barcode that already exists belongs to another ticket: never merged, never guessed. The event
       // stays unbooked and reconciliation (tito.machine_events_accounted) reports it for explicit handling.
+      // Open for 7d: on a machine whose MACHINE rail is on the ledger the machine-event guard then fails the ingest
+      // transaction (HTTP 500, no money). 7d turns this into a deterministic, audited business rejection.
       await openAlert(db, { orgId: ev.orgId, casinoId: ev.casinoId, machineId: ev.machineId, type: 'TICKET_DUPLICATE_BARCODE', severity: 'CRITICAL', message: `${ev.label} printed ticket ${ev.barcode}, a barcode that already exists` }, out);
       return { outcome: 'DUPLICATE_BARCODE', ticketId: null, moneyTransactionId: null };
     }
