@@ -99,7 +99,7 @@ export const MONEY_TRANSACTIONS: Record<MoneyTransactionType, MoneyTransactionDe
   // ---- bridge / admin ----
   GAMING_SETTLEMENT: { rail: 'MACHINE_CREDIT', label: 'Gaming settlement (credit meter vs. money in/out)', requires: ['machine'], signed: true, approval: NONE, idempotency: 'SYSTEM', reversal: { kind: 'NONE' } },
   ADJUSTMENT: { rail: 'ADMIN', label: 'Adjustment', requires: [], optional: ['player', 'wallet', 'card', 'machine', 'cashierSession', 'vault', 'ticket', 'handpay'], approval: { kind: 'FOUR_EYES' }, idempotency: 'CLIENT_KEY', reversal: { kind: 'VIA', type: 'ADJUSTMENT' } },
-  OPENING_BALANCE: { rail: 'ADMIN', label: 'Opening balance (migration)', requires: [], optional: ['machine', 'cashierSession', 'vault', 'wallet'], approval: NONE, idempotency: 'SYSTEM', reversal: { kind: 'NONE' } },
+  OPENING_BALANCE: { rail: 'ADMIN', label: 'Opening balance (rail cutover)', requires: [], optional: ['machine', 'cashierSession', 'vault', 'wallet', 'ticket', 'handpay'], approval: NONE, idempotency: 'SYSTEM', reversal: { kind: 'NONE' } },
   REVERSAL: { rail: 'ADMIN', label: 'Reversal', requires: [], approval: { kind: 'LIMIT', setting: 'reversal_approval_cents' }, idempotency: 'CLIENT_KEY', reversal: { kind: 'NONE' } },
 };
 
@@ -134,11 +134,19 @@ export interface MoneyContext {
   source?: 'VAULT' | 'DRAWER';
   /** CASH_ADVANCE: fee charged on top of the amount handed out. */
   feeCents?: Cents;
+  /** OPENING_BALANCE: the legacy record the opening is derived from (migration 006 cutover). */
+  backfillSource?: BackfillSource;
   /** ADJUSTMENT / OPENING_BALANCE: explicit accounts. */
   debit?: AccountRef;
   credit?: AccountRef;
   /** REVERSAL: postings of the original transaction. */
   original?: Posting[];
+}
+
+/** Legacy source of an opening balance: one row of a legacy table, used at most once. */
+export interface BackfillSource {
+  table: 'cash_counts' | 'tickets' | 'handpays';
+  id: string;
 }
 
 export interface Posting {
@@ -243,6 +251,7 @@ export function postings(type: MoneyTransactionType, ctx: MoneyContext): Posting
       const { debit, credit } = ctx;
       if (!debit || !credit) throw new MoneyError('OPENING_BALANCE: debit and credit accounts required');
       if (debit.kind !== 'OPENING_EQUITY' && credit.kind !== 'OPENING_EQUITY') throw new MoneyError('OPENING_BALANCE: one side must be OPENING_EQUITY');
+      if (!ctx.backfillSource?.table || !ctx.backfillSource.id) throw new MoneyError('OPENING_BALANCE: legacy source required');
       result = move(scoped(debit), scoped(credit));
       break;
     }

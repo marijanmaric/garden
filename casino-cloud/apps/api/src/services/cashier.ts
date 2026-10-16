@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto';
 import type { PoolClient } from '@m1/database';
-import { signedCashAmount, type CashTxType } from '@m1/shared';
+import { LEGACY_CASH_TX_RAILS, signedCashAmount, type CashTxType } from '@m1/shared';
 import { HttpError } from '../auth';
 
 export interface SessionRow {
@@ -28,13 +28,19 @@ export async function addCashTx(
   s: SessionRow,
   type: CashTxType,
   amount: number,
-  extra: { ticketId?: string; machineId?: string; playerId?: string; reference?: string; sourceEventId?: string } = {},
+  extra: { ticketId?: string; machineId?: string; playerId?: string; reference?: string; sourceEventId?: string; moneyTransactionId?: string } = {},
 ) {
+  // Rails on the ledger accept a legacy cash row only as the projection of a ledger transaction (migration 006).
+  if (!extra.moneyTransactionId) {
+    const rails = LEGACY_CASH_TX_RAILS[type] ?? ['CASH'];
+    const r = await db.query(`SELECT rail FROM unnest($1::text[]) rail WHERE money_rail_ledger($2, $3, rail, NULL)`, [rails, s.org_id, s.casino_id]);
+    if (r.rowCount) throw new HttpError(409, `${r.rows[0].rail} money is on the ledger: this legacy cash operation is disabled`);
+  }
   const signed = signedCashAmount(type, amount);
   const r = await db.query(
-    `INSERT INTO cash_transactions (org_id, casino_id, session_id, employee_id, type, amount, ticket_id, machine_id, player_id, reference, source_event_id)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, type, amount, created_at`,
-    [s.org_id, s.casino_id, s.id, s.employee_id, type, signed, extra.ticketId ?? null, extra.machineId ?? null, extra.playerId ?? null, extra.reference ?? null, extra.sourceEventId ?? null],
+    `INSERT INTO cash_transactions (org_id, casino_id, session_id, employee_id, type, amount, ticket_id, machine_id, player_id, reference, source_event_id, money_transaction_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, type, amount, created_at`,
+    [s.org_id, s.casino_id, s.id, s.employee_id, type, signed, extra.ticketId ?? null, extra.machineId ?? null, extra.playerId ?? null, extra.reference ?? null, extra.sourceEventId ?? null, extra.moneyTransactionId ?? null],
   );
   return r.rows[0];
 }

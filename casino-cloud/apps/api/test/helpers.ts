@@ -24,6 +24,8 @@ export async function setupTestDatabase(opts: { beforeReady?: (app: import('fast
   await syncRbac(pool);
   await syncMoneyModel(pool);
   await seed(pool, quiet);
+  const { cutoverFreshRails } = await import('../src/services/cutover');
+  await cutoverFreshRails(pool);
   const { buildApp } = await import('../src/app');
   const app = await buildApp();
   await opts.beforeReady?.(app);

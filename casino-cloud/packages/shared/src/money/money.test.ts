@@ -15,7 +15,7 @@ const ids = {
 function ctxFor(type: MoneyTransactionType): MoneyContext {
   const base: MoneyContext = { ...ids, amountCents: cents(12_345) };
   if (type === 'ADJUSTMENT') return { ...base, debit: { kind: 'CASH_SHORT_OVER' }, credit: { kind: 'DRAWER', cashierSessionId: 'session-1' } };
-  if (type === 'OPENING_BALANCE') return { ...base, debit: { kind: 'VAULT', vaultId: 'vault-1' }, credit: { kind: 'OPENING_EQUITY' } };
+  if (type === 'OPENING_BALANCE') return { ...base, debit: { kind: 'VAULT', vaultId: 'vault-1' }, credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: 'count-1' } };
   if (type === 'REVERSAL') return { ...base, original: postings('CASH_DEPOSIT', base) };
   if (type === 'CASH_ADVANCE') return { ...base, feeCents: cents(300) };
   return base;
@@ -111,6 +111,7 @@ test('postings: required references and amounts are enforced', () => {
   assert.throws(() => postings('DRAWER_SHORT_OVER', { ...ids, amountCents: cents(0) }), /non-zero/);
   assert.throws(() => postings('ADJUSTMENT', { ...ids, amountCents: cents(1), debit: { kind: 'GAMING_RESULT' }, credit: { kind: 'VAULT', vaultId: 'v' } }), /cannot be adjusted/);
   assert.throws(() => postings('OPENING_BALANCE', { ...ids, amountCents: cents(1), debit: { kind: 'VAULT', vaultId: 'v' }, credit: { kind: 'DRAWER', cashierSessionId: 's' } }), /OPENING_EQUITY/);
+  assert.throws(() => postings('OPENING_BALANCE', { ...ids, amountCents: cents(1), debit: { kind: 'VAULT', vaultId: 'v' }, credit: { kind: 'OPENING_EQUITY' } }), /legacy source required/);
 });
 
 test('reversal negates the original exactly', () => {

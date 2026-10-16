@@ -79,6 +79,7 @@ test('handpay backfill: paid jackpot linked to its legacy payment, pending jackp
 });
 
 test('the legacy handpay flow works on the upgraded database (still exactly once)', async () => {
+  await db.migrate(pool, () => {}); // today's code runs on today's schema (006 keeps every rail LEGACY)
   process.env.DATABASE_URL = (pool as unknown as { options: { connectionString: string } }).options.connectionString;
   const { payHandpay } = await import('../src/services/handpays');
   const h = (await pool.query('SELECT id FROM handpays WHERE source_event_id = $1', [legacy.pendingEvent])).rows[0];

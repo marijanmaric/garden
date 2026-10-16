@@ -20,6 +20,7 @@ import { cashRoutes } from './routes/cash';
 import { employeeRoutes } from './routes/employees';
 import { reportRoutes } from './routes/reports';
 import { ledgerRoutes } from './routes/ledger';
+import { moneyRoutes } from './routes/money';
 
 export async function buildApp() {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, trustProxy: true });
@@ -30,7 +31,7 @@ export async function buildApp() {
 
   app.setErrorHandler((err: Error, _req, reply) => {
     if (err instanceof ZodError) return reply.status(400).send({ error: 'Validation failed', issues: err.issues });
-    if (err instanceof HttpError) return reply.status(err.statusCode).send({ error: err.message });
+    if (err instanceof HttpError) return reply.status(err.statusCode).send({ error: err.message, ...(err.body ?? {}) });
     const status = (err as { statusCode?: number }).statusCode;
     if (status && status < 500) return reply.status(status).send({ error: err.message });
     app.log.error(err);
@@ -43,7 +44,7 @@ export async function buildApp() {
   });
 
   for (const routes of [authRoutes, dashboardRoutes, machineRoutes, floorRoutes, accountingRoutes, alertRoutes, auditRoutes, gatewayRoutes, casinoRoutes, streamRoutes,
-    ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes, ledgerRoutes])
+    ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes, ledgerRoutes, moneyRoutes])
     await app.register(routes);
 
   return app;

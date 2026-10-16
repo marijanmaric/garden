@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { writeAudit, type PoolClient } from '@m1/database';
 import {
-  ACCOUNT_KINDS, MONEY_TRANSACTIONS, MoneyError, accountKey, cents, postings as buildPostings,
+  ACCOUNT_KINDS, ACCOUNT_KIND_RAIL, MONEY_TRANSACTIONS, MoneyError, accountKey, cents, postings as buildPostings,
   type AccountKind, type AccountRef, type MoneyContext, type MoneyTransactionType, type Posting,
 } from '@m1/shared';
 import { HttpError } from '../auth';
@@ -95,6 +95,7 @@ function requestHash(input: ExecuteMoneyInput, list: Posting[], reversalOf: stri
   return createHash('sha256')
     .update(stable({
       type: input.type, amount: input.ctx.amountCents, casino: input.ctx.casinoId, refs, reversalOf, sourceEventId: input.sourceEventId ?? null,
+      backfillSource: input.ctx.backfillSource ?? null,
       postings: list.map((p) => [accountKey(p.account), p.amountCents]),
     }))
     .digest('hex');
@@ -145,10 +146,13 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 1. Org lock (the same lock writeAudit takes): keeps the lock order fixed and the audit chain linear.
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`audit:${input.orgId}`]);
 
+  // Opening balances belong to a rail's cutover. Once a rail is on the ledger, no other opening can touch it.
+  if (input.type === 'OPENING_BALANCE') await assertOpeningAllowed(db, input.orgId, list);
+
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
   const refs = (Object.keys(REF_COLUMNS) as Array<keyof typeof REF_COLUMNS>).map((k) => input.ctx[k] ?? null);
-  const options = { payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents };
+  const options = { payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents, backfillSource: input.ctx.backfillSource };
   const inserted = await db.query(
     `INSERT INTO money_transactions (org_id, casino_id, type, amount_cents, dedupe_key, request_hash,
        player_id, wallet_id, card_id, machine_id, cashier_session_id, vault_id, ticket_id, handpay_id, transfer_id,
@@ -210,6 +214,17 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   });
 
   return { transaction: tx, entries: await loadEntries(db, tx.id), replayed: false };
+}
+
+async function assertOpeningAllowed(db: Db, orgId: string, list: Posting[]) {
+  const inCutover = (await db.query(`SELECT current_setting('m1.cutover_id', true) AS id`)).rows[0].id;
+  if (inCutover) return;
+  for (const p of list) {
+    const rail = ACCOUNT_KIND_RAIL[p.account.kind];
+    if (!rail) continue;
+    const r = await db.query('SELECT money_rail_ledger($1, $2, $3, $4) AS ledger', [orgId, p.account.casinoId ?? null, rail, p.account.machineId ?? null]);
+    if (r.rows[0].ledger) throw new HttpError(409, `${rail} is on the ledger: opening balances are only created by its cutover`);
+  }
 }
 
 /** Executes one money transaction from the shared matrix. Not for REVERSAL (use reverseMoneyTransaction). */

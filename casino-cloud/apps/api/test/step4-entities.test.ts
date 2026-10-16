@@ -125,8 +125,9 @@ describe('model consistency', () => {
 
   test('no circular foreign keys between entities and money transactions', async () => {
     const back = (await pool.query(`SELECT conrelid::regclass::text AS t FROM pg_constraint WHERE contype = 'f' AND confrelid = 'money_transactions'::regclass`)).rows.map((r) => r.t).sort();
-    // Only the ledger itself (entries, reversal) and approvals point at money transactions; no entity referenced by them does.
-    assert.deepEqual(back, ['approvals', 'ledger_entries', 'money_transactions']);
+    // The ledger itself (entries, reversal), approvals, and since 006 the legacy projections (cash_transactions)
+    // and backfill items point at money transactions; none of them is referenced by a money transaction.
+    assert.deepEqual(back, ['approvals', 'cash_transactions', 'ledger_entries', 'money_backfill_items', 'money_transactions']);
   });
 });
 

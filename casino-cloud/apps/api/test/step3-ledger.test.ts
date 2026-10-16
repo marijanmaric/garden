@@ -54,7 +54,7 @@ const balance = (ref: Parameters<typeof ledger.getBalance>[2]) => ledger.getBala
 async function fundDrawer(casinoId: string, cashierSessionId: string, amountCents: number) {
   await tx((db) => ledger.executeMoneyTransaction(db, {
     orgId, type: 'OPENING_BALANCE', dedupeKey: key('open'), actor: system,
-    ctx: { casinoId, amountCents: cents(amountCents), debit: drawer(casinoId, cashierSessionId), credit: { kind: 'OPENING_EQUITY' } },
+    ctx: { casinoId, amountCents: cents(amountCents), debit: drawer(casinoId, cashierSessionId), credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: randomUUID() } },
   }));
 }
 
@@ -122,7 +122,7 @@ after(async () => {
 describe('model', () => {
   test('migration 004 applied; kinds and types mirror the shared model (no second matrix)', async () => {
     const applied = (await pool.query(`SELECT name FROM schema_migrations WHERE name >= '004'`)).rows.map((r) => r.name).sort();
-    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql']);
+    assert.deepEqual(applied, ['004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql']);
     const types = (await pool.query('SELECT code FROM money_transaction_types ORDER BY code')).rows.map((r) => r.code);
     assert.deepEqual(types, [...MONEY_TRANSACTION_TYPES].sort());
     const kinds = (await pool.query('SELECT code FROM ledger_account_kinds ORDER BY code')).rows.map((r) => r.code);
@@ -243,7 +243,7 @@ describe('immutability and reversals', () => {
 
   test('reversal rules from the matrix are enforced and reversals respect balances', async () => {
     const vaultId = (await pool.query('SELECT id FROM vaults WHERE casino_id = $1', [casinoA])).rows[0].id;
-    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'OPENING_BALANCE', dedupeKey: key('vault'), actor: system, ctx: { casinoId: casinoA, amountCents: cents(50_000), debit: { kind: 'VAULT', vaultId }, credit: { kind: 'OPENING_EQUITY' } } }));
+    await tx((db) => ledger.executeMoneyTransaction(db, { orgId, type: 'OPENING_BALANCE', dedupeKey: key('vault'), actor: system, ctx: { casinoId: casinoA, amountCents: cents(50_000), debit: { kind: 'VAULT', vaultId }, credit: { kind: 'OPENING_EQUITY' }, backfillSource: { table: 'cash_counts', id: randomUUID() } } }));
     const fill = await run('VAULT_FILL', { amountCents: 400, vaultId, cashierSessionId: sessionA });
     await assert.rejects(tx((db) => ledger.reverseMoneyTransaction(db, { orgId, transactionId: fill.transaction.id, dedupeKey: key(), actor: system, reason: 'nope' })), /undone with VAULT_DROP/);
     // Deposit, spend it, then try to reverse the deposit: the wallet would go negative.

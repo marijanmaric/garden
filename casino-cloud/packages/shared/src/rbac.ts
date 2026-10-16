@@ -40,6 +40,7 @@ export const PERMISSIONS = [
   'ticket.manage',
   'cashier.supervise',
   'cash.manage',
+  'money.cutover',
 ] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
@@ -48,7 +49,7 @@ const ALL = [...PERMISSIONS];
 export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   SUPER_ADMIN: ALL,
   CASINO_ADMIN: ALL,
-  MANAGER: ALL.filter((p) => p !== 'user.manage' && p !== 'gateway.manage'),
+  MANAGER: ALL.filter((p) => p !== 'user.manage' && p !== 'gateway.manage' && p !== 'money.cutover'),
   // Cashiers handle money and tickets only: no machine, jackpot or user configuration.
   FLOOR_SUPERVISOR: [
     'dashboard.view', 'casino.view', 'machine.view', 'machine.command', 'floor.view', 'floor.edit',

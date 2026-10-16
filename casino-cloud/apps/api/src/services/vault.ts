@@ -15,7 +15,7 @@ export interface CountInput {
   note?: string;
 }
 
-function countTotal(c: CountInput): number {
+export function countTotal(c: CountInput): number {
   if (c.denominations) {
     const total = denominationTotal(c.denominations);
     if (c.totalCents !== undefined && c.totalCents !== total) throw new HttpError(400, 'Count total does not match the denominations');
@@ -28,16 +28,16 @@ function countTotal(c: CountInput): number {
 export async function recordCashCount(
   db: Db,
   a: ScopedActor,
-  input: CountInput & { casinoId: string; context: CashCountContext; vaultSessionId?: string; cashierSessionId?: string; machineId?: string },
+  input: CountInput & { casinoId: string; context: CashCountContext; vaultSessionId?: string; cashierSessionId?: string; machineId?: string; vaultId?: string; cashDeskId?: string },
 ) {
   if (!a.employeeId) throw new HttpError(400, 'An employee must count');
   if (!a.casinoIds.includes(input.casinoId)) throw new HttpError(404, 'Casino not found');
   const total = countTotal(input);
   const r = await db.query(
-    `INSERT INTO cash_counts (org_id, casino_id, context, vault_session_id, cashier_session_id, machine_id, total_cents, denominations, blind, counted_by, note)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-    [a.orgId, input.casinoId, input.context, input.vaultSessionId ?? null, input.cashierSessionId ?? null, input.machineId ?? null, total,
-      input.denominations ?? null, !!input.blind, a.employeeId, input.note ?? null],
+    `INSERT INTO cash_counts (org_id, casino_id, context, vault_session_id, cashier_session_id, machine_id, vault_id, cash_desk_id, total_cents, denominations, blind, counted_by, note)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+    [a.orgId, input.casinoId, input.context, input.vaultSessionId ?? null, input.cashierSessionId ?? null, input.machineId ?? null,
+      input.vaultId ?? null, input.cashDeskId ?? null, total, input.denominations ?? null, !!input.blind, a.employeeId, input.note ?? null],
   );
   return r.rows[0];
 }

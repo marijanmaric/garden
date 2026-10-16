@@ -81,7 +81,7 @@ export const VAULT_SESSION_STATUSES = ['OPEN', 'COUNTING', 'CLOSED'] as const;
 export type VaultSessionStatus = (typeof VAULT_SESSION_STATUSES)[number];
 export const VAULT_SESSION_TRANSITIONS = transitions<VaultSessionStatus>({ OPEN: ['COUNTING'], COUNTING: ['OPEN', 'CLOSED'], CLOSED: [] });
 
-export const CASH_COUNT_CONTEXTS = ['VAULT_OPEN', 'VAULT_CLOSE', 'DRAWER_CLOSE', 'MACHINE_DROP'] as const;
+export const CASH_COUNT_CONTEXTS = ['VAULT_OPEN', 'VAULT_CLOSE', 'DRAWER_CLOSE', 'MACHINE_DROP', 'VAULT_CUTOVER', 'DRAWER_CUTOVER'] as const;
 export type CashCountContext = (typeof CASH_COUNT_CONTEXTS)[number];
 
 export const APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'EXECUTED'] as const;

@@ -174,6 +174,23 @@ Operational state of each money rail. Balances never live on these tables; they 
 - Upgrade keeps all history and invents no balances: wallets for non-closed players, a Main Vault per casino,
   handpay entities for paid and currently pending jackpots only. Ledger stays empty until 006.
 
+### Rail cutover (migration 006)
+
+Legacy money moves onto the ledger one rail at a time: VAULT, CASH, HANDPAY, TITO per casino, CASHLESS per
+organisation, MACHINE per machine. The migration itself moves nothing; every rail stays LEGACY until its cutover.
+
+- `cutoverRail` (`apps/api/src/services/cutover.ts`), one database transaction: lock the rail's legacy tables, check,
+  post OPENING_BALANCE transactions from verified legacy sources, reconcile ledger against legacy, record the cutover.
+  Any failed check rolls everything back. Idempotent (a repeat returns the existing cutover). Forward-only.
+- Opening sources: verified vault / desk / machine-collection counts (blind second count by another employee),
+  outstanding tickets (VALID, HELD), unpaid handpays. Each source is used once (`money_backfill_items`).
+  Wallets always open at zero; points, tier and play history are never money.
+- Handpays are mapped only by jackpot event id; a legacy payment without one stops the cutover.
+- After a cutover the ledger is the only money writer on the rail: database guards refuse legacy money writes
+  unless they are the projection of a ledger transaction of the same database transaction.
+- `POST /api/v1/money/counts`, `/counts/:id/verify`, `/money/cutover/dry-run`, `/money/cutover` (permission
+  `money.cutover`), `GET /api/v1/money/rails`. A fresh demo database starts with CASHLESS on the ledger only.
+
 ### Accounting definitions
 
 | Metric | Definition |

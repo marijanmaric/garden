@@ -23,6 +23,8 @@ declare module 'fastify' {
 }
 
 export class HttpError extends Error {
+  /** Extra fields for the error response (e.g. a cutover report). */
+  body?: Record<string, unknown>;
   constructor(
     public statusCode: number,
     message: string,

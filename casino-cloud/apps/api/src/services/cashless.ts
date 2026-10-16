@@ -4,6 +4,7 @@ import { HttpError } from '../auth';
 import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
 import { requireUsableCard, type Actor } from './players';
 import { assertWalletOperation, lockWallet, walletOfPlayer } from './wallets';
+import { requireRailOnLedger } from './rails';
 
 /**
  * Cashless sessions (wallet play on one machine) and wallet transfers (wallet <-> machine).
@@ -41,6 +42,7 @@ export async function openCashlessSession(
   input: { cardNumber: string; machineId: string; requestKey: string; gamingSessionId?: string | null; sourceEventId?: string | null },
 ) {
   if (!input.requestKey) throw new HttpError(400, 'requestKey required');
+  await requireRailOnLedger(db, a.orgId, 'CASHLESS');
   const existing = (await db.query('SELECT * FROM cashless_sessions WHERE org_id = $1 AND request_key = $2', [a.orgId, input.requestKey])).rows[0];
   const machine = await machineOfOrg(db, a.orgId, input.machineId);
   const { card, player } = await requireUsableCard(db, a.orgId, input.cardNumber);
@@ -106,6 +108,7 @@ function ledgerCtx(t: TransferRow, amountCents: number) {
 /** Requests a transfer within an open cashless session. Exactly once per request key. */
 export async function requestTransfer(db: Db, a: Actor, input: { sessionId: string; direction: TransferDirection; amountCents: number; requestKey: string }) {
   if (!input.requestKey) throw new HttpError(400, 'requestKey required');
+  await requireRailOnLedger(db, a.orgId, 'CASHLESS');
   const amount = cents(input.amountCents);
   if (amount <= 0) throw new HttpError(400, 'Amount must be positive');
   const prev = (await db.query('SELECT * FROM wallet_transfers WHERE org_id = $1 AND request_key = $2', [a.orgId, input.requestKey])).rows[0] as TransferRow | undefined;

@@ -13,7 +13,10 @@ export function startMaintenance() {
     await pool.query(
       `WITH expired AS (
          UPDATE tickets SET status = 'EXPIRED', status_reason = 'Expiry date reached'
-         WHERE status = 'VALID' AND expires_at <= now() RETURNING id, org_id
+         WHERE status = 'VALID' AND expires_at <= now()
+           -- On a TITO rail that is on the ledger, expiry is a ledger transaction (TITO_EXPIRY), not this legacy update.
+           AND NOT money_rail_ledger(org_id, casino_id, 'TITO', NULL)
+         RETURNING id, org_id
        )
        INSERT INTO ticket_events (org_id, ticket_id, action) SELECT org_id, id, 'EXPIRED' FROM expired`,
     );

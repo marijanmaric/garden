@@ -4,6 +4,7 @@ import { config } from './config';
 import { pool } from './db';
 import { startGatewayWatchdog } from './services/gateway';
 import { startMaintenance } from './services/maintenance';
+import { cutoverFreshRails } from './services/cutover';
 
 async function waitForDatabase(retries = 30) {
   for (let i = 1; ; i++) {
@@ -22,7 +23,8 @@ await waitForDatabase();
 await migrate(pool);
 await syncRbac(pool);
 await syncMoneyModel(pool);
-if (config.autoSeed) await seed(pool);
+// Fresh demo database only: rails without legacy money start on the ledger, through the regular cutover.
+if (config.autoSeed && (await seed(pool))) await cutoverFreshRails(pool);
 
 const app = await buildApp();
 const stopWatchdog = startGatewayWatchdog();
