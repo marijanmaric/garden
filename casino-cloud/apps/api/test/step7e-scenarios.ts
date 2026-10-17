@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
-import { ensureVaultOpen, type LedgerCasino } from './ledger-casino';
+import { createCasinoShell, createLedgerCasino, cutoverCasinoRails, ensureVaultOpen, openLedgerShift, type LedgerCasino } from './ledger-casino';
 
 /**
  * Step 7e scenarios: the operator read views (cashier shift, player / wallet, vault, approvals inbox,
@@ -227,6 +227,11 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
 
     test('ledger <-> meters: per machine and money type, meters = ledger; exceptions explain differences; a booked amount that differs from the meter freezes only that machine', async () => {
       const e1 = await event(2, 'CASH_IN', { amount: 30 });
+      // matching ledger / meters: the check is clean and nothing is frozen
+      const clean = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
+      assert.equal(clean.checks.find((x: any) => x.key === 'machine.ledger_matches_meters').ok, true);
+      assert.equal(clean.ok, true, JSON.stringify(clean.checks.filter((x: any) => !x.ok)));
+      assert.deepEqual(await q(`SELECT 1 FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [cid()]), []);
       const e2 = await event(2, 'CASH_OUT', { amount: 500 }); // empty hopper -> exception, no money
       assert.equal(e2.body.exceptions.length, 1);
       const meters = await getJ('floor@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`);
@@ -245,7 +250,10 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
       // the first run froze machine 2 (unexplained exception at that time): lifted now that the run is clean
       for (const f of await q(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND machine_id = $2 AND lifted_at IS NULL`, [cid(), m(2).id]))
         assert.equal((await post('admin@example.com', `/api/v1/money/freezes/${f.id}/lift`, { reason: 'exception explained' })).json().lifted, true);
-      // a booking whose amount differs from what the machine reported (simulated faulty booking: event 30.00, ledger 31.00)
+      // A mismatch cannot arise through the supported ingest (the booking takes the event's amount). To prove
+      // the check, a faulty booking is simulated through the production booking path itself (MoneyService:
+      // balanced, rail-guarded, DB-checked): the machine reports 30.00, the ledger books 31.00. No row is edited.
+      const invBefore = await one(`SELECT COALESCE(sum(amount_cents), 0)::bigint AS s FROM ledger_entries WHERE org_id = $1`, [c.orgId]);
       const ledgerSvc = await import('../src/services/ledger');
       const bad = randomUUID();
       await tx(async (db) => {
@@ -260,6 +268,19 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
       assert.deepEqual(chk.items, [`meters:${m(2).id}:CASH_IN`]);
       const frozen = await q(`SELECT machine_id FROM money_rail_freezes WHERE casino_id = $1 AND rail = 'MACHINE' AND lifted_at IS NULL`, [cid()]);
       assert.deepEqual(frozen.map((f) => f.machine_id), [m(2).id], 'only this machine is frozen');
+      assert.deepEqual(run.frozen.map((f: any) => f.rail), ['MACHINE'], 'no other rail is frozen');
+      // no money silently created or destroyed: every booking balanced, the difference is visible, not hidden
+      assert.equal((await one(`SELECT COALESCE(sum(amount_cents), 0)::bigint AS s FROM ledger_entries WHERE org_id = $1`, [c.orgId])).s, invBefore.s);
+      assert.equal((await import('../src/services/ledger').then((l) => l.checkLedgerInvariants(c.pool as never, c.orgId))).ok, true);
+      // the unrelated machine keeps booking; the frozen machine's money event is kept (deferred), not lost
+      const other = await event(3, 'CASH_IN', { amount: 4 });
+      assert.deepEqual((await q('SELECT type FROM money_transactions WHERE source_event_id = $1', [other.eventId])).map((x) => x.type), ['MACHINE_CASH_IN']);
+      const held = await event(2, 'CASH_IN', { amount: 2 });
+      assert.equal((await one('SELECT status FROM deferred_money_events WHERE event_id = $1', [held.eventId])).status, 'PENDING');
+      assert.equal((await q('SELECT 1 FROM money_transactions WHERE source_event_id = $1', [held.eventId])).length, 0);
+      // unrelated rails keep working (CASHLESS deposit at the cage, TITO sale)
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', { playerCard: st.card, amount: 1 })).statusCode, 200);
+      assert.equal((await post('cashier@example.com', '/api/v1/tickets/issue', { amount: 2 })).statusCode, 200);
       const after = await getJ('floor@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`);
       assert.equal(after.machines.find((x: any) => x.machineId === m(2).id).lines.find((l: any) => l.type === 'CASH_IN').unexplainedCents, -100);
       // the screens show it: freeze in the operator context, blocker in the day-close status, machine view
@@ -276,6 +297,7 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
       assert.equal((await post('accounting@example.com', `/api/v1/approvals/${ex.json().id}/decide`, { decision: 'APPROVED' })).statusCode, 200);
       const fz = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND machine_id = $2 AND lifted_at IS NULL`, [cid(), m(2).id])).id;
       assert.equal((await post('admin@example.com', `/api/v1/money/freezes/${fz}/lift`, { reason: 'explained by two people' })).json().lifted, true);
+      assert.deepEqual((await q('SELECT type FROM money_transactions WHERE source_event_id = $1', [held.eventId])).map((x) => x.type), ['MACHINE_CASH_IN'], 'replayed exactly once after the lift');
       assert.equal((await getJ('floor@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`)).canClose, true);
     });
 
@@ -313,6 +335,107 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
       assert.equal((await post('manager@example.com', `/api/v1/cash/movements/${drop.id}/confirm`, { totalCents: 100 })).json().movement.status, 'CONFIRMED');
       assert.equal((await getJ('cashier@example.com', '/api/v1/cashier/shift')).session, null);
       assert.equal((await one('SELECT status FROM cashier_sessions WHERE id = $1', [st.session])).status, 'CLOSED');
+    });
+
+    test('expected collection, one definition: ledger machines = CASHBOX ledger balance (UI endpoint = settlement); multiple machines, hopper, cash and vault movements do not change it; reset by the collection', async () => {
+      const L = await createLedgerCasino(c.pool as never, { orgId: c.orgId, code: `7EC${Date.now() % 100000}`, machines: 2, gateway: true });
+      await ensureVaultOpen(c.pool as never, L);
+      const ledger = await import('../src/services/ledger');
+      const ev = async (i: number, type: string, amount: number) => {
+        const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': L.gateway!.deviceId, 'x-gateway-key': L.gateway!.key },
+          payload: { events: [{ eventId: randomUUID(), type, machineId: L.machines[i].code, timestamp: new Date().toISOString(), amount }] } });
+        assert.equal(r.json().accepted, 1, r.body);
+        return r.json();
+      };
+      const expected = async (i: number) => getJ('manager@example.com', `/api/v1/cash/collections/expected/${L.machines[i].id}`);
+      const cashbox = (i: number) => ledger.getBalance(c.pool as never, c.orgId, { kind: 'CASHBOX', casinoId: L.id, machineId: L.machines[i].id } as never);
+      const same = async (i: number, cents: number) => {
+        const e = await expected(i);
+        assert.equal(e.basis, 'LEDGER_CASHBOX');
+        assert.deepEqual([e.cashCents, e.cash], [cents, cents / 100]);
+        assert.equal(e.cashCents, await cashbox(i), 'API expected = authoritative CASHBOX ledger balance');
+      };
+      await same(0, 0);
+      await ev(0, 'CASH_IN', 30); await ev(1, 'CASH_IN', 20); await ev(0, 'CASH_IN', 5);
+      await same(0, 3_500); await same(1, 2_000);
+      // hopper fill and a hopper payout move HOPPER, not the cashbox
+      const hf = await post('manager@example.com', `/api/v1/machines/${L.machines[0].id}/hopper-fills`, { amountCents: 10_000 });
+      assert.equal((await post('attendant@example.com', `/api/v1/machines/hopper-fills/${hf.json().movement.id}/confirm`, { totalCents: 10_000 })).json().movement.status, 'CONFIRMED');
+      assert.deepEqual((await ev(0, 'CASH_OUT', 10)).exceptions, []);
+      await same(0, 3_500);
+      // drawer / vault movements do not touch the cashbox
+      await openLedgerShift(c.pool as never, L, { cashierEmail: 'attendant@example.com', vaultEmail: 'manager@example.com', floatCents: 50_000 });
+      await same(0, 3_500); await same(1, 2_000);
+      // tickets are reported separately (paper), never part of the cash expectation
+      assert.equal((await expected(0)).ticketsCents, 0);
+      // collection: blind count = expected, second blind count; settlement uses the same amount; afterwards 0
+      const shown = (await expected(0)).cashCents;
+      const cnt = await post('manager@example.com', `/api/v1/machines/${L.machines[0].id}/collections/count`, { totalCents: shown });
+      const v = (await post('admin@example.com', `/api/v1/machines/collections/counts/${cnt.json().id}/verify`, { totalCents: shown })).json();
+      assert.equal(v.matches, true, JSON.stringify(v));
+      assert.deepEqual([Number(v.settlement.ledger_cents), Number(v.settlement.difference_cents)], [shown, 0], 'settled against the amount the UI showed');
+      assert.equal(Number(v.collection.expected_cash) * 100, shown, 'stored expected = shown expected');
+      await same(0, 0); await same(1, 2_000);
+      // after a vault movement (a drop from the shift) nothing changes either
+      await ev(0, 'CASH_IN', 7);
+      await same(0, 700);
+      const run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: L.id })).json();
+      assert.equal(run.ok, true, JSON.stringify(run.checks.filter((x: any) => !x.ok)));
+      // the legacy booking route refuses ledger machines (one path per machine)
+      assert.match((await post('manager@example.com', '/api/v1/cash/collections', { machineId: L.machines[1].id, countedCash: 20, countedTickets: 0 })).json().error, /on the ledger/);
+    });
+
+    test('expected collection, legacy machines: machine-reported cash since the last collection; the legacy booking and the MACHINE cutover use exactly that amount', async () => {
+      // a casino whose cash rails are on the ledger but whose machines are still LEGACY (the cutover window)
+      const L = await createCasinoShell(c.pool as never, { orgId: c.orgId, code: `7EL${Date.now() % 100000}`, machines: 2, gateway: true });
+      await cutoverCasinoRails(c.pool as never, L, ['VAULT', 'CASH', 'HANDPAY', 'TITO']);
+      const ev = async (i: number, type: string, amount: number) => {
+        const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': L.gateway!.deviceId, 'x-gateway-key': L.gateway!.key },
+          payload: { events: [{ eventId: randomUUID(), type, machineId: L.machines[i].code, timestamp: new Date().toISOString(), amount }] } });
+        assert.equal(r.json().accepted, 1, r.body);
+      };
+      const expected = async (i: number) => getJ('manager@example.com', `/api/v1/cash/collections/expected/${L.machines[i].id}`);
+      await ev(0, 'CASH_IN', 12); await ev(0, 'CASH_IN', 8); await ev(1, 'CASH_IN', 3);
+      let e = await expected(0);
+      assert.deepEqual([e.basis, e.cashCents, e.since], ['MACHINE_EVENTS', 2_000, null]);
+      assert.equal((await expected(1)).cashCents, 300);
+      // legacy booking (legacy machine): stores exactly the expectation the screen showed; difference 0; reset afterwards
+      const col = await post('manager@example.com', '/api/v1/cash/collections', { machineId: L.machines[1].id, countedCash: 3, countedTickets: 0 });
+      assert.equal(col.statusCode, 200, col.body);
+      assert.deepEqual([Number(col.json().expected_cash), Number(col.json().difference)], [3, 0]);
+      assert.equal((await expected(1)).cashCents, 0);
+      // MACHINE cutover of machine 0: the count of the shown amount passes the cutover check without a recount
+      e = await expected(0);
+      const cnt = await post('manager@example.com', '/api/v1/money/counts', { casinoId: L.id, context: 'MACHINE_DROP', machineId: L.machines[0].id, totalCents: e.cashCents });
+      await post('admin@example.com', `/api/v1/money/counts/${cnt.json().id}/verify`, { totalCents: e.cashCents });
+      const dry = (await post('admin@example.com', '/api/v1/money/cutover/dry-run', { rail: 'MACHINE', machineId: L.machines[0].id })).json();
+      const chk = dry.checks.find((x: any) => x.name.endsWith(':collection_matches_legacy_cash_in'));
+      assert.equal(chk.ok, true, JSON.stringify(chk));
+      assert.equal(dry.legacy.cashbox_expected, e.cashCents, 'cutover expectation = UI expectation');
+      // a wrong count is refused by the cutover with the same amount as the screen shows
+      const bad = await post('manager@example.com', '/api/v1/money/counts', { casinoId: L.id, context: 'MACHINE_DROP', machineId: L.machines[0].id, totalCents: e.cashCents + 100 });
+      await post('admin@example.com', `/api/v1/money/counts/${bad.json().id}/verify`, { totalCents: e.cashCents + 100 });
+      const dry2 = (await post('admin@example.com', '/api/v1/money/cutover/dry-run', { rail: 'MACHINE', machineId: L.machines[0].id })).json();
+      assert.deepEqual(dry2.checks.find((x: any) => x.name.endsWith(':collection_matches_legacy_cash_in')).detail.legacy, e.cashCents);
+      // recount with the shown amount, cut over: from now on the ledger CASHBOX (0) is the expectation
+      const ok = await post('manager@example.com', '/api/v1/money/counts', { casinoId: L.id, context: 'MACHINE_DROP', machineId: L.machines[0].id, totalCents: e.cashCents });
+      await post('admin@example.com', `/api/v1/money/counts/${ok.json().id}/verify`, { totalCents: e.cashCents });
+      const cut = await post('admin@example.com', '/api/v1/money/cutover', { rail: 'MACHINE', machineId: L.machines[0].id });
+      assert.equal(cut.json().ok, true, cut.body);
+      e = await expected(0);
+      assert.deepEqual([e.basis, e.cashCents], ['LEDGER_CASHBOX', 0]);
+    });
+
+    test('expected collection, pure legacy casino (no rail on the ledger): same definition for screen and legacy booking', async () => {
+      const L = await createCasinoShell(c.pool as never, { orgId: c.orgId, code: `7EP${Date.now() % 100000}`, machines: 1, gateway: true });
+      const r = await c.app.inject({ method: 'POST', url: '/api/v1/gateway/events', headers: { 'x-gateway-id': L.gateway!.deviceId, 'x-gateway-key': L.gateway!.key },
+        payload: { events: [{ eventId: randomUUID(), type: 'CASH_IN', machineId: L.machines[0].code, timestamp: new Date().toISOString(), amount: 45 }] } });
+      assert.equal(r.json().accepted, 1);
+      const e = await getJ('manager@example.com', `/api/v1/cash/collections/expected/${L.machines[0].id}`);
+      assert.deepEqual([e.basis, e.cashCents], ['MACHINE_EVENTS', 4_500]);
+      const col = await post('manager@example.com', '/api/v1/cash/collections', { machineId: L.machines[0].id, countedCash: 44, countedTickets: 0 });
+      assert.deepEqual([Number(col.json().expected_cash), Number(col.json().difference)], [45, -1], 'legacy difference against the same expectation (alert raised as before)');
+      assert.equal((await q(`SELECT 1 FROM money_transactions WHERE machine_id = $1`, [L.machines[0].id])).length, 0, 'legacy: no ledger money');
     });
 
     test('read views write nothing and every one of them is permission-guarded', async () => {

@@ -309,6 +309,12 @@ cannot produce a ledger movement on a legacy rail. The window C is operational, 
 - **Ledger ↔ meters** (plan section 5): reconciliation check `machine.ledger_matches_meters` compares, per
   machine and money event type since its cutover, the reported amounts with the ledger bookings of those
   events; a difference freezes only that machine (explained by four eyes, never edited).
+- **Expected machine collection, one definition** (`services/collections.ts`), used by `/cash/collections/expected`,
+  the legacy booking `/cash/collections`, the ledger collection settlement and the MACHINE cutover check:
+  a machine on the ledger expects its CASHBOX ledger balance; a machine still LEGACY expects the cash it reported
+  (CASH_IN / COIN_IN events received since its last collection). Paper tickets are reported separately and never
+  change the cash expectation. Ledger machines cannot use the legacy booking route (409); their collection is the
+  blind count + blind second count in the Vault screen.
 - Operator wording uses CASH, TITO, CASHLESS, HANDPAY and MACHINE CREDIT; gaming meters are shown as bets /
   wins (database fields `coin_in` / `coin_out` stay for adapter compatibility).
 

@@ -6,6 +6,7 @@ import { CASH_TX_LABEL } from '@/lib/cashier';
 import { useSession } from '@/lib/session';
 import { Card, ErrorNote, Field, Kpi, Notice, PageHeader, Stat } from '@/components/ui';
 import { clsx } from '@/components/clsx';
+import { formatCents } from '@/lib/money';
 
 function Collection({ onDone }: { onDone: () => void }) {
   const { casino } = useSession();
@@ -23,7 +24,7 @@ function Collection({ onDone }: { onDone: () => void }) {
     setMsg(null);
     if (id) setExp(await api(`/cash/collections/expected/${id}`));
   };
-  const diff = exp && cash !== '' && tickets !== '' ? Number(cash) + Number(tickets) - exp.cash - exp.tickets : null;
+  const diff = exp && cash !== '' && tickets !== '' ? Number(cash) + Number(tickets) - (exp.cashCents + exp.ticketsCents) / 100 : null;
   const save = async () => {
     try {
       const r = await api('/cash/collections', { method: 'POST', json: { machineId, countedCash: Number(cash), countedTickets: Number(tickets), note: note || undefined } });
@@ -37,14 +38,24 @@ function Collection({ onDone }: { onDone: () => void }) {
   return (
     <div className="space-y-3">
       <Field label="Machine">
-        <select className="input" value={machineId} onChange={(e) => select(e.target.value)}>
+        <select className="input" value={machineId} onChange={(e) => select(e.target.value)} data-testid="collection-machine">
           <option value="">Select machine...</option>
           {machines.data?.map((m) => <option key={m.id} value={m.id}>{m.asset_no} · {m.manufacturer} · {m.floor_name}</option>)}
         </select>
       </Field>
       {exp && (
+        <div data-testid="expected-collection" data-basis={exp.basis} data-cash-cents={exp.cashCents}>
+          <Notice>
+            Expected {exp.since ? `since ${formatDateTime(exp.since)}` : 'since the first event'}: cash <b data-testid="expected-cash">{formatCents(exp.cashCents)}</b>, tickets <b>{formatCents(exp.ticketsCents)}</b>
+            <div className="mt-1 text-xs text-sub">{exp.basis === 'LEDGER_CASHBOX' ? 'Basis: the machine\'s CASHBOX on the ledger (what the collection is settled against).' : 'Basis: cash reported by the machine since its last collection (the MACHINE cutover uses the same amount).'}</div>
+          </Notice>
+        </div>
+      )}
+      {exp && exp.basis === 'LEDGER_CASHBOX' && (
+        <Notice>This machine is on the ledger: collect it in the Vault screen with a blind count and a second blind count.</Notice>
+      )}
+      {exp && exp.basis !== 'LEDGER_CASHBOX' && (
         <>
-          <Notice>Expected since {formatDateTime(exp.since)}: cash <b>{formatEuro(exp.cash)}</b>, tickets <b>{formatEuro(exp.tickets)}</b></Notice>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Counted cash"><input className="input" inputMode="decimal" value={cash} onChange={(e) => setCash(e.target.value)} /></Field>
             <Field label="Counted tickets"><input className="input" inputMode="decimal" value={tickets} onChange={(e) => setTickets(e.target.value)} /></Field>

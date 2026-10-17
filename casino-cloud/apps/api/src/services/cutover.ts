@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { withTransaction, writeAudit, type Pool, type PoolClient } from '@m1/database';
 import {
-  ACCOUNT_KIND_RAIL, CASHBOX_IN_EVENT_TYPES, CUTOVER_PREREQUISITES, CUTOVER_SCOPE, MACHINE_MONEY_EVENT_TYPES, cents,
+  ACCOUNT_KIND_RAIL, CUTOVER_PREREQUISITES, CUTOVER_SCOPE, MACHINE_MONEY_EVENT_TYPES, cents,
   type AccountKind, type AccountRef, type BackfillSource, type CutoverRail,
 } from '@m1/shared';
+import { expectedCollection } from './collections';
 import { HttpError } from '../auth';
 import { executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
 import { railOnLedger } from './rails';
@@ -457,14 +458,13 @@ async function planMachine(ctx: Ctx): Promise<RailPlan> {
   const openings: PlannedOpening[] = [];
   let collected = 0;
   if (countOk) {
-    const legacy = await one<{ since: string | null; cash_cents: number; later_events: number }>(db,
-      `WITH last AS (SELECT max(period_end) AS since FROM cash_collections WHERE machine_id = $1)
-       SELECT (SELECT since FROM last) AS since,
-         round(COALESCE((SELECT sum(e.amount) FROM machine_events e WHERE e.machine_id = $1 AND e.type = ANY($2)
-           AND e.received_at > COALESCE((SELECT since FROM last), '-infinity') AND e.received_at <= $3), 0) * 100)::bigint AS cash_cents,
-         (SELECT count(*)::int FROM machine_events e WHERE e.machine_id = $1 AND e.type = ANY($4) AND e.received_at > $3) AS later_events`,
-      [machineId, [...CASHBOX_IN_EVENT_TYPES], count!.created_at, [...MACHINE_MONEY_EVENT_TYPES]],
+    // Step 7e: the cash expectation is the one shared definition (services/collections.ts), up to the count.
+    const expected = await expectedCollection(db, ctx.orgId, machineId!, { until: count!.created_at });
+    const later = await one<{ later_events: number }>(db,
+      `SELECT (SELECT count(*)::int FROM machine_events e WHERE e.machine_id = $1 AND e.type = ANY($3) AND e.received_at > $2) AS later_events`,
+      [machineId, count!.created_at, [...MACHINE_MONEY_EVENT_TYPES]],
     );
+    const legacy = { since: expected.since, cash_cents: expected.cashCents, later_events: later.later_events };
     Object.assign(ctx.legacy, { cashbox_expected: legacy.cash_cents, collected: count!.total_cents, money_events_after_collection: legacy.later_events });
     check(ctx, `${label}:collection_matches_legacy_cash_in`, count!.total_cents === legacy.cash_cents, { legacy: legacy.cash_cents, counted: count!.total_cents, since: legacy.since });
     check(ctx, `${label}:idle_since_collection`, legacy.later_events === 0, { events: legacy.later_events });

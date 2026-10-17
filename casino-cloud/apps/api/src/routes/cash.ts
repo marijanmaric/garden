@@ -5,23 +5,11 @@ import { round2 } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
+import { expectedCollection } from '../services/collections';
 import { idempotent } from '../services/idempotency';
 import { openAlert } from '../services/alerts';
 
 /** Expected cashbox content of a machine since its last collection, derived from the ledger. */
-async function expectedDrop(orgId: string, machineId: string) {
-  const r = await pool.query(
-    `WITH last AS (SELECT max(period_end) AS since FROM cash_collections WHERE machine_id = $2)
-     SELECT COALESCE((SELECT since FROM last), (SELECT min(occurred_at) FROM gaming_transactions WHERE machine_id = $2), now()) AS since,
-       COALESCE(sum(t.amount) FILTER (WHERE t.type = 'CASH_IN'), 0) AS cash,
-       COALESCE(sum(t.amount) FILTER (WHERE t.type = 'TICKET_IN'), 0) AS tickets
-     FROM gaming_transactions t
-     WHERE t.org_id = $1 AND t.machine_id = $2 AND t.occurred_at > COALESCE((SELECT since FROM last), '-infinity')`,
-    [orgId, machineId],
-  );
-  return r.rows[0] as { since: string; cash: number; tickets: number };
-}
-
 export async function cashRoutes(app: FastifyInstance) {
   app.get('/api/v1/cash/overview', { preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
@@ -51,7 +39,10 @@ export async function cashRoutes(app: FastifyInstance) {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
     const m = await pool.query('SELECT id, asset_no FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3)', [machineId, req.auth.orgId, req.auth.casinoIds]);
     if (!m.rowCount) throw new HttpError(404, 'Machine not found');
-    return { machineId, assetNo: m.rows[0].asset_no, ...(await expectedDrop(req.auth.orgId, machineId)) };
+    // Step 7e: the one authoritative definition (services/collections.ts): CASHBOX ledger balance for a
+    // ledger machine, machine-reported cash since the last collection for a legacy machine.
+    const e = await expectedCollection(pool, req.auth.orgId, machineId);
+    return { machineId, assetNo: m.rows[0].asset_no, basis: e.basis, since: e.since, cashCents: e.cashCents, ticketsCents: e.ticketsCents, cash: e.cashCents / 100, tickets: e.ticketsCents / 100 };
   });
 
   /** Records a machine drop count. Differences against the meters raise an alert. */
@@ -65,7 +56,10 @@ export async function cashRoutes(app: FastifyInstance) {
       if (!m.rowCount) throw new HttpError(404, 'Machine not found');
       if ((await db.query(`SELECT money_rail_ledger($1, $2, 'MACHINE', $3) AS l`, [req.auth.orgId, m.rows[0].casino_id, body.machineId])).rows[0].l)
         throw new HttpError(409, 'This machine is on the ledger: collect with a verified count (/api/v1/machines/:id/collections/count)');
-      const exp = await expectedDrop(req.auth.orgId, body.machineId);
+      const e = await expectedCollection(db, req.auth.orgId, body.machineId);
+      // first collection of a machine: the period starts with its first reported event (or now)
+      const since = e.since ?? (await db.query('SELECT COALESCE(min(received_at), now()) AS t FROM machine_events WHERE machine_id = $1', [body.machineId])).rows[0].t;
+      const exp = { since, cash: e.cashCents / 100, tickets: e.ticketsCents / 100 };
       const difference = round2(body.countedCash + body.countedTickets - exp.cash - exp.tickets);
       const r = await db.query(
         `INSERT INTO cash_collections (org_id, casino_id, machine_id, period_start, period_end, expected_cash, expected_tickets, counted_cash, counted_tickets, difference, note, collected_by)

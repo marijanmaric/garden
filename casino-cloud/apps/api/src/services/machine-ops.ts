@@ -1,9 +1,10 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { cents } from '@m1/shared';
+import { expectedCollection } from './collections';
 import { HttpError } from '../auth';
 import type { CashActor } from './cash-ops';
 import { mainVaultOf, readyVaultSession } from './cash-ops';
-import { entityDedupeKey, executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
+import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
 import { railOnLedger } from './rails';
 import { countTotal, recordCashCount, type CountInput } from './vault';
 
@@ -124,7 +125,8 @@ export async function verifyCollectionCount(db: Db, a: CashActor, countId: strin
   const later = await one<{ n: number }>(db, `SELECT count(*)::int n FROM machine_events WHERE machine_id = $1 AND type = 'CASH_IN' AND received_at > $2`, [m.id, c.created_at]);
   if (later.n) throw new HttpError(409, 'The machine accepted cash after the count: count again');
 
-  const ledgerCents = await getBalance(db, a.orgId, { kind: 'CASHBOX', casinoId: m.casino_id, machineId: m.id });
+  // the one expected-collection definition (services/collections.ts): the machine's CASHBOX ledger balance
+  const ledgerCents = (await expectedCollection(db, a.orgId, m.id)).cashCents;
   const counted = Number(c.total_cents);
   const difference = counted - ledgerCents;
   const vaultId = await mainVaultOf(db, m.casino_id);
