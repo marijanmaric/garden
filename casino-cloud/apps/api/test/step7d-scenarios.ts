@@ -109,6 +109,7 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       assert.equal((await q('SELECT 1 FROM machine_events WHERE event_id = $1', [out.eventId])).length, 1);
       assert.deepEqual(await txOf(out.eventId), []);
       assert.ok(await one(`SELECT 1 FROM audit_logs WHERE entity_id = $1 AND action = 'machine_event.rejected'`, [out.eventId]));
+      assert.ok(await one(`SELECT 1 FROM alerts WHERE machine_id = $1 AND type = 'MACHINE_EVENT_REJECTED' AND severity = 'CRITICAL'`, [m(0).id]));
       assert.equal((await event(0, 'CASH_OUT', { amount: 5 }, { eventId: out.eventId })).body.duplicates, 1, 'a resend is a duplicate');
       // hopper fill: requested by the vault, a count mismatch at the machine rejects, then confirmed
       const fill = await post('manager@example.com', `/api/v1/machines/${m(0).id}/hopper-fills`, { amountCents: 10_000 });
@@ -326,6 +327,8 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       }
       const other = await event(1, 'CASH_IN', { amount: 4 }, { casino: x });
       assert.equal((await txOf(other.eventId))[0].type, 'MACHINE_CASH_IN', 'the other machine continues');
+      await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId: c.orgId, type: 'MACHINE_CASH_IN', dedupeKey: `f-${randomUUID()}`, actor: { type: 'SYSTEM' },
+        ctx: { casinoId: x.id, machineId: m(0, x).id, amountCents: cents(100) } })), /MACHINE is frozen/, 'no booking on the frozen machine, even directly');
       const l = await lift(freezeId);
       assert.equal(l.json().lifted, true, l.body);
       assert.deepEqual(l.json().replayedMachine.map((r: { eventId: string }) => r.eventId), [cashIn.eventId]);
@@ -370,6 +373,88 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       assert.equal(run.ok, true, JSON.stringify(run.checks.filter((k: { ok: boolean }) => !k.ok)));
     });
 
+    test('late event A / B / C: occurred on closed day A, received on day B, posted on open day C only through the approved late-event booking', async () => {
+      const x = await newCasino('7DA');
+      const [dayA, dayB, dayC] = [await day(-3, x.id), await day(-1, x.id), await day(0, x.id)];
+      const runId = (await one(`INSERT INTO reconciliation_runs (org_id, casino_id, trigger, ok, checks) VALUES ($1,$2,'MANUAL',true,'[]') RETURNING id`, [c.orgId, x.id])).id;
+      await q(`INSERT INTO business_day_closes (casino_id, business_date, org_id, closed_by, reconciliation_run_id) VALUES ($1,$2,$3,$4,$5)`, [x.id, dayA, c.orgId, c.emp['manager@example.com'], runId]);
+      // received on day B (yesterday): the ingestion stored the event with its deferred record (day A closed, not booked)
+      const eventId = randomUUID();
+      await tx(async (db) => {
+        await db.query(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at, received_at) VALUES ($1,$2,$3,$4,'CASH_IN',7,now() - interval '72 hours', now() - interval '24 hours')`,
+          [eventId, c.orgId, x.id, m(0, x).id]);
+        await db.query(`INSERT INTO deferred_money_events (event_id, org_id, casino_id, machine_id, rail, kind, amount_cents, reason) VALUES ($1,$2,$3,$4,'MACHINE','CASH_IN',700,'LATE_EVENT')`, [eventId, c.orgId, x.id, m(0, x).id]);
+      });
+      await tx((db) => svc.machine.replayDeferredMachine(db as never, { eventId }));
+      const original = await one(`SELECT to_jsonb(e) AS j FROM machine_events e WHERE event_id = $1`, [eventId]);
+      const dates = await one(`SELECT (occurred_at AT TIME ZONE 'UTC')::text AS o, (received_at AT TIME ZONE 'UTC')::text AS r, business_date::text AS bd, last_error FROM deferred_money_events WHERE event_id = $1`, [eventId]);
+      assert.equal(dates.bd, dayA);
+      assert.match(dates.last_error, /Business date .* is closed/);
+      assert.deepEqual(await txOf(eventId), [], 'no money before approval');
+      // a late posting cannot be forced around the approval
+      await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, {
+        orgId: c.orgId, type: 'MACHINE_CASH_IN', dedupeKey: `late-${randomUUID()}`, sourceEventId: eventId, actor: { type: 'SYSTEM' }, ctx: { casinoId: x.id, machineId: m(0, x).id, amountCents: cents(700) },
+        latePosting: { approvalId: randomUUID(), originalBusinessDate: dayA, occurredAt: 'x', receivedAt: 'x', reason: 'forced', requestedBy: c.emp['floor@example.com'], approvedBy: c.emp['accounting@example.com'] },
+      })), /approved four-eyes late-event booking/);
+      // unauthorized request / decision, one-person approval, a rejection: nothing moves
+      assert.equal((await post('cashier@example.com', `/api/v1/money/deferred/${eventId}/late-booking`, { reason: 'cashier may not request this' })).statusCode, 403);
+      const r1 = await post('floor@example.com', `/api/v1/money/deferred/${eventId}/late-booking`, { reason: 'Gateway offline, day A already closed' });
+      assert.equal(r1.statusCode, 200, r1.body);
+      assert.equal((await post('cashier@example.com', `/api/v1/approvals/${r1.json().id}/decide`, { decision: 'APPROVED' })).statusCode, 403);
+      assert.match((await post('floor@example.com', `/api/v1/approvals/${r1.json().id}/decide`, { decision: 'APPROVED' })).json().error, /requester cannot approve/);
+      assert.equal((await post('manager@example.com', `/api/v1/approvals/${r1.json().id}/decide`, { decision: 'REJECTED' })).json().booking, null);
+      assert.deepEqual(await txOf(eventId), []);
+      assert.equal((await one('SELECT status FROM deferred_money_events WHERE event_id = $1', [eventId])).status, 'PENDING');
+      // approved by a second person: posted on C, explicitly as a late event of A
+      const r2 = await post('floor@example.com', `/api/v1/money/deferred/${eventId}/late-booking`, { reason: 'Gateway offline, day A already closed' });
+      const ok = await post('accounting@example.com', `/api/v1/approvals/${r2.json().id}/decide`, { decision: 'APPROVED' });
+      assert.equal(ok.statusCode, 200, ok.body);
+      const mt = await one(`SELECT id, type, amount_cents, business_date::text AS d, source_event_id, actor_type, actor_id, approved_by, reason, options FROM money_transactions WHERE source_event_id = $1`, [eventId]);
+      assert.deepEqual([mt.type, mt.amount_cents, mt.d, mt.source_event_id], ['MACHINE_CASH_IN', 700, dayC, eventId], 'posted on C');
+      assert.deepEqual([mt.actor_type, mt.actor_id, mt.approved_by], ['EMPLOYEE', c.emp['floor@example.com'], c.emp['accounting@example.com']], 'both people on the posting');
+      assert.match(mt.reason, new RegExp(`Late event ${eventId}: occurred .* on closed business date ${dayA}, received .*approved late posting \\(Gateway offline`));
+      assert.deepEqual([mt.options.lateEvent.originalBusinessDate, mt.options.lateEvent.approvalId, mt.options.lateEvent.requestedBy, mt.options.lateEvent.approvedBy, mt.options.lateEvent.sourceEventId],
+        [dayA, r2.json().id, c.emp['floor@example.com'], c.emp['accounting@example.com'], eventId]);
+      assert.equal(new Date(mt.options.lateEvent.occurredAt).toISOString().slice(0, 10) <= dayB, true);
+      // the original event and its dates are untouched; the deferred record keeps A and records C
+      assert.deepEqual((await one(`SELECT to_jsonb(e) AS j FROM machine_events e WHERE event_id = $1`, [eventId])).j, original.j);
+      await assert.rejects(c.pool.query(`UPDATE machine_events SET occurred_at = now() WHERE event_id = $1`, [eventId]));
+      const d = await one(`SELECT status, business_date::text AS bd, booked_business_date::text AS booked, (occurred_at AT TIME ZONE 'UTC')::text AS o, (received_at AT TIME ZONE 'UTC')::text AS r, replayed_at IS NOT NULL AS replayed, late_approval_id FROM deferred_money_events WHERE event_id = $1`, [eventId]);
+      assert.deepEqual([d.status, d.bd, d.booked, d.o, d.r, d.replayed, d.late_approval_id], ['PROCESSED', dayA, dayC, dates.o, dates.r, true, r2.json().id]);
+      await assert.rejects(c.pool.query(`UPDATE deferred_money_events SET business_date = $2 WHERE event_id = $1`, [eventId, dayC]));
+      // audit names it a late event with both people; reconciliation sees economic date A and posting date C
+      const audit = await one(`SELECT actor_id, details FROM audit_logs WHERE entity_id = $1 AND action = 'money.late_event_booked'`, [eventId]);
+      assert.deepEqual([audit.actor_id, audit.details.requestedBy, audit.details.originalBusinessDate, audit.details.bookedBusinessDate], [c.emp['accounting@example.com'], c.emp['floor@example.com'], dayA, dayC]);
+      assert.deepEqual(await one(`SELECT d.business_date::text AS economic, t.business_date::text AS posted FROM deferred_money_events d JOIN money_transactions t ON t.id = d.money_transaction_id WHERE d.event_id = $1`, [eventId]), { economic: dayA, posted: dayC });
+      const run = await recon(x.id);
+      assert.equal(run.ok, true, JSON.stringify(run.checks.filter((k: { ok: boolean }) => !k.ok)));
+      // the approval is used once
+      assert.equal((await one('SELECT status FROM approvals WHERE id = $1', [r2.json().id])).status, 'EXECUTED');
+      assert.match((await post('floor@example.com', `/api/v1/money/deferred/${eventId}/late-booking`, { reason: 'again, should be refused' })).json().error, /already processed/);
+    });
+
+    test('credit meter from the future (machine clock ahead): no settlement, durable recorded exception, only this machine frozen until explained', async () => {
+      const x = await newCasino('7DC');
+      await event(0, 'CASH_IN', { amount: 5 }, { casino: x });
+      const future = await event(0, 'CREDIT_METER', { creditCents: 0 }, { casino: x, at: new Date(Date.now() + 2 * 24 * 3600_000) });
+      assert.deepEqual([future.res.statusCode, future.body.accepted, future.body.exceptions[0]?.code], [200, 1, 'CLOCK_AHEAD']);
+      assert.deepEqual(await txOf(future.eventId), [], 'no settlement booked');
+      assert.equal((await q('SELECT 1 FROM machine_events WHERE event_id = $1', [future.eventId])).length, 1);
+      assert.ok(await one(`SELECT 1 FROM audit_logs WHERE entity_id = $1 AND action = 'machine_event.rejected'`, [future.eventId]));
+      assert.equal(await bal('MACHINE_CREDIT', { machineId: m(0, x).id }, x.id), 500, 'machine credit stays unsettled');
+      const run = await recon(x.id);
+      assert.deepEqual(run.checks.find((k: { key: string }) => k.key === 'machine.events_accounted').items, [`machine_event:${future.eventId}`]);
+      assert.deepEqual((await q(`SELECT machine_id FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [x.id])).map((f) => f.machine_id), [m(0, x).id]);
+      const other = await event(1, 'CASH_IN', { amount: 2 }, { casino: x });
+      assert.equal((await txOf(other.eventId))[0].type, 'MACHINE_CASH_IN', 'other machines continue');
+      await explain([`machine_event:${future.eventId}`], x.id);
+      assert.equal((await lift(run.frozen[0].id, 'clock fixed')).json().lifted, true);
+      // the next valid meter settles the full machine credit: nothing was lost by not replaying the stale report
+      const valid = await event(0, 'CREDIT_METER', { creditCents: 0 }, { casino: x });
+      assert.deepEqual((await txOf(valid.eventId)).map((t) => [t.type, t.amount_cents]), [['GAMING_SETTLEMENT', 500]]);
+      assert.equal((await event(0, 'CREDIT_METER', { creditCents: 0 }, { casino: x, eventId: future.eventId })).body.duplicates, 1);
+    });
+
     test('reconciliation: MACHINE and CASHLESS checks clean; a reservation mismatch freezes only CASHLESS', async () => {
       let run = await recon();
       assert.equal(run.ok, true, JSON.stringify(run.checks.filter((k: { ok: boolean }) => !k.ok)));
@@ -377,6 +462,11 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
         'cashless.reserved_matches_active_transfers', 'cashless.transfers_booked', 'machine.collections_booked', 'machine.deferred_business_date',
         'machine.events_accounted', 'machine.no_stale_deferred_events',
       ]);
+      // a legitimate transfer in flight (another player, another machine)
+      const p2 = await player();
+      await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', { playerCard: p2.cardNumber, amount: 50 });
+      const s2 = await session(1, p2.cardNumber);
+      const legit = (await transfer(s2.id, 'TO_MACHINE', 500)).json().transfer;
       // an active transfer row without its reservation booking (written around the service): CASHLESS mismatch
       const s = await session(2, st.card);
       const t = (await one(
@@ -386,9 +476,22 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       assert.deepEqual(run.frozen.map((f: { rail: string }) => f.rail), ['CASHLESS']);
       assert.match((await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', { playerCard: st.card, amount: 1 })).json().error, /CASHLESS is frozen/);
       assert.equal((await txOf((await event(2, 'CASH_IN', { amount: 1 })).eventId))[0].type, 'MACHINE_CASH_IN', 'machine cash continues');
+      // the machine's ack of the legitimate transfer is kept and deferred while CASHLESS is frozen (no booking)
+      const ack = await event(1, 'CASHLESS_IN', { amount: 5, transferId: legit.id });
+      assert.deepEqual([ack.body.accepted, ack.body.exceptions.length], [1, 0]);
+      assert.deepEqual(await txOf(ack.eventId), []);
+      assert.equal((await one('SELECT status, reason FROM deferred_money_events WHERE event_id = $1', [ack.eventId])).status, 'PENDING');
+      const walletId = (await one('SELECT id FROM wallets WHERE player_id = $1', [st.player])).id;
+      await assert.rejects(tx((db) => svc.ledger.executeMoneyTransaction(db, { orgId: c.orgId, type: 'CASH_DEPOSIT', dedupeKey: `f-${randomUUID()}`, actor: { type: 'SYSTEM' },
+        ctx: { casinoId: c.casino.id, amountCents: cents(100), playerId: st.player, walletId, cashierSessionId: st.shift } })), /CASHLESS is frozen/);
       await q(`UPDATE wallet_transfers SET status = 'FAILED', failure_reason = 'test' WHERE id = $1`, [t]);
-      assert.equal((await lift(run.frozen[0].id, 'corrected')).json().lifted, true);
+      const l = await lift(run.frozen[0].id, 'corrected');
+      assert.equal(l.json().lifted, true, l.body);
+      assert.deepEqual(l.json().replayedMachine.map((r: { eventId: string }) => r.eventId), [ack.eventId]);
+      assert.deepEqual((await txOf(ack.eventId)).map((x) => x.type), ['WALLET_TO_MACHINE_CONFIRM']);
+      assert.equal((await event(1, 'CASHLESS_IN', { amount: 5, transferId: legit.id }, { eventId: ack.eventId })).body.duplicates, 1);
       await gw(`/api/v1/gateway/cashless/sessions/${s.id}/close`, {});
+      await gw(`/api/v1/gateway/cashless/sessions/${s2.id}/close`, {});
     });
 
     test('guards: a legacy machine takes no transfer and no machine money; ingest of an unknown machine is still rejected', async () => {

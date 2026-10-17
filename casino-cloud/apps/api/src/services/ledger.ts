@@ -39,6 +39,23 @@ export interface ExecuteMoneyInput {
    * of its pending deferred record; a closed date is still refused. Not exposed by any API request.
    */
   businessDate?: string | null;
+  /**
+   * Step 7d: an approved late-event posting (D4). The booking lands on today's open business date, but the
+   * transaction itself records the original event, its occurred_at / received_at, the original (closed)
+   * business date, the reason and both people (requester = actor, decider = approver). Validated against
+   * the approved LATE_EVENT_BOOKING approval and the pending deferred record; never a free override.
+   */
+  latePosting?: LatePosting | null;
+}
+
+export interface LatePosting {
+  approvalId: string;
+  originalBusinessDate: string;
+  occurredAt: string;
+  receivedAt: string;
+  reason: string;
+  requestedBy: string;
+  approvedBy: string;
 }
 
 export interface MoneyTransactionRow {
@@ -165,6 +182,25 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
     if (!ok.rowCount) throw new HttpError(409, `Business date ${input.businessDate} does not match a pending deferred event`);
   }
 
+  // An approved late-event posting: only through the four-eyes LATE_EVENT_BOOKING of this very event, whose
+  // original business date is closed. The booking is attributed to both people and references the event.
+  if (input.latePosting) {
+    const lp = input.latePosting;
+    if (!input.sourceEventId || input.businessDate != null) throw new HttpError(409, 'A late-event posting needs its source event and books on the open business date');
+    const ok = await db.query(
+      `SELECT 1 FROM approvals ap JOIN deferred_money_events d ON d.event_id::text = ap.entity_id
+       WHERE ap.id = $1 AND ap.org_id = $2 AND ap.action = 'LATE_EVENT_BOOKING' AND ap.status = 'APPROVED' AND ap.entity_id = $3::text
+         AND ap.requested_by = $4 AND ap.decided_by = $5 AND ap.requested_by <> ap.decided_by
+         AND d.status = 'PENDING' AND d.business_date = $6::date
+         AND EXISTS (SELECT 1 FROM business_day_closes b WHERE b.casino_id = d.casino_id AND b.business_date = d.business_date)`,
+      [lp.approvalId, input.orgId, input.sourceEventId, lp.requestedBy, lp.approvedBy, lp.originalBusinessDate]);
+    if (!ok.rowCount) throw new HttpError(409, 'A late-event posting needs an approved four-eyes late-event booking of this event and its closed business date');
+    input = {
+      ...input, actor: { type: 'EMPLOYEE', employeeId: lp.requestedBy }, approvedBy: lp.approvedBy,
+      reason: `Late event ${input.sourceEventId}: occurred ${lp.occurredAt} on closed business date ${lp.originalBusinessDate}, received ${lp.receivedAt}; approved late posting (${lp.reason})`,
+    };
+  }
+
   // A closed business date takes no money (the database refuses it too); answer with a clear 409.
   const closed = await db.query(
     `SELECT d.business_date::text AS d FROM business_day_closes d JOIN casinos c ON c.id = d.casino_id
@@ -174,7 +210,10 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
   const refs = (Object.keys(REF_COLUMNS) as Array<keyof typeof REF_COLUMNS>).map((k) => input.ctx[k] ?? null);
-  const options = { payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents, backfillSource: input.ctx.backfillSource, floorClearing: input.ctx.floorClearing };
+  const options = {
+    payTo: input.ctx.payTo, payFrom: input.ctx.payFrom, source: input.ctx.source, feeCents: input.ctx.feeCents, backfillSource: input.ctx.backfillSource, floorClearing: input.ctx.floorClearing,
+    lateEvent: input.latePosting ? { sourceEventId: input.sourceEventId, ...input.latePosting } : undefined,
+  };
   const inserted = await db.query(
     `INSERT INTO money_transactions (org_id, casino_id, type, amount_cents, dedupe_key, request_hash,
        player_id, wallet_id, card_id, machine_id, cashier_session_id, vault_id, ticket_id, handpay_id, transfer_id,

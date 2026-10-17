@@ -5,6 +5,7 @@ import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { recordEventException } from './event-exceptions';
 import { ensureHandpayForJackpot } from './handpays';
 import { deferredToEvent, processMachineEvent } from './machine-money';
+import type { LatePosting } from './ledger';
 import type { Actor } from './players';
 import { processTitoEvent } from './tito';
 
@@ -49,11 +50,16 @@ export async function decideLateEventBooking(db: PoolClient, a: ScopedActor, app
   if (ap.action !== 'LATE_EVENT_BOOKING') throw new HttpError(409, 'Not a late-event booking');
   if (decision === 'REJECTED') return { approval: ap, booking: null };
   const d = await lockDeferred(db, a, ap.entity_id);
+  // The posting itself carries the original event, its dates, the reason and both people (validated by the ledger).
+  const late: LatePosting = {
+    approvalId: ap.id, originalBusinessDate: d.business_date, occurredAt: new Date(d.occurred_at).toISOString(), receivedAt: new Date(d.received_at).toISOString(),
+    reason: String(ap.payload?.reason ?? ''), requestedBy: ap.requested_by, approvedBy: a.employeeId!,
+  };
   let moneyTransactionId: string | null = null;
   let handpayId: string | null = null;
   let ticketId: string | null = null;
   if (d.rail === 'HANDPAY') {
-    let h = await ensureHandpayForJackpot(db, { orgId: d.org_id, casinoId: d.casino_id, machineId: d.machine_id, eventId: d.event_id, amountCents: Number(d.amount_cents) });
+    let h = await ensureHandpayForJackpot(db, { orgId: d.org_id, casinoId: d.casino_id, machineId: d.machine_id, eventId: d.event_id, amountCents: Number(d.amount_cents), latePosting: late });
     if (!h) h = (await db.query('SELECT * FROM handpays WHERE source_event_id = $1', [d.event_id])).rows[0];
     handpayId = h!.id;
     moneyTransactionId = (await db.query(`SELECT id FROM money_transactions WHERE handpay_id = $1 AND type = 'HANDPAY_CREATE_JACKPOT'`, [h!.id])).rows[0]?.id ?? null;
@@ -62,13 +68,13 @@ export async function decideLateEventBooking(db: PoolClient, a: ScopedActor, app
       orgId: d.org_id, casinoId: d.casino_id, machineId: d.machine_id, label: d.asset_no, eventId: d.event_id, type: d.kind,
       barcode: d.payload?.ticketBarcode ?? null, holdId: d.payload?.holdId ?? null, amountCents: Number(d.amount_cents), occurredAt: d.occurred_at,
     };
-    const r = await processTitoEvent(db, ev, null, out);
+    const r = await processTitoEvent(db, ev, null, out, late);
     if (r.outcome === 'DUPLICATE_BARCODE' || r.outcome === 'EXCEPTION_UNBOOKED')
       await recordEventException(db, ev, 'TITO', r.outcome, 'late ticket event cannot be booked', out);
     moneyTransactionId = r.moneyTransactionId;
     ticketId = r.ticketId;
   } else {
-    moneyTransactionId = (await processMachineEvent(db, deferredToEvent(d), null, out)).moneyTransactionId;
+    moneyTransactionId = (await processMachineEvent(db, deferredToEvent(d), null, out, late)).moneyTransactionId;
   }
   await db.query(
     `UPDATE deferred_money_events SET status = 'PROCESSED', replayed_at = now(), attempts = attempts + 1, last_error = NULL,

@@ -6,7 +6,7 @@ import { openAlert } from './alerts';
 import { recordEventException } from './event-exceptions';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { newBarcode, requireOpenSession, type SessionRow } from './cashier';
-import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type MoneyActor } from './ledger';
+import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type LatePosting, type MoneyActor } from './ledger';
 import { projectTicketCash, projectTicketVoid } from './legacy-projection';
 import type { Actor } from './players';
 import { railOnLedger } from './rails';
@@ -159,7 +159,7 @@ async function deferredAmount(db: Db, ev: TitoMachineEvent): Promise<number | nu
 }
 
 /** Books one ticket machine event. businessDate only for the replay of a deferred record (validated by the ledger). */
-export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, businessDate: string | null, out: BusMessage[]): Promise<{ outcome: string; ticketId: string | null; moneyTransactionId: string | null }> {
+export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, businessDate: string | null, out: BusMessage[], late: LatePosting | null = null): Promise<{ outcome: string; ticketId: string | null; moneyTransactionId: string | null }> {
   const clearing = await floorClearing(db, ev.orgId, ev.casinoId, ev.machineId);
   const machineCtx = { casinoId: ev.casinoId, machineId: ev.machineId, floorClearing: clearing || undefined };
 
@@ -179,7 +179,7 @@ export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, bus
       return { outcome: 'DUPLICATE_BARCODE', ticketId: null, moneyTransactionId: null };
     }
     const r = await executeMoneyTransaction(db, {
-      orgId: ev.orgId, type: 'TITO_ISSUE_MACHINE', dedupeKey: eventDedupeKey(ev.eventId, 'TITO_ISSUE_MACHINE'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate,
+      orgId: ev.orgId, type: 'TITO_ISSUE_MACHINE', dedupeKey: eventDedupeKey(ev.eventId, 'TITO_ISSUE_MACHINE'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate, latePosting: late,
       ctx: { ...machineCtx, amountCents: cents(t.amount_cents), ticketId: t.id },
     });
     await ticketEvent(db, t, 'ISSUED', { machineId: ev.machineId, at: ev.occurredAt, details: { transactionId: r.transaction.id, floorClearing: clearing } });
@@ -193,7 +193,7 @@ export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, bus
   if (t && validHere) {
     const policy = (await db.query('SELECT tito_offline_policy FROM casino_money_settings WHERE casino_id = $1', [ev.casinoId])).rows[0]?.tito_offline_policy ?? 'REJECT';
     const r = await executeMoneyTransaction(db, {
-      orgId: ev.orgId, type: 'TITO_REDEEM_MACHINE', dedupeKey: entityDedupeKey('ticket', t.id, 'redeem'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate,
+      orgId: ev.orgId, type: 'TITO_REDEEM_MACHINE', dedupeKey: entityDedupeKey('ticket', t.id, 'redeem'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate, latePosting: late,
       ctx: { ...machineCtx, amountCents: cents(t.amount_cents), ticketId: t.id },
     });
     await db.query(
@@ -221,7 +221,7 @@ export async function processTitoEvent(db: PoolClient, ev: TitoMachineEvent, bus
   const amount = ev.amountCents ?? 0;
   if (amount <= 0) return { outcome: 'EXCEPTION_UNBOOKED', ticketId: t?.id ?? null, moneyTransactionId: null };
   const r = await executeMoneyTransaction(db, {
-    orgId: ev.orgId, type: 'TITO_EXCEPTION', dedupeKey: eventDedupeKey(ev.eventId, 'TITO_EXCEPTION'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate,
+    orgId: ev.orgId, type: 'TITO_EXCEPTION', dedupeKey: eventDedupeKey(ev.eventId, 'TITO_EXCEPTION'), sourceEventId: ev.eventId, actor: GATEWAY, businessDate, latePosting: late,
     reason, ctx: { ...machineCtx, amountCents: cents(amount), ticketId: t?.id },
   });
   return { outcome: 'EXCEPTION', ticketId: t?.id ?? null, moneyTransactionId: r.transaction.id };

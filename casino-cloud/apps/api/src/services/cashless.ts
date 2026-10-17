@@ -1,7 +1,7 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { TRANSFER_TRANSITIONS, cents, type TransferDirection, type TransferStatus } from '@m1/shared';
 import { HttpError } from '../auth';
-import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
+import { entityDedupeKey, executeMoneyTransaction, type LatePosting, type MoneyActor } from './ledger';
 import { requireUsableCard, type Actor } from './players';
 import { assertWalletOperation, lockWallet, walletOfPlayer } from './wallets';
 import { railOnLedger, requireRailOnLedger } from './rails';
@@ -169,7 +169,7 @@ export async function markTransferSent(db: Db, a: Actor, transferId: string) {
  * machine is booked from CASHLESS_EXCEPTION (the wallet is not charged twice), machine -> wallet with the
  * released amount; both are alerted by the caller. businessDate only for a validated deferred replay.
  */
-export async function confirmTransfer(db: Db, a: Actor, input: { transferId: string; ackEventId?: string | null; confirmedAmountCents?: number; businessDate?: string | null }) {
+export async function confirmTransfer(db: Db, a: Actor, input: { transferId: string; ackEventId?: string | null; confirmedAmountCents?: number; businessDate?: string | null; latePosting?: LatePosting | null }) {
   const t = await lockTransfer(db, a.orgId, input.transferId);
   if (t.status === 'CONFIRMED' || t.status === 'LATE_CONFIRMED') {
     if ((input.ackEventId ?? null) === t.ack_event_id) return { transfer: t, replayed: true, late: t.status === 'LATE_CONFIRMED', moneyTransactionId: null as string | null };
@@ -184,7 +184,7 @@ export async function confirmTransfer(db: Db, a: Actor, input: { transferId: str
   const type = t.direction === 'FROM_MACHINE' ? 'MACHINE_TO_WALLET' as const : late ? 'WALLET_TO_MACHINE_LATE_CONFIRM' as const : 'WALLET_TO_MACHINE_CONFIRM' as const;
   const r = await executeMoneyTransaction(db, {
     orgId: a.orgId, type, ctx: ledgerCtx(t, amount), dedupeKey: entityDedupeKey('transfer', t.id, 'confirm'), actor: moneyActor(a),
-    sourceEventId: input.ackEventId ?? null, businessDate: input.businessDate ?? null, reason: late ? `Confirmed after ${t.status}` : null,
+    sourceEventId: input.ackEventId ?? null, businessDate: input.businessDate ?? null, latePosting: input.latePosting ?? null, reason: late ? `Confirmed after ${t.status}` : null,
   });
   const updated = await db.query(
     `UPDATE wallet_transfers SET status = $4, confirmed_amount_cents = $2, ack_event_id = $3, completed_at = now() WHERE id = $1 RETURNING *`,

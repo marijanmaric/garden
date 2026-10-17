@@ -171,7 +171,8 @@ async function handpayChecks(db: Db, casinoId: string, since: string) {
       items: await ids(
         `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'HANDPAY' AND d.status = 'PROCESSED'
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = d.event_id AND t.type = 'HANDPAY_CREATE_JACKPOT'
-                             AND t.handpay_id = d.handpay_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date) AND t.amount_cents = d.amount_cents)
+                             AND t.handpay_id = d.handpay_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date)
+                             AND (d.late_approval_id IS NULL OR t.options->'lateEvent'->>'approvalId' = d.late_approval_id::text) AND t.amount_cents = d.amount_cents)
          ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
@@ -242,7 +243,8 @@ async function titoChecks(db: Db, casinoId: string, since: string) {
       key: 'tito.deferred_business_date',
       items: await ids(
         `SELECT d.event_id AS id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'TITO' AND d.status = 'PROCESSED' AND d.money_transaction_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date))
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date)
+                             AND (d.late_approval_id IS NULL OR t.options->'lateEvent'->>'approvalId' = d.late_approval_id::text))
          ORDER BY d.event_id`, 'deferred_event', [casinoId]),
     },
     {
@@ -269,7 +271,9 @@ async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, st
       key: 'machine.events_accounted',
       items: await items(
         `SELECT e.event_id AS id, e.machine_id FROM machine_events e ${onLedger}
-         WHERE e.casino_id = $1 AND e.received_at > mc.as_of AND e.type IN ('CASH_IN', 'CASH_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
+         WHERE e.casino_id = $1 AND e.received_at > mc.as_of
+           AND (e.type IN ('CASH_IN', 'CASH_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
+                OR (e.type = 'CREDIT_METER' AND EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id)))
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
            AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
                 OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
@@ -287,7 +291,8 @@ async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, st
       key: 'machine.deferred_business_date',
       items: await items(
         `SELECT d.event_id AS id, d.machine_id FROM deferred_money_events d WHERE d.casino_id = $1 AND d.rail = 'MACHINE' AND d.status = 'PROCESSED' AND d.money_transaction_id IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date))
+           AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date)
+                             AND (d.late_approval_id IS NULL OR t.options->'lateEvent'->>'approvalId' = d.late_approval_id::text))
          ORDER BY d.event_id`, 'deferred_event'),
     },
     {

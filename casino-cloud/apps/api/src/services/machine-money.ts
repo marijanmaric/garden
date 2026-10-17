@@ -5,7 +5,7 @@ import type { BusMessage } from '../bus';
 import { openAlert } from './alerts';
 import { confirmTransfer, markTransferSent, type TransferRow } from './cashless';
 import { recordEventException } from './event-exceptions';
-import { eventDedupeKey, executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
+import { eventDedupeKey, executeMoneyTransaction, getBalance, type LatePosting, type MoneyActor } from './ledger';
 import { railOnLedger } from './rails';
 
 /**
@@ -87,11 +87,11 @@ export async function handleMachineMoneyEvent(db: PoolClient, ev: MachineMoneyEv
  * Books one machine money event. businessDate only for the replay of a deferred record (validated by the
  * ledger against the event). Throws HttpError for a business refusal (the caller records an exception).
  */
-export async function processMachineEvent(db: PoolClient, ev: MachineMoneyEvent, businessDate: string | null, out: BusMessage[]): Promise<{ outcome: string; moneyTransactionId: string | null }> {
+export async function processMachineEvent(db: PoolClient, ev: MachineMoneyEvent, businessDate: string | null, out: BusMessage[], late: LatePosting | null = null): Promise<{ outcome: string; moneyTransactionId: string | null }> {
   const base = { casinoId: ev.casinoId, machineId: ev.machineId, amountCents: cents(ev.amountCents!) };
   if (ev.type === 'CASH_IN' || ev.type === 'CASH_OUT') {
     const type = ev.type === 'CASH_IN' ? 'MACHINE_CASH_IN' as const : 'MACHINE_CASH_OUT' as const;
-    const r = await executeMoneyTransaction(db, { orgId: ev.orgId, type, dedupeKey: eventDedupeKey(ev.eventId, type), sourceEventId: ev.eventId, actor: GATEWAY, businessDate, ctx: base });
+    const r = await executeMoneyTransaction(db, { orgId: ev.orgId, type, dedupeKey: eventDedupeKey(ev.eventId, type), sourceEventId: ev.eventId, actor: GATEWAY, businessDate, latePosting: late, ctx: base });
     return { outcome: type, moneyTransactionId: r.transaction.id };
   }
   // cashless acks: the transfer they confirm
@@ -101,7 +101,7 @@ export async function processMachineEvent(db: PoolClient, ev: MachineMoneyEvent,
   if ((t.direction === 'TO_MACHINE') !== (ev.type === 'CASHLESS_IN')) throw new HttpError(409, `${ev.type} does not match the transfer direction ${t.direction}`);
   // the machine's ack proves the delivery: a transfer whose "sent" report was lost is SENT now (no money)
   if (t.status === 'REQUESTED') await markTransferSent(db, SYSTEM_ACTOR(ev.orgId), t.id);
-  const r = await confirmTransfer(db, SYSTEM_ACTOR(ev.orgId), { transferId: t.id, ackEventId: ev.eventId, confirmedAmountCents: ev.amountCents!, businessDate });
+  const r = await confirmTransfer(db, SYSTEM_ACTOR(ev.orgId), { transferId: t.id, ackEventId: ev.eventId, confirmedAmountCents: ev.amountCents!, businessDate, latePosting: late });
   if (r.late)
     await openAlert(db, { orgId: ev.orgId, casinoId: ev.casinoId, machineId: ev.machineId, type: 'CASHLESS_LATE_CONFIRM', severity: 'CRITICAL', message: `${ev.label} confirmed transfer ${t.id} after it was ${t.status}: booked as exception` }, out);
   return { outcome: r.late ? 'LATE_CONFIRMED' : 'CONFIRMED', moneyTransactionId: r.moneyTransactionId };
@@ -171,7 +171,7 @@ async function markProcessed(db: Db, d: Record<string, any>, moneyTransactionId:
  * machine is on the ledger and not frozen, the report is from today, and no later money event of the
  * machine is already booked. Otherwise nothing is booked (unreconciled, audited). Never estimated.
  */
-export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; casinoId: string; machineId: string; label: string; eventId: string; creditCents: number | null; occurredAt: string }) {
+export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; casinoId: string; machineId: string; label: string; eventId: string; creditCents: number | null; occurredAt: string }, out: BusMessage[] = []) {
   const skip = async (reason: string) => {
     await writeAudit(db, {
       orgId: ev.orgId, casinoId: ev.casinoId, actorType: 'SYSTEM', actorId: null, actorName: 'machine', action: 'machine.settlement_skipped',
@@ -180,6 +180,16 @@ export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; cas
     return { outcome: 'UNRECONCILED', reason, moneyTransactionId: null as string | null };
   };
   if (ev.creditCents === null || !Number.isInteger(ev.creditCents) || ev.creditCents < 0) return skip('no valid credit meter value');
+  // A meter report from the future means the machine clock is wrong: no settlement, a recorded exception
+  // (durable, audited, alerted; reconciliation freezes only this machine until two people explain it). A
+  // meter is a measurement, never replayed later: the next valid report settles the machine credit in full.
+  const ahead = (await db.query(
+    `SELECT $2::timestamptz > now() + interval '5 minutes' OR ($2::timestamptz AT TIME ZONE timezone)::date > (now() AT TIME ZONE timezone)::date AS ahead FROM casinos WHERE id = $1`,
+    [ev.casinoId, ev.occurredAt])).rows[0].ahead;
+  if (ahead) {
+    await recordEventException(db, { ...ev, type: 'CREDIT_METER' }, 'MACHINE', 'CLOCK_AHEAD', `credit meter report dated ${ev.occurredAt} is in the future: not settled`, out);
+    return { outcome: 'EXCEPTION', reason: 'clock ahead', moneyTransactionId: null as string | null };
+  }
   const m = (await db.query(
     `SELECT m.credit_meter_reliable, money_rail_frozen(m.org_id, m.casino_id, 'MACHINE', m.id) AS frozen,
        ($2::timestamptz AT TIME ZONE c.timezone)::date = (now() AT TIME ZONE c.timezone)::date AS today,

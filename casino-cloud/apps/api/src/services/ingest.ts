@@ -213,7 +213,7 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       if (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id))
         await withEventException(db, { ...ctx, eventId, type, label }, 'MACHINE', out, () => handleCreditMeter(db, {
           ...ctx, label, eventId, creditCents: ev.creditCents ?? null, occurredAt: timestamp,
-        }));
+        }, out));
       break;
     case 'JACKPOT_RESET':
       if (isNewer) flags.jackpotPending = false;

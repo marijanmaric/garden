@@ -3,7 +3,7 @@ import { HANDPAY_TRANSITIONS, WALLET_STATUS_OPERATIONS, cents, playerCan, type H
 import { HttpError } from '../auth';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { addCashTx, requireOpenSession } from './cashier';
-import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type MoneyActor } from './ledger';
+import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type LatePosting, type MoneyActor } from './ledger';
 import { projectHandpayCash } from './legacy-projection';
 import type { Actor } from './players';
 import { railOnLedger } from './rails';
@@ -67,7 +67,7 @@ const handpayOnLedger = (db: Db, h: { org_id: string; casino_id: string }) => ra
  * Creates the handpay for a jackpot event (idempotent: one handpay per event). On a ledger HANDPAY
  * rail the liability is booked in the same transaction (expense -> payable), keyed by the event.
  */
-export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number; businessDate?: string | null }) {
+export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; casinoId: string; machineId: string; eventId: string; amountCents: number; businessDate?: string | null; latePosting?: LatePosting | null }) {
   const r = await db.query(
     `INSERT INTO handpays (org_id, casino_id, machine_id, source_event_id, kind, amount_cents) VALUES ($1,$2,$3,$4,'JACKPOT',$5)
      ON CONFLICT ON CONSTRAINT handpays_one_per_event DO NOTHING RETURNING *`,
@@ -79,7 +79,7 @@ export async function ensureHandpayForJackpot(db: Db, input: { orgId: string; ca
   if (await handpayOnLedger(db, h)) {
     const tx = await executeMoneyTransaction(db, {
       orgId: input.orgId, type: 'HANDPAY_CREATE_JACKPOT', dedupeKey: eventDedupeKey(input.eventId, 'HANDPAY_CREATE_JACKPOT'), sourceEventId: input.eventId,
-      actor: { type: 'GATEWAY', name: 'jackpot' }, businessDate: input.businessDate ?? null,
+      actor: { type: 'GATEWAY', name: 'jackpot' }, businessDate: input.businessDate ?? null, latePosting: input.latePosting ?? null,
       ctx: { casinoId: input.casinoId, amountCents: cents(input.amountCents), machineId: input.machineId, handpayId: h.id },
     });
     await event(db, h, 'LIABILITY_BOOKED', null, null, null, { transactionId: tx.transaction.id });
