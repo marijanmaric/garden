@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type pg from 'pg';
-import { MODULES, PERMISSIONS, ROLE_PERMISSIONS, ROLES } from '@m1/shared';
+import { LIMIT_DEFS, MODULES, PERMISSIONS, PRODUCT_MODULE_DEFS, ROLE_PERMISSIONS, ROLES } from '@m1/shared';
 import { writeAudit } from './audit';
 
 export const DEMO_PASSWORD = 'demo';
@@ -262,11 +262,23 @@ export async function seed(pool: pg.Pool, log = console.log): Promise<boolean> {
     const eB = await client.query(`INSERT INTO employees (org_id, email, name, password_hash, role) VALUES ($1,'admin@riverside.example','Riverside Admin',$2,'SUPER_ADMIN') RETURNING id`, [orgB, pwHash]);
     await client.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3)', [eB.rows[0].id, casinoB, orgB]);
 
+    // --- Commercial entitlements: tenant A has every module (Enterprise), tenant B tickets and handpays only
+    const plan = async (code: string) => (await client.query('SELECT id FROM plans WHERE code = $1 ORDER BY version DESC LIMIT 1', [code])).rows[0].id;
+    await client.query(`INSERT INTO subscriptions (org_id, plan_id, status, note) VALUES ($1,$2,'ACTIVE','demo tenant')`, [org, await plan('ENTERPRISE')]);
+    await client.query(`INSERT INTO subscriptions (org_id, plan_id, status, note) VALUES ($1,$2,'ACTIVE','demo tenant')`, [orgB, await plan('TITO_HANDPAY')]);
+
+    // --- Platform operator: its own organisation (no casinos) with the platform administrator
+    const platform = (await client.query(`INSERT INTO organizations (name, slug, is_platform) VALUES ('M1 Platform','m1-platform', true) RETURNING id`)).rows[0].id;
+    await client.query(`INSERT INTO subscriptions (org_id, plan_id, status, note) VALUES ($1,$2,'ACTIVE','platform operator')`, [platform, await plan('CUSTOM')]);
+    await client.query(
+      `INSERT INTO employees (org_id, email, name, password_hash, role, is_platform_admin) VALUES ($1,'platform@example.com','Petra Platform',$2,'SUPER_ADMIN',true)`,
+      [platform, pwHash]);
+
     await writeAudit(client, { orgId: org, casinoId: casino, actorType: 'SYSTEM', actorName: 'seed', action: 'tenant.created', entityType: 'organization', entityId: org, details: { casinos: 1, machines: n } });
     await writeAudit(client, { orgId: orgB, casinoId: casinoB, actorType: 'SYSTEM', actorName: 'seed', action: 'tenant.created', entityType: 'organization', entityId: orgB });
 
     await client.query('COMMIT');
-    log(`[db] seeded demo data: 2 tenants, ${n} machines, 60 players, 7 jackpots`);
+    log(`[db] seeded demo data: 2 tenants + platform, ${n} machines, 60 players, 7 jackpots`);
     return true;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -289,6 +301,13 @@ export async function syncRbac(pool: pg.Pool): Promise<void> {
     for (const r of ROLES) await client.query('INSERT INTO roles (key, name) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', [r, r.replace(/_/g, ' ')]);
     for (const p of PERMISSIONS) await client.query('INSERT INTO permissions (key) VALUES ($1) ON CONFLICT DO NOTHING', [p]);
     await client.query('DELETE FROM role_permissions');
+    // Entitlement registries (migration 012): module and limit keys mirrored from code
+    if ((await client.query(`SELECT to_regclass('product_modules') IS NOT NULL AS ok`)).rows[0].ok) {
+      for (const m of Object.values(PRODUCT_MODULE_DEFS))
+        await client.query('INSERT INTO product_modules (key, name) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET name = EXCLUDED.name', [m.key, m.name]);
+      for (const [k, l] of Object.entries(LIMIT_DEFS))
+        await client.query('INSERT INTO product_limits (key, label, kind) VALUES ($1,$2,$3) ON CONFLICT (key) DO UPDATE SET label = EXCLUDED.label, kind = EXCLUDED.kind', [k, l.label, l.kind]);
+    }
     for (const r of ROLES)
       for (const p of ROLE_PERMISSIONS[r])
         await client.query('INSERT INTO role_permissions (role_key, permission_key) VALUES ($1,$2)', [r, p]);

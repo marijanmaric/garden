@@ -10,6 +10,7 @@
     "seed": "tsx src/cli.ts seed",
     "reset": "tsx src/cli.ts reset",
     "setup": "tsx src/cli.ts setup",
+    "platform-admin": "tsx src/cli.ts platform-admin",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
