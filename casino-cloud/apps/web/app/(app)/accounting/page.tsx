@@ -49,8 +49,8 @@ export default function AccountingPage() {
       <ErrorNote error={sum.error} />
       {s && (
         <div className="grid grid-cols-2 gap-4 md:grid-cols-4 xl:grid-cols-8">
-          <Kpi label="Coin In" value={formatEuro(s.coinIn, true)} />
-          <Kpi label="Coin Out" value={formatEuro(s.coinOut, true)} />
+          <Kpi label="Bets" value={formatEuro(s.coinIn, true)} />
+          <Kpi label="Wins" value={formatEuro(s.coinOut, true)} />
           <Kpi label="Jackpots" value={formatEuro(s.jackpots, true)} />
           <Kpi label="GGR" value={formatEuro(s.ggr, true)} sub={`Hold ${s.coinIn ? ((s.ggr / s.coinIn) * 100).toFixed(2) : 0}%`} />
           <Kpi label="NGR" value={formatEuro(s.ngr, true)} sub={`Adj. ${formatEuro(s.adjustments)}`} />
@@ -65,7 +65,7 @@ export default function AccountingPage() {
         </Card>
         <Card title="Per machine" bodyClass="max-h-[260px] overflow-auto">
           <table className="table">
-            <thead><tr><th>Asset</th><th>Manufacturer</th><th className="text-right">Coin In</th><th className="text-right">Coin Out</th><th className="text-right">GGR</th></tr></thead>
+            <thead><tr><th>Asset</th><th>Manufacturer</th><th className="text-right">Bets</th><th className="text-right">Wins</th><th className="text-right">GGR</th></tr></thead>
             <tbody>
               {sum.data?.byMachine.map((m: any) => (
                 <tr key={m.id}>

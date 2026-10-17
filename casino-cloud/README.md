@@ -279,15 +279,48 @@ cannot produce a ledger movement on a legacy rail. The window C is operational, 
   four-eyes late-event booking (`/money/deferred/:eventId/late-booking`) on today's open date; the original date stays.
 - Reconciliation adds MACHINE (per-machine freeze) and CASHLESS (organisation-wide) checks.
 
+### Operator screens and reconciliation (Step 7e)
+
+- **Principle:** simple for the operator, powerful underneath. The screens only show state and ask for
+  confirmations; every money action goes through the existing guarded API (MoneyService, rail guards,
+  freezes, four eyes, closed business dates). No balance is computed in the browser.
+- **Cashier** (`/cashier`, ledger casinos): shift opens empty (float = vault fill, confirmed by a blind
+  count), one scan field for TITO tickets and player cards, TITO payout (CASH or CASHLESS wallet),
+  CASHLESS deposit / withdrawal, HANDPAY (CASH or wallet), TITO sale, own approval requests, close by blind
+  count (short / over approval, final drop). Generic cash in / out is not offered on the ledger. LEGACY
+  casinos keep the previous workstation. The mobile cashier uses the same ledger panels.
+- **Vault** (`/vault`): vault session with blind opening / closing counts verified by a second person,
+  fills to shifts, drops from shifts, hopper fills and machine collections (blind counts, second count).
+- **Approvals** (`/approvals`): one inbox for every four-eyes request with amount, affected ticket /
+  machine / player / shift, requester and decider; the requester cannot decide; history with notes.
+- **Reconciliation** (`/reconciliation`): latest run per rail with open items (four-eyes explanation),
+  ledger ↔ meters per machine and period, unresolved deferred events and exceptions, and the exact list
+  of what blocks the business-day close.
+- **Money control** (`/money`): rail state LEGACY / LEDGER, cutover counts (blind, four eyes), dry run and
+  cutover, freezes and lift, deferred events (late booking of a closed date), event exceptions, legacy
+  handpay exceptions. Machine detail shows the machine's money rail, freezes, MACHINE CREDIT meter,
+  deferred events, exceptions and hopper fills to confirm at the machine.
+- **Every money-moving action** shows a confirmation with the exact amount and entity, uses one
+  Idempotency-Key per operator intent (a retry of the same intent replays, it never books twice), shows a
+  deterministic result (done, already done, or the API's refusal) and surfaces approval requirements first.
+- **Read views** (no writes): `/operator/context`, `/cashier/shift`, `/players/lookup/:card`,
+  `/vault/status`, `/money/deferred`, `/money/day-close/status`, `/money/reconciliation/meters`,
+  `/money/counts`, `/machines/:id/money`; `/approvals` and `/machines/event-exceptions` carry names and states.
+- **Ledger ↔ meters** (plan section 5): reconciliation check `machine.ledger_matches_meters` compares, per
+  machine and money event type since its cutover, the reported amounts with the ledger bookings of those
+  events; a difference freezes only that machine (explained by four eyes, never edited).
+- Operator wording uses CASH, TITO, CASHLESS, HANDPAY and MACHINE CREDIT; gaming meters are shown as bets /
+  wins (database fields `coin_in` / `coin_out` stay for adapter compatibility).
+
 ### Accounting definitions
 
 | Metric | Definition |
 |---|---|
-| Coin In | Sum of wagers (`WAGER` ledger rows from `GAME_PLAYED`) |
-| Coin Out | Sum of game wins (`WIN`) |
-| GGR | Coin In - Coin Out - Jackpots |
+| Bets (turnover) | Sum of wagers (`WAGER` ledger rows from `GAME_PLAYED`; field `coin_in`) |
+| Wins | Sum of game wins (`WIN`; field `coin_out`) |
+| GGR | Bets - Wins - Jackpots |
 | NGR | GGR + adjustments (promotional credits will be deducted once promotions exist) |
-| Cash In | Bills/coins inserted (`COIN_IN` events) |
+| Cash In | Bills inserted (`CASH_IN` events; legacy protocol name `COIN_IN`) |
 | Tickets In / Out | TITO ticket values accepted / printed |
 
 Business day = calendar day in the casino's timezone.

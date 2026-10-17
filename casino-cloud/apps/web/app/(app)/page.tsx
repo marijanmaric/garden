@@ -29,7 +29,7 @@ export default function DashboardPage() {
 
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Kpi label="Machines" icon={Monitor} value={`${m.online}/${m.total}`} sub={`${m.offline} offline · ${m.maintenance} maintenance`} />
-        <Kpi label="Coin In" icon={Coins} value={formatEuro(f.coinIn, true)} sub={`${formatNumber(f.gamesPlayed)} games today`} />
+        <Kpi label="Bets" icon={Coins} value={formatEuro(f.coinIn, true)} sub={`${formatNumber(f.gamesPlayed)} games today`} />
         <Kpi label="GGR" icon={TrendingUp} value={formatEuro(f.ggr, true)} accent="bg-emerald-500/10 text-emerald-600" sub={`Hold ${f.coinIn ? ((f.ggr / f.coinIn) * 100).toFixed(1) : '0.0'}%`} />
         <Kpi label="Active Sessions" icon={Users} value={formatNumber(d.players.activeSessions)} sub={`${d.players.playersToday} players today`} accent="bg-sky-500/10 text-sky-600" />
         <Kpi label="Jackpots" icon={Trophy} value={formatEuro(d.jackpots.totalValue, true)} sub={`${d.jackpots.active} active`} accent="bg-yellow-500/10 text-yellow-600" />
@@ -37,7 +37,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-3">
-        <Card title="Coin In · last 24 hours" className="xl:col-span-2">
+        <Card title="Bets · last 24 hours" className="xl:col-span-2">
           <BarChart
             height={250}
             format={(n) => formatEuro(n)}
@@ -90,8 +90,8 @@ export default function DashboardPage() {
 
       <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
         <Card title="Financial · today">
-          <Stat label="Coin In" value={formatEuro(f.coinIn)} />
-          <Stat label="Coin Out" value={formatEuro(f.coinOut)} />
+          <Stat label="Bets" value={formatEuro(f.coinIn)} />
+          <Stat label="Wins" value={formatEuro(f.coinOut)} />
           <Stat label="Jackpots" value={formatEuro(f.jackpots)} />
           <Stat label="GGR" value={formatEuro(f.ggr)} tone={f.ggr >= 0 ? 'good' : 'bad'} />
           <Stat label="Tickets Out" value={formatEuro(f.ticketsOut)} />

@@ -27,15 +27,16 @@ export function newIdempotencyKey(prefix = 'k'): string {
 }
 
 /** Money / cashier actions. The API requires an Idempotency-Key on these. */
-const MONEY_ROUTE = /^\/(tickets\/(redeem|issue|[^/]+\/(cancel|void|reprint|adjust))|cashier\/(session\/(open|close)|transactions|handpays\/[^/]+)|cash\/collections|transactions\/adjustments)$/;
+const MONEY_ROUTE = /^\/(tickets\/(redeem|issue|[^/]+\/(cancel|void|reprint|adjust|approval-request))|cashier\/(session\/(open|close)|transactions|handpays\/[^/]+|wallet\/(deposit|withdraw|approval-request))|cash\/(collections|movements(\/[^/]+\/(confirm|cancel))?)|transactions\/adjustments|vault\/.+|approvals\/[^/]+\/decide|handpays\/.+|machines\/.+\/(hopper-fills|collections\/count|confirm|verify)|money\/(reconciliation|resolutions|freezes\/[^/]+\/lift|day-close|cutover|counts(\/[^/]+\/verify)?|deferred\/[^/]+\/late-booking))$/;
 
-export async function api<T = any>(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}): Promise<T> {
+async function request(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}) {
   const { json, idempotencyKey, ...rest } = init;
   const headers: Record<string, string> = { ...(rest.headers as Record<string, string>) };
   const token = getToken();
   if (token) headers.authorization = `Bearer ${token}`;
   if (json !== undefined) headers['content-type'] = 'application/json';
-  const isMoney = (rest.method ?? 'GET').toUpperCase() === 'POST' && MONEY_ROUTE.test(path);
+  // An explicit key (one per operator intent) is always sent; known money routes always get one.
+  const isMoney = !!idempotencyKey || ((rest.method ?? 'GET').toUpperCase() === 'POST' && MONEY_ROUTE.test(path));
   if (isMoney) headers['idempotency-key'] = idempotencyKey ?? newIdempotencyKey();
 
   // Money calls are retried on network failure with the SAME key, so a lost response never books twice.
@@ -54,8 +55,34 @@ export async function api<T = any>(path: string, init: RequestInit & { json?: un
     setToken(null);
     if (typeof window !== 'undefined' && !location.pathname.startsWith('/login')) location.href = '/login';
   }
+  return { res, body };
+}
+
+export async function api<T = any>(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}): Promise<T> {
+  const { res, body } = await request(path, init);
   if (!res.ok) throw new ApiError(res.status, body.error ?? `HTTP ${res.status}`);
   return body as T;
+}
+
+/**
+ * A money action of an operator screen: POST with the intent's Idempotency-Key. The result is
+ * deterministic: ok with the API response (replayed = the same request was already executed), or a
+ * failure with the API's status and message. 409 bodies (e.g. "not closed" / "not lifted") are kept.
+ */
+export async function moneyAction<T = any>(path: string, json: unknown, idempotencyKey: string): Promise<
+  { ok: true; data: T; replayed: boolean } | { ok: false; status: number; error: string; data: any }
+> {
+  try {
+    const { res, body } = await request(path, { method: 'POST', json, idempotencyKey });
+    if (res.ok) return { ok: true, data: body as T, replayed: res.headers.get('idempotent-replayed') === 'true' };
+    // Refusals carry `error`; the day close and the freeze lift answer 409 with their own reason.
+    const reason = body.error ?? body.reason ?? (body.lifted === false
+      ? `Not lifted: the reconciliation is not clean yet (${(body.result?.checks ?? []).filter((c: { ok: boolean }) => !c.ok).map((c: { key: string }) => c.key).join(', ') || 'see reconciliation'})`
+      : body.closed === false ? 'Business day not closed' : `HTTP ${res.status}`);
+    return { ok: false, status: res.status, error: reason, data: body };
+  } catch (e) {
+    return { ok: false, status: 0, error: `Network error: ${(e as Error).message}. Nothing was retried as a new action; try again with the same request.`, data: null };
+  }
 }
 
 /** Minimal data hook: fetch on mount / key change, optional polling, manual reload. */

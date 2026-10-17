@@ -32,7 +32,7 @@ export default function MachinesPage() {
           <thead>
             <tr>
               <th>Asset</th><th>Machine ID</th><th>Manufacturer / Model</th><th>Game</th><th>Location</th><th>Status</th>
-              <th className="text-right">Coin In</th><th className="text-right">Coin Out</th><th className="text-right">Games</th><th>Player</th><th>Last comm.</th>
+              <th className="text-right">Bets</th><th className="text-right">Wins</th><th className="text-right">Games</th><th>Player</th><th>Last comm.</th>
             </tr>
           </thead>
           <tbody>

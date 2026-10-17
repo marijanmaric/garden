@@ -73,7 +73,11 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
   app.get('/api/v1/machines/event-exceptions', { preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     return (await pool.query(
-      `SELECT x.*, m.asset_no FROM machine_event_exceptions x JOIN machines m ON m.id = x.machine_id WHERE x.org_id = $1 AND x.casino_id = $2 ORDER BY x.created_at DESC LIMIT 200`,
+      `SELECT x.*, m.asset_no, e.amount, e.occurred_at,
+         EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key = 'machine_event:' || x.event_id) AS explained,
+         (SELECT a.status FROM approvals a WHERE a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id ORDER BY a.created_at DESC LIMIT 1) AS explanation_status
+       FROM machine_event_exceptions x JOIN machines m ON m.id = x.machine_id JOIN machine_events e ON e.event_id = x.event_id
+       WHERE x.org_id = $1 AND x.casino_id = $2 ORDER BY x.created_at DESC LIMIT 200`,
       [req.auth.orgId, casinoId])).rows;
   });
 

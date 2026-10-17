@@ -121,9 +121,32 @@ export async function cashOpsRoutes(app: FastifyInstance) {
   app.get('/api/v1/approvals', { preHandler: guard('cashier.supervise') }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), status: z.string().max(20).default('PENDING') }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
+    // Step 7e: plus who asked, who decided and the affected entity (ticket, machine, player), read-only.
     return (await pool.query(
-      `SELECT id, action, entity_type, entity_id, amount_cents, payload, status, requested_by, created_at, expires_at FROM approvals
-       WHERE org_id = $1 AND casino_id = $2 AND status = $3 ORDER BY created_at DESC LIMIT 200`, [req.auth.orgId, casinoId, qs.status])).rows;
+      `SELECT a.id, a.action, a.entity_type, a.entity_id, a.amount_cents, a.payload, a.status, a.requested_by, a.created_at, a.expires_at,
+         a.decided_by, a.decided_at, a.decision_note, a.executed_at, a.money_transaction_id,
+         rq.name AS requested_by_name, dc.name AS decided_by_name, (a.requested_by = $4) AS own,
+         t.barcode, COALESCE(hm.asset_no, dm.asset_no, xm.asset_no, hxm.asset_no) AS asset_no,
+         COALESCE(wp.player_no, pp.player_no) AS player_no, concat_ws(' ', COALESCE(wpr.first_name, ppr.first_name), COALESCE(wpr.last_name, ppr.last_name)) AS player_name,
+         cd.name AS desk_name, ce.name AS cashier_name
+       FROM approvals a
+       JOIN employees rq ON rq.id = a.requested_by
+       LEFT JOIN employees dc ON dc.id = a.decided_by
+       LEFT JOIN tickets t ON a.entity_type = 'ticket' AND t.id::text = a.entity_id
+       LEFT JOIN handpays h ON a.entity_type = 'handpay' AND h.id::text = a.entity_id
+       LEFT JOIN machines hm ON hm.id = h.machine_id
+       LEFT JOIN deferred_money_events d ON a.action = 'LATE_EVENT_BOOKING' AND d.event_id::text = a.entity_id
+       LEFT JOIN machines dm ON dm.id = d.machine_id
+       LEFT JOIN machine_event_exceptions x ON a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id
+       LEFT JOIN machines xm ON xm.id = x.machine_id
+       LEFT JOIN handpay_legacy_exceptions hx ON a.entity_type = 'handpay_exception' AND hx.id::text = a.entity_id
+       LEFT JOIN machines hxm ON hxm.id = hx.machine_id
+       LEFT JOIN wallets w ON a.entity_type = 'wallet' AND w.id::text = a.entity_id
+       LEFT JOIN players wp ON wp.id = w.player_id LEFT JOIN player_profiles wpr ON wpr.player_id = w.player_id
+       LEFT JOIN players pp ON pp.id::text = a.payload->>'playerId' AND a.entity_type <> 'wallet' LEFT JOIN player_profiles ppr ON ppr.player_id = pp.id
+       LEFT JOIN cash_counts cc ON a.action = 'DRAWER_SHORT_OVER' AND cc.id::text = a.entity_id
+       LEFT JOIN cashier_sessions cs ON cs.id = cc.cashier_session_id LEFT JOIN cash_desks cd ON cd.id = cs.cash_desk_id LEFT JOIN employees ce ON ce.id = cs.employee_id
+       WHERE a.org_id = $1 AND a.casino_id = $2 AND ($3 = 'ALL' OR a.status = $3) ORDER BY a.created_at DESC LIMIT 200`, [req.auth.orgId, casinoId, qs.status, req.auth.sub])).rows;
   });
 
   app.post('/api/v1/approvals/:id/decide', { preHandler: guard('cashier.supervise') }, async (req, reply) => {

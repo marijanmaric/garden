@@ -12,7 +12,8 @@ import { replayDeferredMachine } from './machine-money';
 
 /**
  * Continuous reconciliation (Step 7a: CASH, VAULT and the global ledger invariants; Step 7b: HANDPAY;
- * Step 7c: TITO incl. the D1 floor clearing; Step 7d: MACHINE per machine, CASHLESS per organisation).
+ * Step 7c: TITO incl. the D1 floor clearing; Step 7d: MACHINE per machine, CASHLESS per organisation;
+ * Step 7e: ledger <-> meters per machine).
  *
  * Every failed check is CRITICAL: an alert is raised and the affected rail is FROZEN for the
  * casino (a global invariant freezes the whole organisation). A frozen rail takes only corrections;
@@ -294,6 +295,19 @@ async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, st
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.id = d.money_transaction_id AND t.source_event_id = d.event_id AND t.business_date = COALESCE(d.booked_business_date, d.business_date)
                              AND (d.late_approval_id IS NULL OR t.options->'lateEvent'->>'approvalId' = d.late_approval_id::text))
          ORDER BY d.event_id`, 'deferred_event'),
+    },
+    {
+      // Step 7e, ledger <-> meters (plan section 5): per machine and money event type since its cutover, the
+      // amounts the machine reported equal what the ledger booked for that machine from those events.
+      key: 'machine.ledger_matches_meters',
+      items: await items(
+        `SELECT e.machine_id::text || ':' || e.type AS id, e.machine_id FROM machine_events e ${onLedger}
+         JOIN money_transactions t ON t.source_event_id = e.event_id
+           AND t.type IN ('MACHINE_CASH_IN', 'MACHINE_CASH_OUT', 'WALLET_TO_MACHINE_CONFIRM', 'WALLET_TO_MACHINE_LATE_CONFIRM', 'MACHINE_TO_WALLET')
+         WHERE e.casino_id = $1 AND e.received_at > mc.as_of AND e.type IN ('CASH_IN', 'CASH_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
+         GROUP BY e.machine_id, e.type
+         HAVING sum(round(e.amount * 100)) <> sum(CASE WHEN t.machine_id = e.machine_id THEN t.amount_cents ELSE 0 END)
+         ORDER BY 1`, 'meters'),
     },
     {
       key: 'machine.collections_booked',

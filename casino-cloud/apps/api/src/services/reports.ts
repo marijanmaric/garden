@@ -53,9 +53,9 @@ const money = (key: string, label: string): Column => ({ key, label, type: 'mone
 export const REPORTS: ReportDef[] = [
   {
     key: 'daily-gaming', title: 'Daily Gaming Report', group: 'Gaming', filters: ['machine'],
-    description: 'Coin In, Coin Out, jackpots, GGR and hold per business day.',
+    description: 'Bets, wins, jackpots, GGR and hold per business day.',
     columns: [
-      { key: 'day', label: 'Day', type: 'date' }, money('coin_in', 'Coin In'), money('coin_out', 'Coin Out'), money('jackpots', 'Jackpots'),
+      { key: 'day', label: 'Day', type: 'date' }, money('coin_in', 'Bets'), money('coin_out', 'Wins'), money('jackpots', 'Jackpots'),
       money('ggr', 'GGR'), { key: 'hold', label: 'Hold', type: 'percent' }, { key: 'wagers', label: 'Wagers', type: 'number' },
       money('tickets_in', 'Tickets In'), money('tickets_out', 'Tickets Out'), money('cash_in', 'Cash In'),
     ],
@@ -74,7 +74,7 @@ export const REPORTS: ReportDef[] = [
     columns: [
       { key: 'asset_no', label: 'Asset', type: 'text' }, { key: 'manufacturer', label: 'Manufacturer', type: 'text' },
       { key: 'game', label: 'Game', type: 'text' }, { key: 'floor', label: 'Floor', type: 'text' },
-      money('coin_in', 'Coin In'), money('coin_out', 'Coin Out'), money('jackpots', 'Jackpots'), money('ggr', 'GGR'),
+      money('coin_in', 'Bets'), money('coin_out', 'Wins'), money('jackpots', 'Jackpots'), money('ggr', 'GGR'),
       { key: 'hold', label: 'Hold', type: 'percent' }, { key: 'wagers', label: 'Wagers', type: 'number' },
     ],
     sql: `${P} SELECT m.asset_no, mm.manufacturer, m.game, f.name AS floor, ${GAMING_AGG}, ${HOLD},
@@ -89,7 +89,7 @@ export const REPORTS: ReportDef[] = [
     description: 'Results grouped by manufacturer, including GGR per machine.',
     columns: [
       { key: 'manufacturer', label: 'Manufacturer', type: 'text' }, { key: 'machines', label: 'Machines', type: 'number' },
-      money('coin_in', 'Coin In'), money('coin_out', 'Coin Out'), money('jackpots', 'Jackpots'), money('ggr', 'GGR'),
+      money('coin_in', 'Bets'), money('coin_out', 'Wins'), money('jackpots', 'Jackpots'), money('ggr', 'GGR'),
       { key: 'hold', label: 'Hold', type: 'percent' }, { key: 'ggr_per_machine', label: 'GGR / Machine', type: 'money', total: false },
     ],
     sql: `${P} SELECT COALESCE(mm.manufacturer, 'Unknown') AS manufacturer, count(DISTINCT m.id) AS machines, ${GAMING_AGG}, ${HOLD},

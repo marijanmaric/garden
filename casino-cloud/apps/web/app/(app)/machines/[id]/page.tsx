@@ -8,6 +8,8 @@ import { useLiveRefresh } from '@/lib/live';
 import { useSession } from '@/lib/session';
 import { Card, ErrorNote, PageHeader, Stat, StatusBadge } from '@/components/ui';
 import { EventFeed } from '@/components/EventFeed';
+import { MachineMoney } from '@/components/machine-money';
+import { eventLabel } from '@/lib/money';
 
 export default function MachineDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -87,22 +89,26 @@ export default function MachineDetailPage({ params }: { params: Promise<{ id: st
           <Stat label="Conditions" value={[m.door_open && 'Door open', m.cashbox_open && 'Cashbox open', m.printer_error && 'Printer', m.error_code].filter(Boolean).join(', ') || 'OK'} />
         </Card>
         <Card title="Meters (lifetime)">
-          <Stat label="Coin In" value={formatEuro(m.coin_in)} />
-          <Stat label="Coin Out" value={formatEuro(m.coin_out)} />
+          <Stat label="Bets (turnover)" value={formatEuro(m.coin_in)} />
+          <Stat label="Wins" value={formatEuro(m.coin_out)} />
           <Stat label="Games Played" value={formatNumber(m.games_played)} />
           <Stat label="Jackpot Wins" value={`${m.jackpot_wins} · ${formatEuro(m.jackpot)}`} />
-          <Stat label="Tickets In" value={formatEuro(m.tickets_in)} />
-          <Stat label="Tickets Out" value={formatEuro(m.tickets_out)} />
-          <Stat label="Cash In" value={formatEuro(m.cash_in)} />
+          <Stat label="TITO in" value={formatEuro(m.tickets_in)} />
+          <Stat label="TITO out" value={formatEuro(m.tickets_out)} />
+          <Stat label="CASH in" value={formatEuro(m.cash_in)} />
         </Card>
         <Card title="Today & Player">
-          <Stat label="Coin In today" value={formatEuro(m.today.coin_in)} />
+          <Stat label="Bets today" value={formatEuro(m.today.coin_in)} />
           <Stat label="GGR today" value={formatEuro(m.today.coin_in - m.today.coin_out - m.today.jackpots)} tone={m.today.coin_in - m.today.coin_out - m.today.jackpots >= 0 ? 'good' : 'bad'} />
           <Stat label="Current Player" value={m.player_name ?? '-'} hint={m.player_tier ?? undefined} />
           <Stat label="Player Card" value={m.player_card ?? '-'} />
           <Stat label="Session since" value={m.session ? timeAgo(m.session.started_at) : '-'} />
-          <Stat label="Session Coin In" value={m.session ? formatEuro(m.session.coin_in) : '-'} />
+          <Stat label="Session bets" value={m.session ? formatEuro(m.session.coin_in) : '-'} />
         </Card>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-3">
+        <MachineMoney machineId={id} />
       </div>
 
       <div className="grid gap-6 xl:grid-cols-3">
@@ -113,7 +119,7 @@ export default function MachineDetailPage({ params }: { params: Promise<{ id: st
               {m.events.map((e: any) => (
                 <tr key={e.event_id}>
                   <td className="text-xs text-sub">{formatDateTime(e.occurred_at)}</td>
-                  <td className="font-medium">{e.type}</td>
+                  <td className="font-medium">{eventLabel(e.type)}</td>
                   <td className="text-right tabular-nums">{e.amount != null ? formatEuro(e.amount) : ''}</td>
                   <td className="text-right tabular-nums">{e.win ? formatEuro(e.win) : ''}</td>
                   <td className="text-xs text-sub">{e.payload.errorCode ?? e.payload.playerCardId ?? e.payload.message ?? ''}</td>

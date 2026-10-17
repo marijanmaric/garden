@@ -460,7 +460,7 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       assert.equal(run.ok, true, JSON.stringify(run.checks.filter((k: { ok: boolean }) => !k.ok)));
       assert.deepEqual(run.checks.filter((k: { rail: string }) => k.rail === 'MACHINE' || k.rail === 'CASHLESS').map((k: { key: string }) => k.key).sort(), [
         'cashless.reserved_matches_active_transfers', 'cashless.transfers_booked', 'machine.collections_booked', 'machine.deferred_business_date',
-        'machine.events_accounted', 'machine.no_stale_deferred_events',
+        'machine.events_accounted', 'machine.ledger_matches_meters', 'machine.no_stale_deferred_events', // + Step 7e: ledger <-> meters
       ]);
       // a legitimate transfer in flight (another player, another machine)
       const p2 = await player();

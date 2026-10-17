@@ -9,6 +9,8 @@ import { useLiveRefresh } from '@/lib/live';
 import { useSession } from '@/lib/session';
 import { Notice, StatusBadge } from '@/components/ui';
 import { CashActions, Handpays, ScanButton, ShiftPanel, TicketPayout, TransactionList } from '@/components/cashier';
+import { LedgerPanel } from '@/components/ledger-cashier';
+import { useOperatorContext } from '@/components/money-ui';
 import { LiveDot } from '@/components/EventFeed';
 import { clsx } from '@/components/clsx';
 
@@ -35,7 +37,7 @@ function PlayerLookup() {
           <div className="font-mono text-sm text-sub">{p.card_number}</div>
           <div className="mt-3 grid grid-cols-3 gap-2 text-center">
             <div className="rounded-lg bg-muted p-2"><div className="text-xs text-sub">Points</div><div className="text-lg font-bold">{p.points}</div></div>
-            <div className="rounded-lg bg-muted p-2"><div className="text-xs text-sub">Coin In</div><div className="text-lg font-bold">{formatEuro(p.total_coin_in, true)}</div></div>
+            <div className="rounded-lg bg-muted p-2"><div className="text-xs text-sub">Bets</div><div className="text-lg font-bold">{formatEuro(p.total_coin_in, true)}</div></div>
             <div className="rounded-lg bg-muted p-2"><div className="text-xs text-sub">Playing</div><div className="text-lg font-bold">{p.current_machine ?? '-'}</div></div>
           </div>
           <div className="mt-2 text-xs text-sub">{p.visits} visits · last {timeAgo(p.last_visit_at)} · Wallet balance arrives with Cashless (Phase 3)</div>
@@ -108,6 +110,8 @@ export default function MobileCashierPage() {
   const { me, casino, can } = useSession();
   const cashier = useCashier();
   const [tab, setTab] = useState<Tab>('ticket');
+  const ctx = useOperatorContext();
+  const ledger = ctx.data?.rails.CASH === 'LEDGER';
   if (!can('cash.transact')) return <div className="p-6"><Notice tone="bad">Your role cannot use the mobile cashier.</Notice></div>;
   const s = cashier.session;
 
@@ -122,7 +126,7 @@ export default function MobileCashierPage() {
         <LiveDot />
         <button onClick={() => setTab('shift')} className={clsx('rounded-xl px-4 py-2 text-right', s ? 'bg-emerald-500/10' : 'bg-red-500/10')}>
           <div className="text-[10px] font-semibold uppercase tracking-wide text-sub">{s ? s.desk_name : 'No shift'}</div>
-          <div className="text-xl font-bold tabular-nums">{s ? formatEuro(s.expected) : 'Open shift'}</div>
+          <div className="text-xl font-bold tabular-nums">{s ? (s.blind ? 'Blind' : formatEuro(s.expected)) : 'Open shift'}</div>
         </button>
       </header>
 
@@ -130,16 +134,16 @@ export default function MobileCashierPage() {
         {!s && tab !== 'shift' && tab !== 'player' && tab !== 'machines' && tab !== 'alerts' && (
           <div className="mb-4"><Notice tone="bad">No open shift: open one under Shift before paying.</Notice></div>
         )}
-        {tab === 'ticket' && <TicketPayout cashier={cashier} big />}
-        {tab === 'handpay' && <Handpays cashier={cashier} big />}
-        {tab === 'cash' && <CashActions cashier={cashier} big />}
+        {tab === 'ticket' && (ledger ? <LedgerPanel part="scan" /> : <TicketPayout cashier={cashier} big />)}
+        {tab === 'handpay' && (ledger ? <LedgerPanel part="handpay" /> : <Handpays cashier={cashier} big />)}
+        {tab === 'cash' && (ledger ? <LedgerPanel part="sell" /> : <CashActions cashier={cashier} big />)}
         {tab === 'player' && <PlayerLookup />}
         {tab === 'machines' && <MachineService />}
         {tab === 'alerts' && <Alerts />}
         {tab === 'shift' && (
           <div className="space-y-6">
-            <div className="card p-4"><ShiftPanel cashier={cashier} big /></div>
-            {s && <div className="card px-4 py-2"><TransactionList items={cashier.transactions} /></div>}
+            <div className="card p-4">{ledger ? <LedgerPanel part="shift" /> : <ShiftPanel cashier={cashier} big />}</div>
+            {s && !ledger && <div className="card px-4 py-2"><TransactionList items={cashier.transactions} /></div>}
           </div>
         )}
       </main>

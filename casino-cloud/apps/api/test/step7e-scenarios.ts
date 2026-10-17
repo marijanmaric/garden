@@ -1,0 +1,346 @@
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import type { FastifyInstance } from 'fastify';
+import type { Pool, PoolClient } from 'pg';
+import { ensureVaultOpen, type LedgerCasino } from './ledger-casino';
+
+/**
+ * Step 7e scenarios: the operator read views (cashier shift, player / wallet, vault, approvals inbox,
+ * day-close status, deferred events, machine money, ledger <-> meters) and the reconciliation check
+ * machine.ledger_matches_meters. The operator flows run end to end through the same API the screens
+ * use: every money action with an Idempotency-Key, approvals before execution, blind counts.
+ * Also: the read views write nothing, and accounting behaviour of 7a-7d is unchanged.
+ */
+export interface Ctx7e {
+  app: FastifyInstance;
+  pool: Pool;
+  orgId: string;
+  casino: LedgerCasino;
+  emp: Record<string, string>;
+  tokens: Record<string, string>;
+}
+
+export function registerStep7eScenarios(get: () => Ctx7e) {
+  let c: Ctx7e;
+  const st: Record<string, any> = {};
+  const auth = (email: string) => ({ authorization: `Bearer ${c.tokens[email]}` });
+  const post = (email: string, url: string, payload: unknown = {}, key: string = randomUUID()) =>
+    c.app.inject({ method: 'POST', url, payload: payload as object, headers: { ...auth(email), 'idempotency-key': key } });
+  const get_ = (email: string, url: string) => c.app.inject({ method: 'GET', url, headers: auth(email) });
+  const getJ = async (email: string, url: string) => {
+    const r = await get_(email, url);
+    assert.equal(r.statusCode, 200, `${url}: ${r.body}`);
+    return r.json();
+  };
+  const q = async (sql: string, p: unknown[] = []) => (await c.pool.query(sql, p)).rows;
+  const one = async (sql: string, p: unknown[] = []) => (await c.pool.query(sql, p)).rows[0];
+  const tx = async <T>(fn: (db: PoolClient) => Promise<T>) => {
+    const client = await c.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await fn(client);
+      await client.query('COMMIT');
+      return r;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  };
+  const cid = () => c.casino.id;
+  const m = (i: number) => c.casino.machines[i];
+  const gw = (url: string, payload: unknown) =>
+    c.app.inject({ method: 'POST', url, payload: payload as object, headers: { 'x-gateway-id': c.casino.gateway!.deviceId, 'x-gateway-key': c.casino.gateway!.key } });
+  async function event(i: number, type: string, fields: Record<string, unknown> = {}) {
+    const eventId = randomUUID();
+    const res = await gw('/api/v1/gateway/events', { events: [{ eventId, type, machineId: m(i).code, timestamp: new Date().toISOString(), ...fields }] });
+    assert.equal(res.statusCode, 200, res.body);
+    return { eventId, body: res.json() };
+  }
+  const counts = async () => one(`SELECT (SELECT count(*) FROM money_transactions)::int AS tx, (SELECT count(*) FROM ledger_entries)::int AS le,
+    (SELECT count(*) FROM approvals)::int AS ap, (SELECT count(*) FROM cash_movements)::int AS mv, (SELECT count(*) FROM idempotency_keys)::int AS ik`);
+
+  describe('Step 7e: operator views and ledger <-> meters', () => {
+    test('setup: ledger casino, verified open vault, limits for four eyes, a player with a card', async () => {
+      c = get();
+      await ensureVaultOpen(c.pool as never, c.casino);
+      await c.pool.query(`UPDATE casino_money_settings SET deposit_approval_cents = 100000, withdrawal_approval_cents = 100000, ticket_payout_approval_cents = 50000, short_over_approval_cents = 1000 WHERE casino_id = $1`, [cid()]);
+      const players = await import('../src/services/players');
+      st.card = `7E-${randomUUID().slice(0, 8)}`;
+      const p = await tx((db) => players.createPlayer(db as never, { orgId: c.orgId, employeeId: c.emp['admin@example.com'], employeeEmail: 'admin@example.com' }, { homeCasinoId: cid(), profile: { firstName: 'Erika', lastName: 'Muster' }, card: { cardNumber: st.card } }));
+      st.player = p.player.id;
+      // the cashier works in this casino only for these scenarios
+      const login = await c.app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { email: 'cashier@example.com', password: 'demo' } });
+      assert.equal(login.statusCode, 200);
+    });
+
+    test('operator context: rail modes, active freezes and approval limits for the screen (any employee)', async () => {
+      const ctx = await getJ('cashier@example.com', `/api/v1/operator/context?casinoId=${cid()}`);
+      assert.deepEqual(ctx.rails, { VAULT: 'LEDGER', CASH: 'LEDGER', HANDPAY: 'LEDGER', TITO: 'LEDGER', CASHLESS: 'LEDGER' });
+      assert.equal(ctx.ledgerMachines.length, c.casino.machines.length);
+      assert.deepEqual(ctx.limits, { handpay: ctx.limits.handpay, deposit: 100000, withdrawal: 100000, ticketPayout: 50000, shortOver: 1000 });
+      assert.match(ctx.today, /^\d{4}-\d{2}-\d{2}$/);
+      assert.ok(Array.isArray(ctx.freezes));
+    });
+
+    test('cashier flow: empty shift, blind fill confirmation (amount hidden from the receiver), drop pending; idempotent replay is marked', async () => {
+      const desk = (await one(`INSERT INTO cash_desks (org_id, casino_id, name) VALUES ($1,$2,$3) RETURNING id`, [c.orgId, cid(), `7E desk ${Date.now()}`])).id;
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/session/open', { cashDeskId: desk, openingBalance: 50 })).statusCode, 409, 'ledger shift opens empty');
+      const open = await post('cashier@example.com', '/api/v1/cashier/session/open', { cashDeskId: desk, openingBalance: 0 });
+      assert.equal(open.statusCode, 200, open.body);
+      st.session = open.json().id;
+      const fill = await post('manager@example.com', '/api/v1/cash/movements', { kind: 'FILL', cashierSessionId: st.session, amountCents: 300_000 });
+      assert.equal(fill.statusCode, 200, fill.body);
+      let shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.equal(shift.session.status, 'OPEN');
+      assert.equal(shift.session.ledger, true);
+      assert.equal(shift.movements.length, 1);
+      assert.equal(shift.movements[0].kind, 'FILL');
+      assert.equal(shift.movements[0].amount_cents, null, 'the receiving cashier counts blind');
+      assert.equal(shift.movements[0].requested_by_name, (await one('SELECT name FROM employees WHERE id = $1', [c.emp['manager@example.com']])).name);
+      const key = randomUUID();
+      const conf = await post('cashier@example.com', `/api/v1/cash/movements/${fill.json().movement.id}/confirm`, { totalCents: 300_000 }, key);
+      assert.equal(conf.json().movement.status, 'CONFIRMED');
+      const again = await post('cashier@example.com', `/api/v1/cash/movements/${fill.json().movement.id}/confirm`, { totalCents: 300_000 }, key);
+      assert.equal(again.headers['idempotent-replayed'], 'true', 'the same intent replays (the screen shows "already done")');
+      assert.equal((await q(`SELECT 1 FROM money_transactions WHERE cashier_session_id = $1`, [st.session])).length, 1, 'booked once');
+      const drop = await post('cashier@example.com', '/api/v1/cash/movements', { kind: 'DROP', amountCents: 10_000 });
+      assert.equal(drop.statusCode, 200, drop.body);
+      shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.deepEqual(shift.movements.map((x: any) => [x.kind, x.amount_cents]), [['DROP', 10_000]], 'the requester sees the own amount');
+      const vault = await getJ('manager@example.com', `/api/v1/vault/status?casinoId=${cid()}`);
+      assert.ok(vault.movements.some((x: any) => x.id === drop.json().movement.id && x.kind === 'DROP' && x.cashier_name));
+      assert.ok(vault.shifts.some((x: any) => x.id === st.session));
+      assert.equal((await post('manager@example.com', `/api/v1/cash/movements/${drop.json().movement.id}/confirm`, { totalCents: 10_000 })).json().movement.status, 'CONFIRMED');
+    });
+
+    test('CORS exposes Idempotent-Replayed so the browser can show a replay', async () => {
+      const r = await c.app.inject({ method: 'OPTIONS', url: '/api/v1/cashier/wallet/deposit', headers: { origin: 'http://localhost:3000', 'access-control-request-method': 'POST' } });
+      const g = await c.app.inject({ method: 'GET', url: '/api/v1/operator/context', headers: { ...auth('cashier@example.com'), origin: 'http://localhost:3000' } });
+      assert.ok(r.statusCode < 400);
+      assert.match(String(g.headers['access-control-expose-headers']), /Idempotent-Replayed/);
+    });
+
+    test('player / wallet: lookup by card with ledger balances and history; deposit and withdrawal; four eyes above the limit; blocked card', async () => {
+      assert.equal((await get_('cashier@example.com', '/api/v1/players/lookup/NOPE-0000')).statusCode, 404);
+      let p = await getJ('cashier@example.com', `/api/v1/players/lookup/${st.card}`);
+      assert.equal(p.usable, true);
+      assert.equal(p.player.first_name, 'Erika');
+      assert.deepEqual([p.wallet.availableCents, p.wallet.reservedCents, p.wallet.history.length], [0, 0, 0]);
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', { playerCard: st.card, amount: 250.5 })).statusCode, 200);
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/wallet/withdraw', { playerCard: st.card, amount: 50 })).statusCode, 200);
+      p = await getJ('cashier@example.com', `/api/v1/players/lookup/${st.card}`);
+      assert.equal(p.wallet.availableCents, 20_050);
+      assert.deepEqual(p.wallet.history.map((h: any) => [h.type, Number(h.available_delta_cents)]), [['CASH_WITHDRAWAL', -5_000], ['CASH_DEPOSIT', 25_050]]);
+      // above the limit: refused without approval; requested; the cashier cannot decide it; a supervisor approves; then booked once
+      const big = { playerCard: st.card, amount: 1000 };
+      assert.match((await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', big)).json().error, /Supervisor approval required/);
+      const ap = await post('cashier@example.com', '/api/v1/cashier/wallet/approval-request', { ...big, kind: 'CASH_DEPOSIT' });
+      assert.equal(ap.statusCode, 200, ap.body);
+      let shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.deepEqual(shift.myApprovals.filter((a: any) => a.id === ap.json().id).map((a: any) => [a.action, a.status, Number(a.amount_cents)]), [['CASH_DEPOSIT', 'PENDING', 100_000]]);
+      assert.equal((await get_('cashier@example.com', `/api/v1/approvals?casinoId=${cid()}`)).statusCode, 403, 'the inbox needs cashier.supervise');
+      const inbox = await getJ('floor@example.com', `/api/v1/approvals?casinoId=${cid()}`);
+      const item = inbox.find((a: any) => a.id === ap.json().id);
+      assert.equal(item.requested_by_name, (await one('SELECT name FROM employees WHERE id = $1', [c.emp['cashier@example.com']])).name);
+      assert.equal(item.player_name, 'Erika Muster');
+      assert.equal(item.own, false);
+      assert.equal(Number(item.amount_cents), 100_000);
+      assert.equal((await post('floor@example.com', `/api/v1/approvals/${ap.json().id}/decide`, { decision: 'APPROVED' })).statusCode, 200);
+      shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.equal(shift.myApprovals.find((a: any) => a.id === ap.json().id).status, 'APPROVED');
+      assert.ok(shift.myApprovals.find((a: any) => a.id === ap.json().id).decided_by_name);
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/wallet/deposit', big)).statusCode, 200);
+      p = await getJ('cashier@example.com', `/api/v1/players/lookup/${st.card}`);
+      assert.equal(p.wallet.availableCents, 120_050);
+      // blocked card: visible before any action, operations refused by the API
+      const players = await import('../src/services/players');
+      await tx((db) => players.setCardStatus(db as never, { orgId: c.orgId, employeeId: c.emp['admin@example.com'] }, p.card.id, 'BLOCKED', 'lost wallet'));
+      p = await getJ('cashier@example.com', `/api/v1/players/lookup/${st.card}`);
+      assert.deepEqual([p.usable, p.card.status, p.rejection], [false, 'BLOCKED', 'Player card is blocked']);
+      assert.equal(p.wallet.availableCents, 120_050, 'balance still shown');
+      assert.equal((await post('cashier@example.com', '/api/v1/cashier/wallet/withdraw', { playerCard: st.card, amount: 5 })).statusCode, 409);
+      await tx((db) => players.setCardStatus(db as never, { orgId: c.orgId, employeeId: c.emp['admin@example.com'] }, p.card.id, 'ACTIVE', 'found'));
+    });
+
+    test('approvals inbox: own request flagged, self-approval refused, history keeps decider and note', async () => {
+      // a ticket above the payout limit, sold at the cage, payout requested by the cashier
+      const sold = await post('cashier@example.com', '/api/v1/tickets/issue', { amount: 600 });
+      assert.equal(sold.statusCode, 200, sold.body);
+      const t = sold.json();
+      assert.match((await post('cashier@example.com', '/api/v1/tickets/redeem', { barcode: t.barcode })).json().error, /approval required/);
+      const req = await post('cashier@example.com', `/api/v1/tickets/${t.id}/approval-request`);
+      assert.equal(req.statusCode, 200, req.body);
+      // a supervisor who also asks for something sees it as own
+      const own = await post('floor@example.com', '/api/v1/money/resolutions', { casinoId: cid(), itemKey: `test:${randomUUID()}`, explanation: 'Own request of the supervisor for the inbox test' });
+      const inbox = await getJ('floor@example.com', `/api/v1/approvals?casinoId=${cid()}`);
+      const ticketItem = inbox.find((a: any) => a.id === req.json().id);
+      assert.deepEqual([ticketItem.action, ticketItem.barcode, ticketItem.own], ['TITO_REDEEM_CASHIER', t.barcode, false]);
+      assert.equal(inbox.find((a: any) => a.id === own.json().id).own, true);
+      assert.match((await post('floor@example.com', `/api/v1/approvals/${own.json().id}/decide`, { decision: 'APPROVED' })).json().error, /requester cannot approve/);
+      assert.equal((await post('manager@example.com', `/api/v1/approvals/${req.json().id}/decide`, { decision: 'APPROVED', note: 'checked slip' })).statusCode, 200);
+      const paid = await post('cashier@example.com', '/api/v1/tickets/redeem', { barcode: t.barcode });
+      assert.equal(paid.statusCode, 200, paid.body);
+      const hist = await getJ('floor@example.com', `/api/v1/approvals?casinoId=${cid()}&status=ALL`);
+      const h = hist.find((a: any) => a.id === req.json().id);
+      assert.deepEqual([h.status, h.decision_note, !!h.decided_by_name, !!h.executed_at], ['EXECUTED', 'checked slip', true, true]);
+      assert.equal((await post('accounting@example.com', `/api/v1/approvals/${own.json().id}/decide`, { decision: 'REJECTED' })).statusCode, 200);
+    });
+
+    test('vault view: balance only for an open verified vault, counts pending for a second person, no amounts for blind counts', async () => {
+      const v = await getJ('manager@example.com', `/api/v1/vault/status?casinoId=${cid()}`);
+      assert.equal(v.session.status, 'OPEN');
+      assert.equal(v.session.verified, true);
+      const ledger = await import('../src/services/ledger');
+      assert.equal(v.balanceCents, await ledger.getBalance(c.pool as never, c.orgId, { kind: 'VAULT', casinoId: cid(), vaultId: c.casino.vault } as never));
+      assert.equal((await get_('cashier@example.com', `/api/v1/vault/status?casinoId=${cid()}`)).statusCode, 403);
+      // collection count waiting for the second person; the view carries no amount
+      await event(0, 'CASH_IN', { amount: 40 });
+      const cnt = await post('manager@example.com', `/api/v1/machines/${m(0).id}/collections/count`, { totalCents: 4_000 });
+      assert.equal(cnt.statusCode, 200, cnt.body);
+      const v2 = await getJ('admin@example.com', `/api/v1/vault/status?casinoId=${cid()}`);
+      const pending = v2.collectionCounts.find((x: any) => x.id === cnt.json().id);
+      assert.ok(pending);
+      assert.equal(pending.total_cents, undefined);
+      assert.equal((await post('admin@example.com', `/api/v1/machines/collections/counts/${cnt.json().id}/verify`, { totalCents: 4_000 })).json().matches, true);
+      assert.ok(!(await getJ('admin@example.com', `/api/v1/vault/status?casinoId=${cid()}`)).collectionCounts.some((x: any) => x.id === cnt.json().id));
+      // hopper fill requested by the vault, pending at the machine view, confirmed there
+      const hf = await post('manager@example.com', `/api/v1/machines/${m(1).id}/hopper-fills`, { amountCents: 5_000 });
+      const mm = await getJ('attendant@example.com', `/api/v1/machines/${m(1).id}/money`);
+      assert.equal(mm.rail, 'LEDGER');
+      assert.deepEqual(mm.hopperFills.filter((h: any) => h.status === 'REQUESTED').map((h: any) => h.id), [hf.json().movement.id]);
+      assert.equal(mm.cashboxCents, undefined, 'no cashbox / hopper balance on the machine view (blind counts)');
+      assert.equal((await post('attendant@example.com', `/api/v1/machines/hopper-fills/${hf.json().movement.id}/confirm`, { totalCents: 5_000 })).json().movement.status, 'CONFIRMED');
+    });
+
+    test('cutover counts view: verification state without amounts', async () => {
+      const list = await getJ('manager@example.com', `/api/v1/money/counts?casinoId=${cid()}`);
+      assert.ok(list.length >= 1);
+      for (const x of list) {
+        assert.equal(x.total_cents, undefined);
+        assert.equal(typeof x.verified, 'boolean');
+      }
+      assert.ok(list.some((x: any) => x.context === 'VAULT_CUTOVER' && x.verified && x.used));
+    });
+
+    test('ledger <-> meters: per machine and money type, meters = ledger; exceptions explain differences; a booked amount that differs from the meter freezes only that machine', async () => {
+      const e1 = await event(2, 'CASH_IN', { amount: 30 });
+      const e2 = await event(2, 'CASH_OUT', { amount: 500 }); // empty hopper -> exception, no money
+      assert.equal(e2.body.exceptions.length, 1);
+      const meters = await getJ('floor@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`);
+      const mc = meters.machines.find((x: any) => x.machineId === m(2).id);
+      const line = (t: string) => mc.lines.find((l: any) => l.type === t);
+      assert.deepEqual([line('CASH_IN').meterCents, line('CASH_IN').ledgerCents, line('CASH_IN').unexplainedCents], [3_000, 3_000, 0]);
+      assert.deepEqual([line('CASH_OUT').meterCents, line('CASH_OUT').ledgerCents, line('CASH_OUT').exceptionCents, line('CASH_OUT').unexplainedCents], [50_000, 0, 50_000, 0]);
+      assert.equal(mc.ok, true);
+      let run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
+      assert.equal(run.checks.find((x: any) => x.key === 'machine.ledger_matches_meters').ok, true);
+      // explain the exception (four eyes) so the casino reconciles clean again
+      const r = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: cid(), itemKey: `machine_event:${e2.eventId}`, explanation: 'Hopper was empty; attendant paid nothing, verified' });
+      await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' });
+      run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
+      assert.equal(run.ok, true, JSON.stringify(run.checks.filter((x: any) => !x.ok)));
+      // the first run froze machine 2 (unexplained exception at that time): lifted now that the run is clean
+      for (const f of await q(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND machine_id = $2 AND lifted_at IS NULL`, [cid(), m(2).id]))
+        assert.equal((await post('admin@example.com', `/api/v1/money/freezes/${f.id}/lift`, { reason: 'exception explained' })).json().lifted, true);
+      // a booking whose amount differs from what the machine reported (simulated faulty booking: event 30.00, ledger 31.00)
+      const ledgerSvc = await import('../src/services/ledger');
+      const bad = randomUUID();
+      await tx(async (db) => {
+        await db.query(`INSERT INTO machine_events (event_id, org_id, casino_id, machine_id, type, amount, occurred_at) VALUES ($1,$2,$3,$4,'CASH_IN',30,now())`, [bad, c.orgId, cid(), m(2).id]);
+        await ledgerSvc.executeMoneyTransaction(db as never, {
+          orgId: c.orgId, type: 'MACHINE_CASH_IN', dedupeKey: ledgerSvc.eventDedupeKey(bad, 'MACHINE_CASH_IN'), sourceEventId: bad,
+          actor: { type: 'GATEWAY', name: 'machine' }, ctx: { casinoId: cid(), machineId: m(2).id, amountCents: 3_100 },
+        } as never);
+      });
+      run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
+      const chk = run.checks.find((x: any) => x.key === 'machine.ledger_matches_meters');
+      assert.deepEqual(chk.items, [`meters:${m(2).id}:CASH_IN`]);
+      const frozen = await q(`SELECT machine_id FROM money_rail_freezes WHERE casino_id = $1 AND rail = 'MACHINE' AND lifted_at IS NULL`, [cid()]);
+      assert.deepEqual(frozen.map((f) => f.machine_id), [m(2).id], 'only this machine is frozen');
+      const after = await getJ('floor@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`);
+      assert.equal(after.machines.find((x: any) => x.machineId === m(2).id).lines.find((l: any) => l.type === 'CASH_IN').unexplainedCents, -100);
+      // the screens show it: freeze in the operator context, blocker in the day-close status, machine view
+      const ctx = await getJ('cashier@example.com', `/api/v1/operator/context?casinoId=${cid()}`);
+      assert.ok(ctx.freezes.some((f: any) => f.rail === 'MACHINE' && f.machine_id === m(2).id && f.asset_no === m(2).asset));
+      const dc = await getJ('floor@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`);
+      assert.equal(dc.canClose, false);
+      assert.ok(dc.blockers.some((b: any) => b.code === 'FROZEN' && b.message.includes(m(2).asset)));
+      assert.ok(dc.blockers.some((b: any) => b.code === 'RECONCILIATION' && b.message.startsWith('machine.ledger_matches_meters')));
+      const mm = await getJ('attendant@example.com', `/api/v1/machines/${m(2).id}/money`);
+      assert.equal(mm.freezes.length, 1);
+      // explained by two people (the difference cannot be undone: the ledger is immutable), then lifted after a clean run
+      const ex = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: cid(), itemKey: `meters:${m(2).id}:CASH_IN`, explanation: 'Faulty booking of 1.00 investigated, corrected by adjustment' });
+      assert.equal((await post('accounting@example.com', `/api/v1/approvals/${ex.json().id}/decide`, { decision: 'APPROVED' })).statusCode, 200);
+      const fz = (await one(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND machine_id = $2 AND lifted_at IS NULL`, [cid(), m(2).id])).id;
+      assert.equal((await post('admin@example.com', `/api/v1/money/freezes/${fz}/lift`, { reason: 'explained by two people' })).json().lifted, true);
+      assert.equal((await getJ('floor@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`)).canClose, true);
+    });
+
+    test('deferred events view: a machine event while the machine is frozen is listed (all rails) with its business date state', async () => {
+      const fz = await one(`INSERT INTO money_rail_freezes (org_id, rail, casino_id, machine_id, reason) VALUES ($1,'MACHINE',$2,$3,'7e test') RETURNING id`, [c.orgId, cid(), m(3).id]);
+      const e = await event(3, 'CASH_IN', { amount: 12 });
+      const list = await getJ('floor@example.com', `/api/v1/money/deferred?casinoId=${cid()}`);
+      const d = list.find((x: any) => x.event_id === e.eventId);
+      assert.deepEqual([d.rail, d.kind, Number(d.amount_cents), d.reason, d.date_closed, d.explained, d.asset_no], ['MACHINE', 'CASH_IN', 1_200, 'FROZEN', false, false, m(3).asset]);
+      const dc = await getJ('floor@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`);
+      assert.ok(dc.blockers.some((b: any) => b.code === 'DEFERRED_EVENTS'));
+      assert.equal(dc.pendingDeferred, 1);
+      const mm = await getJ('attendant@example.com', `/api/v1/machines/${m(3).id}/money`);
+      assert.deepEqual(mm.deferred.map((x: any) => x.event_id), [e.eventId]);
+      const lifted = (await post('admin@example.com', `/api/v1/money/freezes/${fz.id}/lift`, { reason: '7e test over' })).json();
+      assert.equal(lifted.lifted, true);
+      assert.deepEqual((await getJ('floor@example.com', `/api/v1/money/deferred?casinoId=${cid()}`)).filter((x: any) => x.event_id === e.eventId), []);
+      assert.equal((await getJ('floor@example.com', `/api/v1/money/deferred?casinoId=${cid()}&status=PROCESSED`)).filter((x: any) => x.event_id === e.eventId).length, 1);
+    });
+
+    test('close flow on the screen: blind close count above the short/over limit waits for a supervisor, the shift state says so; final drop confirmed by the vault', async () => {
+      const close = await post('cashier@example.com', '/api/v1/cashier/session/close', { countedBalance: 1 });
+      assert.equal(close.statusCode, 200, close.body);
+      assert.equal(close.json().status, 'PENDING_APPROVAL');
+      let shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.deepEqual([shift.session.status, shift.closeApproval.status], ['COUNTING', 'PENDING']);
+      const inbox = await getJ('floor@example.com', `/api/v1/approvals?casinoId=${cid()}`);
+      const so = inbox.find((a: any) => a.action === 'DRAWER_SHORT_OVER' && a.payload.cashierSessionId === st.session);
+      assert.ok(so.desk_name && so.cashier_name);
+      assert.ok(so.payload.differenceCents < 0);
+      assert.equal((await post('floor@example.com', `/api/v1/approvals/${so.id}/decide`, { decision: 'APPROVED' })).json().status, 'PENDING_DROP');
+      shift = await getJ('cashier@example.com', '/api/v1/cashier/shift');
+      assert.deepEqual(shift.movements.map((x: any) => [x.kind, x.purpose]), [['DROP', 'CLOSE']]);
+      const drop = shift.movements[0];
+      assert.equal((await post('manager@example.com', `/api/v1/cash/movements/${drop.id}/confirm`, { totalCents: 100 })).json().movement.status, 'CONFIRMED');
+      assert.equal((await getJ('cashier@example.com', '/api/v1/cashier/shift')).session, null);
+      assert.equal((await one('SELECT status FROM cashier_sessions WHERE id = $1', [st.session])).status, 'CLOSED');
+    });
+
+    test('read views write nothing and every one of them is permission-guarded', async () => {
+      const before = await counts();
+      const urls: Array<[string, string, number]> = [
+        ['cashier@example.com', `/api/v1/operator/context?casinoId=${cid()}`, 200],
+        ['cashier@example.com', '/api/v1/cashier/shift', 200],
+        ['cashier@example.com', `/api/v1/players/lookup/${st.card}`, 200],
+        ['manager@example.com', `/api/v1/vault/status?casinoId=${cid()}`, 200],
+        ['floor@example.com', `/api/v1/money/deferred?casinoId=${cid()}&status=ALL`, 200],
+        ['floor@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`, 200],
+        ['floor@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`, 200],
+        ['attendant@example.com', `/api/v1/machines/${m(0).id}/money`, 200],
+        ['manager@example.com', `/api/v1/money/counts?casinoId=${cid()}`, 200],
+        ['floor@example.com', `/api/v1/approvals?casinoId=${cid()}&status=ALL`, 200],
+        ['floor@example.com', `/api/v1/machines/event-exceptions?casinoId=${cid()}`, 200],
+        ['cashier@example.com', `/api/v1/money/day-close/status?casinoId=${cid()}`, 403],
+        ['cashier@example.com', `/api/v1/money/reconciliation/meters?casinoId=${cid()}`, 403],
+        ['cashier@example.com', `/api/v1/money/deferred?casinoId=${cid()}`, 403],
+        ['cashier@example.com', `/api/v1/money/counts?casinoId=${cid()}`, 403],
+        ['floor@example.com', '/api/v1/cashier/shift', 403],
+        ['floor@example.com', `/api/v1/vault/status?casinoId=${cid()}`, 403],
+      ];
+      for (const [email, url, code] of urls) assert.equal((await get_(email, url)).statusCode, code, `${email} ${url}`);
+      assert.equal((await c.app.inject({ method: 'GET', url: '/api/v1/operator/context' })).statusCode, 401);
+      assert.deepEqual(await counts(), before);
+      const ledger = await import('../src/services/ledger');
+      assert.equal((await ledger.checkLedgerInvariants(c.pool as never, c.orgId)).ok, true);
+    });
+  });
+}

@@ -11,7 +11,7 @@ export interface ModuleDefinition {
 export const MODULES: ModuleDefinition[] = [
   { key: 'machines', name: 'Machine Management', description: 'Machine registry, meters and live status', phase: 1, core: true },
   { key: 'floor', name: 'Floor Control', description: 'Graphical floor plan with live status', phase: 1 },
-  { key: 'accounting', name: 'Accounting', description: 'Immutable ledger, Coin In / Coin Out / GGR', phase: 1 },
+  { key: 'accounting', name: 'Accounting', description: 'Immutable ledger, bets / wins / GGR', phase: 1 },
   { key: 'tickets', name: 'Ticket System (TITO)', description: 'Ticket in / out, validation, expiration', phase: 2 },
   { key: 'cash', name: 'Cash Management', description: 'Cash desks, drops, collections', phase: 2 },
   { key: 'cashier', name: 'Cashier & Mobile Cashier', description: 'Cashier sessions and tablet cashier', phase: 2 },

@@ -8,6 +8,8 @@ import { useSession } from '@/lib/session';
 import { Card, PageHeader } from '@/components/ui';
 import { CashActions, Handpays, ShiftPanel, TicketPayout, TransactionList } from '@/components/cashier';
 import { clsx } from '@/components/clsx';
+import { LedgerWorkstation } from '@/components/ledger-cashier';
+import { RailBadge, useOperatorContext } from '@/components/money-ui';
 
 function Workstation() {
   const cashier = useCashier();
@@ -77,14 +79,19 @@ function Supervisor() {
 
 export default function CashierPage() {
   const { can } = useSession();
+  const ctx = useOperatorContext();
+  const ledger = ctx.data?.rails.CASH === 'LEDGER';
   return (
     <div className="space-y-8">
       <PageHeader
         title="Cashier"
-        subtitle="Cage workstation: shifts, ticket payouts, handpays and drawer movements. Every movement is immutable and audited."
-        actions={can('cash.transact') && <Link href="/mobile" className="btn"><Smartphone className="h-4 w-4" /> Mobile Cashier</Link>}
+        subtitle="Cage workstation: shifts, TITO, HANDPAY and CASHLESS wallet. Every movement is immutable and audited."
+        actions={<>
+          {ctx.data && <span className="text-xs text-sub">CASH rail <RailBadge mode={ctx.data.rails.CASH} /></span>}
+          {can('cash.transact') && <Link href="/mobile" className="btn"><Smartphone className="h-4 w-4" /> Mobile Cashier</Link>}
+        </>}
       />
-      {can('cash.transact') && <Workstation />}
+      {can('cash.transact') && ctx.data && (ledger ? <LedgerWorkstation /> : <Workstation />)}
       {can('cashier.supervise') && (
         <div>
           <h2 className="mb-4 text-lg font-semibold">Cash desks overview</h2>
