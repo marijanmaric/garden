@@ -25,6 +25,8 @@ import { cashOpsRoutes } from './routes/cash-ops';
 import { handpayRoutes } from './routes/handpays';
 import { machineMoneyRoutes } from './routes/machine-money';
 import { operatorRoutes } from './routes/operator';
+import { orgRoutes } from './routes/org';
+import { platformRoutes } from './routes/platform';
 
 export async function buildApp() {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, trustProxy: true });
@@ -55,7 +57,8 @@ export async function buildApp() {
   });
 
   for (const routes of [authRoutes, dashboardRoutes, machineRoutes, floorRoutes, accountingRoutes, alertRoutes, auditRoutes, gatewayRoutes, casinoRoutes, streamRoutes,
-    ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes, ledgerRoutes, moneyRoutes, cashOpsRoutes, handpayRoutes, machineMoneyRoutes, operatorRoutes])
+    ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes, ledgerRoutes, moneyRoutes, cashOpsRoutes, handpayRoutes, machineMoneyRoutes, operatorRoutes,
+    orgRoutes, platformRoutes])
     await app.register(routes);
 
   return app;
