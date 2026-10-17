@@ -14,7 +14,7 @@ export const getToken = () => (typeof window === 'undefined' ? null : localStora
 export const setToken = (t: string | null) => (t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY));
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public code?: string, public reasons?: string[]) {
     super(message);
   }
 }
@@ -60,7 +60,7 @@ async function request(path: string, init: RequestInit & { json?: unknown; idemp
 
 export async function api<T = any>(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}): Promise<T> {
   const { res, body } = await request(path, init);
-  if (!res.ok) throw new ApiError(res.status, body.error ?? `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, body.reasons?.length ? `${body.error?.split('. ')[0] ?? 'Refused'}: ${body.reasons.join(' ')}` : body.error ?? `HTTP ${res.status}`, body.code, body.reasons);
   return body as T;
 }
 

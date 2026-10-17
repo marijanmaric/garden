@@ -10,6 +10,7 @@ const DEMO = [
   ['tech@example.com', 'Technician'],
   ['accounting@example.com', 'Accounting'],
   ['cashier@example.com', 'Cashier'],
+  ['platform@example.com', 'Platform Admin'],
   ['admin@riverside.example', 'Other tenant'],
 ];
 
@@ -27,7 +28,9 @@ export default function LoginPage() {
     try {
       const { token } = await api<{ token: string }>('/auth/login', { method: 'POST', json: { email, password } });
       setToken(token);
-      router.replace('/');
+      // platform administrators work in the admin portal, customers in the casino app
+      const me = await api<{ user: { isPlatformAdmin: boolean } }>('/auth/me');
+      router.replace(me.user.isPlatformAdmin ? '/admin' : '/');
     } catch (err) {
       setError((err as Error).message === 'Failed to fetch' ? 'API not reachable on port 4000' : (err as Error).message);
     } finally {

@@ -12,6 +12,7 @@ import { LedgerWorkstation } from '@/components/ledger-cashier';
 import { RailBadge, useOperatorContext } from '@/components/money-ui';
 
 function Workstation() {
+  const { sees } = useSession();
   const cashier = useCashier();
   if (cashier.loading) return <div className="text-sub">Loading shift...</div>;
   return (
@@ -21,8 +22,8 @@ function Workstation() {
         <Card title="Shift transactions" bodyClass="max-h-96 overflow-y-auto px-4 py-2"><TransactionList items={cashier.transactions} /></Card>
       </div>
       <div className="space-y-6">
-        <Card title="Ticket payout"><TicketPayout cashier={cashier} /></Card>
-        <Card title="Jackpot handpays"><Handpays cashier={cashier} /></Card>
+        {sees('tito.cashier') && <Card title="Ticket payout"><TicketPayout cashier={cashier} /></Card>}
+        {sees('handpay.pay') && <Card title="Jackpot handpays"><Handpays cashier={cashier} /></Card>}
       </div>
       <Card title="Cash & tickets"><CashActions cashier={cashier} /></Card>
     </div>

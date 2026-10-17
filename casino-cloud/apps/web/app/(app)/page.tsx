@@ -36,6 +36,47 @@ export default function DashboardPage() {
         <Kpi label="Alerts" icon={AlertTriangle} value={d.alerts.length} sub={`${critical} critical`} accent={critical ? 'bg-red-500/10 text-red-600' : undefined} />
       </div>
 
+      {/* module sections: the API returns a section only for modules the organisation uses */}
+      {(d.tito || d.handpay || d.cashless || d.machineMoney || d.vault) && (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5" data-testid="module-sections">
+          {d.tito && (
+            <Card title={<Link href="/tickets">TITO</Link>}>
+              <Stat label="Issued today" value={d.tito.issued_today} />
+              <Stat label="Redeemed today" value={d.tito.redeemed_today} />
+              <Stat label="Outstanding" value={d.tito.outstanding} hint={formatEuro(Number(d.tito.liability))} />
+              <Stat label="Open exceptions" value={d.tito.exceptions} tone={d.tito.exceptions ? 'warn' : undefined} />
+            </Card>
+          )}
+          {d.handpay && (
+            <Card title="Handpay">
+              <Stat label="Open handpays" value={d.handpay.open} hint={formatEuro(Number(d.handpay.open_cents) / 100)} tone={d.handpay.open ? 'warn' : undefined} />
+              <Stat label="Paid today" value={d.handpay.paid_today} hint={formatEuro(Number(d.handpay.paid_today_cents) / 100)} />
+            </Card>
+          )}
+          {d.cashless && (
+            <Card title="Cashless">
+              <Stat label="Active wallets" value={d.cashless.wallets} />
+              <Stat label="Wallet liability" value={formatEuro(Number(d.cashless.wallet_liability_cents) / 100)} />
+              <Stat label="Transfers today" value={d.cashless.transfers_today} />
+              <Stat label="Pending transfers" value={d.cashless.active_transfers} tone={d.cashless.active_transfers ? 'warn' : undefined} />
+            </Card>
+          )}
+          {d.machineMoney && (
+            <Card title="Machine money">
+              <Stat label="Machines on the ledger" value={d.machineMoney.on_ledger} />
+              <Stat label="Frozen machines" value={d.machineMoney.frozen} tone={d.machineMoney.frozen ? 'bad' : undefined} />
+              <Stat label="Open exceptions" value={d.machineMoney.exceptions} tone={d.machineMoney.exceptions ? 'warn' : undefined} />
+            </Card>
+          )}
+          {d.vault && (
+            <Card title={<Link href="/vault">Vault</Link>}>
+              <Stat label="Vault session" value={d.vault.session_status ?? 'none'} />
+              <Stat label="Open movements" value={d.vault.open_movements} tone={d.vault.open_movements ? 'warn' : undefined} />
+            </Card>
+          )}
+        </div>
+      )}
+
       <div className="grid gap-6 xl:grid-cols-3">
         <Card title="Bets · last 24 hours" className="xl:col-span-2">
           <BarChart
@@ -155,7 +196,7 @@ export default function DashboardPage() {
             </div>
           ))}
         </Card>
-        <Card title="Gateways & Cashier" actions={<Link href="/cashier" className="text-xs font-medium text-brand">Cashier →</Link>}>
+        <Card title={d.cashier ? 'Gateways & Cashier' : 'Gateways'} actions={d.cashier && <Link href="/cashier" className="text-xs font-medium text-brand">Cashier →</Link>}>
           {d.gateways.map((g: any) => (
             <div key={g.id} className="flex items-center gap-2 py-1 text-sm">
               <Router className="h-4 w-4 text-sub" />
@@ -164,16 +205,18 @@ export default function DashboardPage() {
             </div>
           ))}
           <div className="mt-3 border-t border-line pt-3">
-            {!d.cashier.length && <div className="text-xs text-sub">No cashier shift open.</div>}
-            {d.cashier.map((c: any) => (
+            {d.cashier && !d.cashier.length && <div className="text-xs text-sub">No cashier shift open.</div>}
+            {d.cashier?.map((c: any) => (
               <div key={c.desk} className="flex items-center justify-between py-1 text-sm">
                 <span>{c.desk}<span className="ml-1 text-xs text-sub">{c.employee}</span></span>
-                <span className="font-semibold tabular-nums">{formatEuro(c.balance)}</span>
+                <span className="font-semibold tabular-nums">{c.balance === null ? 'blind' : formatEuro(c.balance)}</span>
               </div>
             ))}
-            <div className="mt-2 flex justify-between text-xs text-sub">
-              <span>Ticket liability ({d.tickets.n})</span><span className="tabular-nums">{formatEuro(d.tickets.liability)}</span>
-            </div>
+            {d.tickets && (
+              <div className="mt-2 flex justify-between text-xs text-sub">
+                <span>Ticket liability ({d.tickets.n})</span><span className="tabular-nums">{formatEuro(d.tickets.liability)}</span>
+              </div>
+            )}
             <div className="mt-1 text-[11px] text-sub">Last heartbeat {formatDateTime(d.gateways[0]?.last_heartbeat_at)}</div>
           </div>
         </Card>

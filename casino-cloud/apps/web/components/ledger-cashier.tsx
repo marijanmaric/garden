@@ -241,6 +241,7 @@ function WalletDesk({ player, ctx, shift, reload, refresh }: { player: PlayerLoo
 }
 
 function ScanDesk({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null; reload: () => void }) {
+  const { sees } = useSession();
   const [code, setCode] = useState('');
   const [ticket, setTicket] = useState<any>(null);
   const [player, setPlayer] = useState<PlayerLookup | null>(null);
@@ -269,7 +270,7 @@ function ScanDesk({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null; reloa
       </form>
       {error && <Notice tone="bad">{error}</Notice>}
       {ticket && <TicketDesk ticket={ticket} ctx={ctx} shift={shift} reload={reload} onDone={() => void lookup(ticket.barcode, true)} />}
-      {player && <WalletDesk player={player} ctx={ctx} shift={shift} reload={reload} refresh={() => void lookup(player.card.number, true)} />}
+      {player && sees('cashless.cashier') && <WalletDesk player={player} ctx={ctx} shift={shift} reload={reload} refresh={() => void lookup(player.card.number, true)} />}
     </div>
   );
 }
@@ -373,6 +374,7 @@ function BlindTransactions() {
 }
 
 export function LedgerWorkstation() {
+  const { sees } = useSession();
   const ctx = useOperatorContext();
   const shift = useApi<Shift>('/cashier/shift', { refreshMs: 5000 });
   useLiveRefresh(() => void shift.reload(), 1500, ['alert.created', 'alert.updated']);
@@ -386,12 +388,12 @@ export function LedgerWorkstation() {
           <Card title="Shift transactions" bodyClass="max-h-96 overflow-y-auto px-4 py-2"><BlindTransactions /></Card>
         </div>
         <div className="space-y-6">
-          <Card title="Scan: TITO ticket or player card"><ScanDesk ctx={ctx.data} shift={shift.data} reload={reload} /></Card>
+          <Card title={sees('tito.cashier') && sees('cashless.cashier') ? 'Scan: TITO ticket or player card' : sees('tito.cashier') ? 'Scan: TITO ticket' : 'Scan: player card'}><ScanDesk ctx={ctx.data} shift={shift.data} reload={reload} /></Card>
           <Card title="My approval requests"><MyApprovals shift={shift.data} /></Card>
         </div>
         <div className="space-y-6">
-          <Card title="HANDPAY (jackpots)"><LedgerHandpays ctx={ctx.data} shift={shift.data} reload={reload} /></Card>
-          <Card title="TITO sale"><SellTicket ctx={ctx.data} shift={shift.data} reload={reload} /></Card>
+          {sees('handpay.pay') && <Card title="HANDPAY (jackpots)"><LedgerHandpays ctx={ctx.data} shift={shift.data} reload={reload} /></Card>}
+          {sees('tito.cashier') && <Card title="TITO sale"><SellTicket ctx={ctx.data} shift={shift.data} reload={reload} /></Card>}
         </div>
       </div>
     </div>

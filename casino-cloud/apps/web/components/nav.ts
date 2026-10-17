@@ -1,69 +1,68 @@
 import {
   Smartphone, Landmark,
   Activity, AlertTriangle, BarChart3, Building2, Coins, Cpu, CreditCard, Gift, LayoutDashboard, Map, Monitor,
-  Router, ScrollText, Settings, Sparkles, Star, Ticket, Trophy, Users, UserCog, Vault, ShieldCheck, Scale, SlidersHorizontal,
+  Package, Router, ScrollText, Settings, Sparkles, Star, Ticket, Trophy, Users, UserCog, Vault, ShieldCheck, Scale, SlidersHorizontal,
 } from 'lucide-react';
-import type { Permission } from '@m1/shared';
+import type { Feature, Permission } from '@m1/shared';
 
 export interface NavItem {
   href: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  module?: string;
+  /** Commercial feature the page belongs to (the API enforces the same feature on its routes). */
+  feature: Feature;
   permission?: Permission;
   /** Visible when the user has at least one of these. */
   anyPermission?: Permission[];
-  phase?: number;
 }
 
 export const NAV: Array<{ title: string; items: NavItem[] }> = [
   {
     title: 'Overview',
     items: [
-      { href: '/', label: 'Dashboard', icon: LayoutDashboard, permission: 'dashboard.view' },
-      { href: '/casinos', label: 'Casinos', icon: Building2, permission: 'casino.view' },
+      { href: '/', label: 'Dashboard', icon: LayoutDashboard, feature: 'core', permission: 'dashboard.view' },
+      { href: '/casinos', label: 'Casinos', icon: Building2, feature: 'core', permission: 'casino.view' },
     ],
   },
   {
     title: 'Operations',
     items: [
-      { href: '/floor', label: 'Floor Control', icon: Map, module: 'floor', permission: 'floor.view' },
-      { href: '/machines', label: 'Machines', icon: Monitor, module: 'machines', permission: 'machine.view' },
-      { href: '/alerts', label: 'Alerts', icon: AlertTriangle, permission: 'alert.view' },
-      { href: '/simulation', label: 'Simulation', icon: Activity, permission: 'dashboard.view' },
+      { href: '/floor', label: 'Floor Control', icon: Map, feature: 'core', permission: 'floor.view' },
+      { href: '/machines', label: 'Machines', icon: Monitor, feature: 'core', permission: 'machine.view' },
+      { href: '/alerts', label: 'Alerts', icon: AlertTriangle, feature: 'core', permission: 'alert.view' },
+      { href: '/simulation', label: 'Simulation', icon: Activity, feature: 'core', permission: 'dashboard.view' },
     ],
   },
   {
     title: 'Finance',
     items: [
-      { href: '/accounting', label: 'Accounting', icon: Coins, module: 'accounting', permission: 'accounting.view' },
-      { href: '/cashier', label: 'Cashier', icon: CreditCard, module: 'cashier', anyPermission: ['cash.transact', 'cashier.supervise'] },
-      { href: '/mobile', label: 'Mobile Cashier', icon: Smartphone, module: 'cashier', permission: 'cash.transact' },
-      { href: '/tickets', label: 'Tickets', icon: Ticket, module: 'tickets', permission: 'ticket.view' },
-      { href: '/vault', label: 'Vault', icon: Vault, permission: 'cash.manage' },
-      { href: '/approvals', label: 'Approvals', icon: ShieldCheck, permission: 'cashier.supervise' },
-      { href: '/reconciliation', label: 'Reconciliation', icon: Scale, permission: 'cashier.supervise' },
-      { href: '/cash', label: 'Cash Management', icon: Landmark, module: 'cash', permission: 'cashier.supervise' },
-      { href: '/reports', label: 'Reports', icon: BarChart3, module: 'reporting', permission: 'report.view' },
+      { href: '/accounting', label: 'Accounting', icon: Coins, feature: 'core', permission: 'accounting.view' },
+      { href: '/cashier', label: 'Cashier', icon: CreditCard, feature: 'cash', anyPermission: ['cash.transact', 'cashier.supervise'] },
+      { href: '/mobile', label: 'Mobile Cashier', icon: Smartphone, feature: 'cash', permission: 'cash.transact' },
+      { href: '/tickets', label: 'Tickets', icon: Ticket, feature: 'tito', permission: 'ticket.view' },
+      { href: '/vault', label: 'Vault', icon: Vault, feature: 'vault', permission: 'cash.manage' },
+      { href: '/approvals', label: 'Approvals', icon: ShieldCheck, feature: 'reconciliation', permission: 'cashier.supervise' },
+      { href: '/reconciliation', label: 'Reconciliation', icon: Scale, feature: 'reconciliation', permission: 'cashier.supervise' },
+      { href: '/cash', label: 'Cash Management', icon: Landmark, feature: 'cash', permission: 'cashier.supervise' },
+      { href: '/reports', label: 'Reports', icon: BarChart3, feature: 'reporting', permission: 'report.view' },
     ],
   },
   {
     title: 'Players',
     items: [
-      { href: '/players', label: 'Players', icon: Users, permission: 'player.view' },
-      { href: '/loyalty', label: 'Loyalty', icon: Star, module: 'loyalty', phase: 3 },
-      { href: '/promotions', label: 'Promotions', icon: Gift, module: 'promotions', phase: 3 },
-      { href: '/jackpots', label: 'Jackpots', icon: Trophy, module: 'jackpots', permission: 'jackpot.view' },
+      { href: '/players', label: 'Players', icon: Users, feature: 'core', permission: 'player.view' },
+      { href: '/jackpots', label: 'Jackpots', icon: Trophy, feature: 'core', permission: 'jackpot.view' },
     ],
   },
   {
     title: 'Administration',
     items: [
-      { href: '/employees', label: 'Employees', icon: UserCog, permission: 'employee.view' },
-      { href: '/money', label: 'Money control', icon: SlidersHorizontal, anyPermission: ['money.cutover', 'cashier.supervise'] },
-      { href: '/gateways', label: 'Gateways', icon: Router, permission: 'gateway.view' },
-      { href: '/audit', label: 'Audit Log', icon: ScrollText, permission: 'audit.view' },
-      { href: '/settings', label: 'Settings', icon: Settings },
+      { href: '/organization', label: 'Organization', icon: Package, feature: 'core', permission: 'org.manage' },
+      { href: '/employees', label: 'Employees', icon: UserCog, feature: 'core', permission: 'employee.view' },
+      { href: '/money', label: 'Money control', icon: SlidersHorizontal, feature: 'money.admin', anyPermission: ['money.cutover', 'cashier.supervise'] },
+      { href: '/gateways', label: 'Gateways', icon: Router, feature: 'core', permission: 'gateway.view' },
+      { href: '/audit', label: 'Audit Log', icon: ScrollText, feature: 'core', permission: 'audit.view' },
+      { href: '/settings', label: 'Settings', icon: Settings, feature: 'core' },
     ],
   },
 ];
@@ -73,4 +72,11 @@ export const PLANNED: Record<string, { title: string; phase: number; icon: React
   promotions: { title: 'Promotions', phase: 3, icon: Sparkles, features: ['Rule engine: IF tier = GOLD AND bets > 500 THEN award points', 'Free play, bonus, cashback, tournaments', 'Time based promotions'] },
 };
 
-export { Cpu };
+export { Cpu, Gift };
+
+/** The navigation item a path belongs to (longest prefix), for the page guard. */
+export function navItemFor(pathname: string): NavItem | undefined {
+  const all = NAV.flatMap((g) => g.items);
+  return all.filter((i) => (i.href === '/' ? pathname === '/' : pathname === i.href || pathname.startsWith(`${i.href}/`)))
+    .sort((a, b) => b.href.length - a.href.length)[0];
+}

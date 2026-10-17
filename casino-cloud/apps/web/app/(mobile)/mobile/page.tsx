@@ -6,6 +6,7 @@ import { SEVERITY_BADGE, formatEuro, timeAgo } from '@m1/ui';
 import { api, useApi } from '@/lib/api';
 import { useCashier } from '@/lib/cashier';
 import { useLiveRefresh } from '@/lib/live';
+import type { Feature } from '@m1/shared';
 import { useSession } from '@/lib/session';
 import { Notice, StatusBadge } from '@/components/ui';
 import { CashActions, Handpays, ScanButton, ShiftPanel, TicketPayout, TransactionList } from '@/components/cashier';
@@ -96,9 +97,9 @@ function Alerts() {
   );
 }
 
-const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { key: 'ticket', label: 'Ticket', icon: Ticket },
-  { key: 'handpay', label: 'Handpay', icon: Trophy },
+const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ className?: string }>; feature?: Feature }> = [
+  { key: 'ticket', label: 'Ticket', icon: Ticket, feature: 'tito.cashier' },
+  { key: 'handpay', label: 'Handpay', icon: Trophy, feature: 'handpay.pay' },
   { key: 'cash', label: 'Cash', icon: Coins },
   { key: 'player', label: 'Player', icon: User },
   { key: 'machines', label: 'Machines', icon: Monitor },
@@ -107,9 +108,10 @@ const TABS: Array<{ key: Tab; label: string; icon: React.ComponentType<{ classNa
 ];
 
 export default function MobileCashierPage() {
-  const { me, casino, can } = useSession();
+  const { me, casino, can, sees } = useSession();
   const cashier = useCashier();
-  const [tab, setTab] = useState<Tab>('ticket');
+  const tabs = TABS.filter((t) => !t.feature || sees(t.feature));
+  const [tab, setTab] = useState<Tab>(tabs[0].key);
   const ctx = useOperatorContext();
   const ledger = ctx.data?.rails.CASH === 'LEDGER';
   if (!can('cash.transact')) return <div className="p-6"><Notice tone="bad">Your role cannot use the mobile cashier.</Notice></div>;
@@ -149,7 +151,7 @@ export default function MobileCashierPage() {
       </main>
 
       <nav className="fixed inset-x-0 bottom-0 z-10 grid grid-cols-7 border-t border-line bg-panel pb-[env(safe-area-inset-bottom)]">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button key={t.key} onClick={() => setTab(t.key)} className={clsx('flex flex-col items-center gap-1 py-3 text-[11px] font-medium', tab === t.key ? 'text-brand' : 'text-sub')}>
             <t.icon className="h-6 w-6" />
             {t.label}

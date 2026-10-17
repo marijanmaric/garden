@@ -1,7 +1,7 @@
 'use client';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Permission } from '@m1/shared';
+import type { Feature, ModuleState, Permission, ProductModule } from '@m1/shared';
 import { api, getToken, setToken } from './api';
 
 export interface Casino {
@@ -10,14 +10,28 @@ export interface Casino {
   name: string;
   city: string;
   timezone: string;
-  modules: Record<string, boolean>;
+}
+
+/** The organisation's entitlements as the API evaluated them (GET /auth/me, never cached across organisations). */
+export interface Entitlements {
+  orgId: string;
+  orgName: string;
+  orgStatus: 'ACTIVE' | 'DISABLED';
+  isPlatform: boolean;
+  subscription: null | { status: string; startsAt: string; endsAt: string | null; usable: boolean; plan: { code: string; name: string; version: number } };
+  modules: Array<{ module: ProductModule; name: string; purchased: boolean; enabled: boolean; missing: ProductModule[]; effective: boolean; state: ModuleState }>;
+  /** Features usable now. */
+  features: Feature[];
+  /** Features whose data stays readable (also with an inactive subscription). */
+  readable: Feature[];
 }
 
 export interface Me {
-  user: { id: string; name: string; email: string; role: string };
-  organization: { id: string; name: string };
+  user: { id: string; name: string; email: string; role: string; isPlatformAdmin: boolean };
+  organization: { id: string; name: string; is_platform: boolean };
   permissions: Permission[];
   casinos: Casino[];
+  entitlements: Entitlements;
 }
 
 interface SessionValue {
@@ -25,7 +39,10 @@ interface SessionValue {
   casino: Casino;
   setCasinoId: (id: string) => void;
   can: (p: Permission) => boolean;
-  moduleOn: (key: string) => boolean;
+  /** The feature is usable now (actions allowed). */
+  has: (f: Feature) => boolean;
+  /** The feature's pages and data are visible (usable, or read-only on an inactive subscription). */
+  sees: (f: Feature) => boolean;
   refresh: () => Promise<void>;
   logout: () => void;
 }
@@ -45,12 +62,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(async () => {
     const m = await api<Me>('/auth/me');
+    // platform administrators have no casino: they work in the admin portal
+    if (m.user.isPlatformAdmin && !m.casinos.length) {
+      router.replace('/admin');
+      return;
+    }
     setMe(m);
     setCasinoIdState((cur) => {
       const saved = cur ?? localStorage.getItem('m1-casino');
       return m.casinos.find((c) => c.id === saved)?.id ?? m.casinos[0]?.id ?? null;
     });
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     if (!getToken()) {
@@ -64,6 +86,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (!me) return null;
     const casino = me.casinos.find((c) => c.id === casinoId) ?? me.casinos[0];
     if (!casino) return null;
+    const features = new Set(me.entitlements.features);
+    const readable = new Set(me.entitlements.readable);
     return {
       me,
       casino,
@@ -72,7 +96,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         setCasinoIdState(id);
       },
       can: (p) => me.permissions.includes(p),
-      moduleOn: (key) => casino.modules[key] ?? false,
+      has: (f) => features.has(f),
+      sees: (f) => readable.has(f),
       refresh,
       logout: () => {
         setToken(null);
@@ -83,8 +108,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   if (!value)
     return (
-      <div className="flex min-h-screen items-center justify-center text-sub">
-        {me && !me.casinos.length ? 'No casino assigned to this account.' : 'Loading M1 Casino Cloud...'}
+      <div className="flex min-h-screen items-center justify-center p-6 text-center text-sub">
+        {me && !me.casinos.length ? (
+          <div>
+            <div className="text-fg font-semibold">No casino assigned to this account.</div>
+            <div className="mt-1 text-sm">Ask your administrator to create a casino or to grant you access.</div>
+            <button className="btn mt-4" onClick={() => { setToken(null); router.replace('/login'); }}>Log out</button>
+          </div>
+        ) : 'Loading M1 Casino Cloud...'}
       </div>
     );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

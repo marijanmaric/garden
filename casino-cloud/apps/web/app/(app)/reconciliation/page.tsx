@@ -31,6 +31,8 @@ function DayClose({ status, reload }: { status: any; reload: () => void }) {
         {status?.canClose ? 'Nothing blocks the business-day close (a fresh reconciliation runs at close).' : `Business-day close is blocked (${status?.blockers?.length ?? 0})`}
       </div>
       {status?.blockers?.map((b: any, i: number) => <div key={i} className="text-sm" data-testid="day-close-blocker"><span className="font-mono text-xs text-sub">{b.code}</span> {b.message}</div>)}
+      {status?.info?.map((b: any, i: number) => <div key={`i${i}`} className="text-xs text-sub" data-testid="day-close-info"><span className="font-mono">{b.code}</span> {b.message}</div>)}
+      {status?.railsInUse && <div className="text-xs text-sub" data-testid="rails-in-use">Rails of your modules: {status.railsInUse.join(', ') || 'none'}. Checks of other rails are advisory and never block the close.</div>}
       <div className="text-xs text-sub">Today: {status?.today} · last closed: {status?.closed?.[0]?.business_date ?? 'none'} · open past dates with money: {status?.openDates?.join(', ') || 'none'}</div>
       <div className="flex flex-wrap gap-2">
         <button className="btn" data-testid="run-reconciliation" onClick={() => run.ask({
@@ -114,10 +116,10 @@ export default function ReconciliationPage() {
               <div className={clsx('text-sm font-semibold', run.ok ? 'text-emerald-600' : 'text-red-600')} data-testid="last-run-state">{run.ok ? 'Clean' : 'Mismatch'} · {formatDateTime(run.created_at)}</div>
               {RAIL_ORDER.filter((r) => checks.some((c) => c.rail === r)).map((rail) => (
                 <div key={rail} className="rounded-lg border border-line p-2" data-testid={`recon-rail-${rail}`}>
-                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-sub">{rail === 'GLOBAL' ? 'Ledger invariants' : rail}</div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-sub">{rail === 'GLOBAL' ? 'Ledger invariants' : rail}{checks.filter((c) => c.rail === rail).every((c) => c.advisory) && <span className="ml-2 normal-case text-amber-600">advisory: module not in use</span>}</div>
                   {checks.filter((c) => c.rail === rail).map((c) => (
                     <div key={c.key} className="py-0.5 text-sm">
-                      <span className={clsx('mr-2 inline-block w-4', c.ok ? 'text-emerald-600' : 'text-red-600')}>{c.ok ? '✓' : '✗'}</span>
+                      <span className={clsx('mr-2 inline-block w-4', c.ok ? 'text-emerald-600' : c.advisory ? 'text-amber-600' : 'text-red-600')}>{c.ok ? '✓' : c.advisory ? '!' : '✗'}</span>
                       <span className="font-mono text-xs">{c.key}</span>
                       {c.resolved?.length > 0 && <span className="ml-2 text-xs text-sub">{c.resolved.length} explained</span>}
                       {c.items.map((i: string) => (

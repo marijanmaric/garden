@@ -6,7 +6,8 @@ import { LogOut, Menu, Moon, Sun, X } from 'lucide-react';
 import { useSession } from '@/lib/session';
 import { LiveProvider } from '@/lib/live';
 import { LiveDot } from './EventFeed';
-import { NAV } from './nav';
+import { NAV, navItemFor } from './nav';
+import { NotEntitled, SubscriptionBanner } from './entitlement';
 import { clsx } from './clsx';
 
 function ThemeToggle() {
@@ -27,7 +28,7 @@ function ThemeToggle() {
 
 function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
-  const { can, moduleOn } = useSession();
+  const { can, sees } = useSession();
   return (
     <nav className="flex h-full flex-col">
       <div className="flex h-16 items-center gap-2 border-b border-line px-5">
@@ -40,7 +41,8 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <div className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
         {NAV.map((group) => {
           const items = group.items.filter(
-            (i) => (!i.permission || can(i.permission)) && (!i.anyPermission || i.anyPermission.some(can)) && (!i.module || moduleOn(i.module)),
+            // menu = role permission AND commercial feature (the API enforces both again on every call)
+            (i) => (!i.permission || can(i.permission)) && (!i.anyPermission || i.anyPermission.some(can)) && sees(i.feature),
           );
           if (!items.length) return null;
           return (
@@ -60,7 +62,6 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
                   >
                     <item.icon className="h-4 w-4 shrink-0" />
                     <span className="flex-1">{item.label}</span>
-                    {item.phase && <span className="rounded bg-muted px-1.5 text-[10px] text-sub">P{item.phase}</span>}
                   </Link>
                 );
               })}
@@ -72,9 +73,19 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+/** Direct URLs to a page outside the plan show the explanation instead of the page. */
+function PageGuard({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const { sees } = useSession();
+  const item = navItemFor(pathname);
+  if (item && !sees(item.feature)) return <NotEntitled feature={item.feature} />;
+  return <>{children}</>;
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { me, casino, setCasinoId, logout } = useSession();
   const [open, setOpen] = useState(false);
+  const plan = me.entitlements.subscription?.plan;
   return (
     <LiveProvider>
       <div className="flex min-h-screen">
@@ -105,6 +116,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
             </select>
             <span className="hidden text-xs text-sub md:inline">{me.organization.name}</span>
+            {plan && <span className="hidden rounded-full bg-brand/10 px-2 py-0.5 text-[11px] font-medium text-brand md:inline" title="Current plan" data-testid="plan-badge">{plan.name}</span>}
             <div className="ml-auto flex items-center gap-3">
               <LiveDot />
               <ThemeToggle />
@@ -117,7 +129,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </button>
             </div>
           </header>
-          <main className="flex-1 p-4 md:p-6">{children}</main>
+          <main className="flex-1 p-4 md:p-6">
+            <SubscriptionBanner />
+            <PageGuard>{children}</PageGuard>
+          </main>
         </div>
       </div>
     </LiveProvider>
