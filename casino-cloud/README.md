@@ -27,7 +27,8 @@ On first start the API migrates the database and seeds the demo tenant automatic
 | accounting@example.com | ACCOUNTING |
 | cashier@example.com | CASHIER (tickets, cash, mobile cashier only) |
 | attendant@example.com | ATTENDANT (floor service + mobile cashier) |
-| admin@riverside.example | Admin of a second tenant (proves tenant isolation) |
+| admin@riverside.example | Admin of a second tenant (plan TITO + Handpay, proves tenant isolation and entitlements) |
+| platform@example.com | Platform administrator: `/admin` portal (organisations, plans, onboarding) |
 
 All passwords: `demo`. Tablets on the same network can open `http://<your-ip>:3000`.
 
@@ -328,6 +329,21 @@ cannot produce a ledger movement on a legacy rail. The window C is operational, 
 - Operator wording uses CASH, TITO, CASHLESS, HANDPAY and MACHINE CREDIT; gaming meters are shown as bets /
   wins (database fields `coin_in` / `coin_out` stay for adapter compatibility).
 
+### Multi-tenant SaaS and entitlements (migration 012)
+
+Commercial modules (CORE, TITO, HANDPAY, CASH, VAULT, CASHLESS, MACHINE, REPORTING, ADVANCED_RECONCILIATION)
+come from the organisation's plan or a platform override, can be switched off by the customer admin and are
+enforced by the API on every route (`403 MODULE_NOT_ENTITLED`). Menus, pages, direct URLs, dashboard sections,
+reports, reconciliation and the day close follow the same entitlements. Platform administrators work in `/admin`
+(organisations, plans, subscriptions, overrides, limits, onboarding, audit); customer admins in `/organization`.
+Design, dependencies, error codes, limits, lifecycle and the safe defaults for upgraded customers:
+[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
+
+Production configuration: `NODE_ENV=production` refuses to start with the default or a short (< 32 characters)
+`JWT_SECRET` / `PII_HASH_SECRET` unless `DEMO_MODE=true` (the compose demo sets it); set `CORS_ORIGIN`. Create the
+first platform administrator of an upgraded installation with
+`npm run platform-admin -w @m1/database -- <email> <password> [name]`.
+
 ### Accounting definitions
 
 | Metric | Definition |
@@ -343,13 +359,16 @@ Business day = calendar day in the casino's timezone.
 
 ## API overview
 
-`/api/v1/auth/login`, `/auth/me`, `/dashboard`, `/casinos`, `/casinos/:id/modules`, `/floors`,
+`/api/v1/auth/login`, `/auth/me`, `/me/entitlements`, `/dashboard`, `/casinos`, `/floors`,
 `/floors/:id/layout`, `/machines`, `/machines/:id`, `/machines/:id/commands`, `/machines/:id/maintenance`,
 `/accounting/summary`, `/transactions`, `/transactions/adjustments`, `/alerts`, `/alerts/:id/acknowledge|resolve`,
 `/audit`, `/audit/verify`, `/gateways`, `/simulation`, `/players`, `/jackpots`, `/employees`, `/stream` (SSE),
 `/tickets`, `/tickets/lookup/:barcode`, `/tickets/redeem|issue`, `/tickets/:id/cancel|void|reprint|adjust`,
 `/cashier/desks|session|session/open|session/close|sessions|transactions|handpays`, `/cash/overview|collections`,
-`/reports`, `/reports/:key?format=json|csv|xlsx|pdf`.
+`/reports`, `/reports/:key?format=json|csv|xlsx|pdf`, `/org`, `/org/modules/:module`, `/org/casinos`, `/org/machines`.
+
+Platform API (platform administrators only): `/platform/organizations[/:id[/status|subscription|entitlements/:module|modules/:module|limits/:key|users|casinos|machines|audit]]`,
+`/platform/plans[/:id]`, `/platform/registry`, `/platform/audit`.
 
 Gateway device API (headers `x-gateway-id`, `x-gateway-key`): `/gateway/heartbeat`, `/gateway/events`,
 `/gateway/commands/:id/result`.
