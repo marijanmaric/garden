@@ -6,6 +6,8 @@ import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { expectedCollection } from '../services/collections';
+import { reviewCount, reviewableMachineCount } from '../services/blind-count';
+import { cashOnLedger } from '../services/cash-ops';
 import { idempotent } from '../services/idempotency';
 import { openAlert } from '../services/alerts';
 
@@ -14,16 +16,21 @@ export async function cashRoutes(app: FastifyInstance) {
   app.get('/api/v1/cash/overview', { preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const today = `(date_trunc('day', now() AT TIME ZONE c.timezone) AT TIME ZONE c.timezone)`;
+    // Blind count (Step 7e): on a ledger casino the viewer's own open shift is left out, so a supervisor who
+    // also works a drawer cannot read the drawer's expected balance before the close count.
+    const own = (await cashOnLedger(pool, req.auth.orgId, casinoId)) ? req.auth.sub : null;
     const [byType, open, liability, collections] = await Promise.all([
       pool.query(
         `SELECT ct.type, sum(ct.amount) total, count(*) n FROM cash_transactions ct JOIN casinos c ON c.id = ct.casino_id
-         WHERE ct.org_id = $1 AND ct.casino_id = $2 AND ct.created_at >= ${today} GROUP BY ct.type ORDER BY ct.type`,
-        [req.auth.orgId, casinoId],
+         WHERE ct.org_id = $1 AND ct.casino_id = $2 AND ct.created_at >= ${today}
+           AND NOT EXISTS (SELECT 1 FROM cashier_sessions s WHERE s.id = ct.session_id AND s.employee_id = $3 AND s.status IN ('OPEN', 'COUNTING'))
+         GROUP BY ct.type ORDER BY ct.type`,
+        [req.auth.orgId, casinoId, own],
       ),
       pool.query(
         `SELECT count(*) sessions, COALESCE(sum(s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0)), 0) AS in_drawers
-         FROM cashier_sessions s WHERE s.org_id = $1 AND s.casino_id = $2 AND s.status = 'OPEN'`,
-        [req.auth.orgId, casinoId],
+         FROM cashier_sessions s WHERE s.org_id = $1 AND s.casino_id = $2 AND s.status = 'OPEN' AND s.employee_id IS DISTINCT FROM $3`,
+        [req.auth.orgId, casinoId, own],
       ),
       pool.query(`SELECT COALESCE(sum(amount), 0) AS liability, count(*) n FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID'`, [req.auth.orgId, casinoId]),
       pool.query(
@@ -41,8 +48,17 @@ export async function cashRoutes(app: FastifyInstance) {
     if (!m.rowCount) throw new HttpError(404, 'Machine not found');
     // Step 7e: the one authoritative definition (services/collections.ts): CASHBOX ledger balance for a
     // ledger machine, machine-reported cash since the last collection for a legacy machine.
+    // Blind count (enforced here): this route needs cash.manage, i.e. the caller may count the machine. The
+    // amounts are returned only to the reviewer of a count someone else already submitted for it.
+    const reviewCountId = await reviewableMachineCount(pool, { orgId: req.auth.orgId, employeeId: req.auth.sub, role: req.auth.role, casinoIds: req.auth.casinoIds }, machineId);
     const e = await expectedCollection(pool, req.auth.orgId, machineId);
-    return { machineId, assetNo: m.rows[0].asset_no, basis: e.basis, since: e.since, cashCents: e.cashCents, ticketsCents: e.ticketsCents, cash: e.cashCents / 100, tickets: e.ticketsCents / 100 };
+    if (!reviewCountId)
+      return { machineId, assetNo: m.rows[0].asset_no, basis: e.basis, since: e.since, blind: true, cashCents: null, ticketsCents: null, cash: null, tickets: null };
+    const review = await reviewCount(pool, { orgId: req.auth.orgId, employeeId: req.auth.sub, role: req.auth.role, casinoIds: req.auth.casinoIds }, reviewCountId);
+    return {
+      machineId, assetNo: m.rows[0].asset_no, basis: review.basis, since: e.since, blind: false, cashCents: review.expectedCents, ticketsCents: e.ticketsCents,
+      cash: review.expectedCents! / 100, tickets: e.ticketsCents / 100, countId: reviewCountId, countedCents: review.countedCents, differenceCents: review.differenceCents, countedByName: review.countedByName,
+    };
   });
 
   /** Records a machine drop count. Differences against the meters raise an alert. */

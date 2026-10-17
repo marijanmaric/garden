@@ -5,6 +5,7 @@ import { HttpError, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { cardRejectionMessage, resolveCard } from '../services/players';
 import { walletBalances } from '../services/wallets';
+import { countsTargets, reviewCount } from '../services/blind-count';
 
 /**
  * Step 7e: read-only views for the operator screens (cashier, vault, approvals, admin, reconciliation,
@@ -13,6 +14,17 @@ import { walletBalances } from '../services/wallets';
  * Balances shown here come from the ledger (ledger_balances / wallet_balances), never computed by the UI.
  */
 const casinoQuery = z.object({ casinoId: z.string().uuid().optional() });
+
+/**
+ * Amount of an open vault movement as seen by the viewer ($3 employee, $4 may confirm drops (cash.manage),
+ * $5 may confirm hopper fills (cash.transact)): the receiving side confirms with its own blind count, so a
+ * requested amount is hidden from whoever could confirm it; the requester always sees it.
+ */
+const MOVEMENT_AMOUNT = `CASE WHEN m.status <> 'REQUESTED' OR m.requested_by = $3 THEN m.amount_cents
+  WHEN m.kind = 'FILL' AND m.cashier_session_id IS NOT NULL AND (SELECT employee_id FROM cashier_sessions WHERE id = m.cashier_session_id) = $3 THEN NULL
+  WHEN m.kind = 'DROP' AND $4::boolean THEN NULL
+  WHEN m.kind = 'HOPPER_FILL' AND $5::boolean THEN NULL
+  ELSE m.amount_cents END`;
 const rows = async (sql: string, params: unknown[]) => (await pool.query(sql, params)).rows;
 
 /** Machine money event types and the ledger transaction types that book them (ledger <-> meters). */
@@ -158,19 +170,17 @@ export async function operatorRoutes(app: FastifyInstance) {
        WHERE c.vault_session_id = $1 AND c.context IN ('VAULT_OPEN', 'VAULT_CLOSE') AND NOT EXISTS (SELECT 1 FROM count_settlements cs WHERE cs.count_id = c.id)
          AND c.id = (SELECT c2.id FROM cash_counts c2 WHERE c2.vault_session_id = $1 AND c2.context = c.context ORDER BY c2.created_at DESC, c2.id DESC LIMIT 1)
        ORDER BY c.created_at`, [session.id]) : [];
-    // Blind counting: the ledger balance is shown only while the vault is open and its opening count verified.
-    const balanceCents = session?.status === 'OPEN' && session.verified
-      ? Number((await rows(`SELECT COALESCE(sum(b.balance_cents * b.normal_sign), 0)::bigint AS v FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id
-                            WHERE a.org_id = $1 AND a.kind = 'VAULT' AND a.vault_id = $2`, [req.auth.orgId, vault.id]))[0].v)
-      : null;
+    // Blind counting (enforced here): everyone on this screen may count the vault, so its balance is never
+    // returned; it is disclosed only in the review of a count submitted by someone else (/counts/:id/review).
+    const balanceCents = null;
     const [movements, shifts, collectionCounts] = await Promise.all([
       rows(
-        `SELECT m.id, m.kind, m.purpose, m.status, m.amount_cents, m.requested_at, m.expires_at, m.requested_by, e.name AS requested_by_name,
+        `SELECT m.id, m.kind, m.purpose, m.status, ${MOVEMENT_AMOUNT} AS amount_cents, m.requested_at, m.expires_at, m.requested_by, e.name AS requested_by_name,
            d.name AS desk_name, ce.name AS cashier_name, mc.asset_no
          FROM cash_movements m JOIN employees e ON e.id = m.requested_by
          LEFT JOIN cashier_sessions s ON s.id = m.cashier_session_id LEFT JOIN cash_desks d ON d.id = s.cash_desk_id LEFT JOIN employees ce ON ce.id = s.employee_id
          LEFT JOIN machines mc ON mc.id = m.machine_id
-         WHERE m.org_id = $1 AND m.casino_id = $2 AND m.status = 'REQUESTED' ORDER BY m.requested_at`, [req.auth.orgId, casinoId]),
+         WHERE m.org_id = $1 AND m.casino_id = $2 AND m.status = 'REQUESTED' ORDER BY m.requested_at`, [req.auth.orgId, casinoId, req.auth.sub, true, hasPermission(req.auth.role, 'cash.transact')]),
       rows(
         `SELECT s.id, s.status, s.opened_at, d.name AS desk_name, e.name AS employee, s.employee_id FROM cashier_sessions s
          JOIN cash_desks d ON d.id = s.cash_desk_id JOIN employees e ON e.id = s.employee_id
@@ -186,6 +196,16 @@ export async function operatorRoutes(app: FastifyInstance) {
          ORDER BY c.created_at`, [req.auth.orgId, casinoId]),
     ]);
     return { vault, ...modes, session, pendingCounts, balanceCents, movements, shifts, collectionCounts };
+  });
+
+  /**
+   * Blind count review: the submitted count, the authoritative expected amount and the difference, for a
+   * different employee with cash.manage (403 for the counter). Confirm with POST .../verify (same total),
+   * reject with a different count of your own (nothing booked, the counter counts again).
+   */
+  app.get('/api/v1/counts/:id/review', { preHandler: guard('cash.manage') }, async (req) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    return reviewCount(pool, { orgId: req.auth.orgId, employeeId: req.auth.sub, role: req.auth.role, casinoIds: req.auth.casinoIds }, id);
   });
 
   /** Deferred money events of all rails (HANDPAY / TITO / MACHINE) with the state of their business date. */
@@ -282,7 +302,13 @@ export async function operatorRoutes(app: FastifyInstance) {
       });
       return { machineId: m.id, assetNo: m.asset_no, creditMeterReliable: m.credit_meter_reliable, ledgerSince: m.ledger_since, lines, ok: lines.every((l) => l.unexplainedCents === 0) };
     });
-    return { from, to, machines: result, ok: result.every((m) => m.ok) };
+    // Cash-in / cash-out amounts per machine reveal the cashbox (blind collection count): roles that count
+    // (cash.manage) get the reconciliation result and differences, not the absolute amounts.
+    const blind = countsTargets(req.auth.role);
+    const out = blind
+      ? result.map((m) => ({ ...m, lines: m.lines.map((l) => (l.type === 'CASH_IN' || l.type === 'CASH_OUT' ? { ...l, meterCents: null, ledgerCents: null, exceptionCents: null, deferredCents: null } : l)) }))
+      : result;
+    return { from, to, machines: out, ok: result.every((m) => m.ok), blind };
   });
 
   /**

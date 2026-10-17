@@ -118,7 +118,7 @@ export async function verifyVaultCount(db: Db, a: CashActor, countId: string, in
     throw err;
   }
   if (!v.matches) {
-    await audit(db, a, c.casino_id, 'vault.count_mismatch', 'cash_count', countId, { counted: c.total_cents, verified: total });
+    await audit(db, a, c.casino_id, 'vault.count_mismatch', 'cash_count', countId, { counted: c.total_cents, verified: total, countedBy: c.counted_by, verifiedBy: a.employeeId });
     return { matches: false as const, settlement: null, session: s };
   }
 
@@ -140,7 +140,7 @@ export async function verifyVaultCount(db: Db, a: CashActor, countId: string, in
   let session = s;
   if (c.context === 'VAULT_CLOSE')
     session = (await db.query(`UPDATE vault_sessions SET status = 'CLOSED', closed_by = $2, closed_at = now() WHERE id = $1 RETURNING *`, [s.id, c.counted_by])).rows[0];
-  await audit(db, a, c.casino_id, 'vault.count_settled', 'cash_count', countId, { context: c.context, ledger, counted: c.total_cents, difference, transactionId: txId });
+  await audit(db, a, c.casino_id, 'vault.count_settled', 'cash_count', countId, { context: c.context, ledger, counted: c.total_cents, difference, transactionId: txId, countedBy: c.counted_by, verifiedBy: a.employeeId });
   return { matches: true as const, settlement, session };
 }
 

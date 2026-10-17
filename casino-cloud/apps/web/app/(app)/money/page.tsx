@@ -7,6 +7,7 @@ import { formatCents, parseCountCents } from '@/lib/money';
 import { useSession } from '@/lib/session';
 import { AmountField, RailBadge, useConfirm, useOperatorContext } from '@/components/money-ui';
 import { DeferredEvents, EventExceptions } from '@/components/money-admin';
+import { CountReview } from '@/components/count-review';
 import { Card, Empty, ErrorNote, Field, Notice, PageHeader } from '@/components/ui';
 import { clsx } from '@/components/clsx';
 
@@ -76,7 +77,6 @@ function CutoverCounts({ machines, vaults, desks }: { machines: any[]; vaults: A
   const [context, setContext] = useState<'VAULT_CUTOVER' | 'DRAWER_CUTOVER' | 'MACHINE_DROP'>('VAULT_CUTOVER');
   const [ref, setRef] = useState('');
   const [amount, setAmount] = useState('');
-  const [verify, setVerify] = useState<Record<string, string>>({});
   const confirm = useConfirm(() => void counts.reload());
   const options = context === 'VAULT_CUTOVER' ? vaults.map((v) => [v.id, v.name]) : context === 'DRAWER_CUTOVER' ? desks.map((d) => [d.id, d.name]) : machines.map((m) => [m.id, m.asset_no]);
   const refKey = context === 'VAULT_CUTOVER' ? 'vaultId' : context === 'DRAWER_CUTOVER' ? 'cashDeskId' : 'machineId';
@@ -105,7 +105,6 @@ function CutoverCounts({ machines, vaults, desks }: { machines: any[]; vaults: A
       }); setAmount(''); }}>Record count</button>
       {!counts.data?.length && <Empty>No cutover counts yet.</Empty>}
       {counts.data?.map((c) => {
-        const v = parseCountCents(verify[c.id] ?? '');
         return (
           <div key={c.id} className="rounded-lg border border-line p-2 text-sm" data-testid="cutover-count">
             <div className="flex items-center justify-between">
@@ -113,13 +112,7 @@ function CutoverCounts({ machines, vaults, desks }: { machines: any[]; vaults: A
               <span className={clsx('badge', c.used ? 'bg-slate-500/15 text-slate-600 ring-slate-500/30' : c.verified ? 'bg-emerald-500/15 text-emerald-700 ring-emerald-500/30' : 'bg-amber-500/15 text-amber-700 ring-amber-500/30')}>{c.used ? 'USED' : c.verified ? 'VERIFIED' : c.mismatches ? `MISMATCH ×${c.mismatches}` : 'UNVERIFIED'}</span>
             </div>
             {!c.verified && !c.used && (c.counted_by === me.user.id ? <div className="mt-1 text-xs text-sub">A different employee must verify this count.</div> : (
-              <div className="mt-2 flex gap-2">
-                <input className="input" inputMode="decimal" placeholder="Your blind count" value={verify[c.id] ?? ''} onChange={(e) => setVerify({ ...verify, [c.id]: e.target.value })} data-testid="count-verify-amount" />
-                <button className="btn" disabled={v === null} data-testid="count-verify" onClick={() => confirm.ask({
-                  title: 'Verify cutover count', summary: 'Your independent blind count. Only a matching count verifies.', amountCents: v!, path: `/money/counts/${c.id}/verify`, body: { totalCents: v },
-                  describe: (d) => (d.matches ? 'Counts match: verified.' : 'Counts differ: NOT verified.'),
-                })}>Verify</button>
-              </div>
+              <div className="mt-2"><CountReview countId={c.id} verifyPath={`/money/counts/${c.id}/verify`} onDone={() => void counts.reload()} label={c.vault_name ?? c.desk_name ?? c.asset_no} /></div>
             ))}
           </div>
         );

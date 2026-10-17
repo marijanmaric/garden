@@ -45,7 +45,7 @@ function Supervisor() {
             <div className="mt-1 text-xs text-sub">{d.kind === 'MOBILE' ? 'Mobile device' : 'Cage desk'}</div>
             {d.session_id ? (
               <>
-                <div className="mt-3 text-2xl font-bold tabular-nums">{formatEuro(d.balance)}</div>
+                <div className="mt-3 text-2xl font-bold tabular-nums">{d.balance === null ? 'blind' : formatEuro(d.balance)}</div>
                 <div className="text-xs text-sub">{d.employee} · since {timeAgo(d.opened_at)} · {d.transactions} transactions</div>
               </>
             ) : (
@@ -65,7 +65,7 @@ function Supervisor() {
                 <td>{s.desk}</td>
                 <td>{s.employee}</td>
                 <td className="text-right tabular-nums">{formatEuro(s.opening_balance)}</td>
-                <td className="text-right tabular-nums">{formatEuro(s.expected_balance ?? s.current_balance)}</td>
+                <td className="text-right tabular-nums">{s.expected_balance === null && s.current_balance === null ? 'blind' : formatEuro(s.expected_balance ?? s.current_balance)}</td>
                 <td className="text-right tabular-nums">{s.counted_balance != null ? formatEuro(s.counted_balance) : '-'}</td>
                 <td className={clsx('text-right font-semibold tabular-nums', s.difference ? 'text-red-600 dark:text-red-400' : '')}>{s.difference != null ? formatEuro(s.difference) : '-'}</td>
               </tr>

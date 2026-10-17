@@ -75,11 +75,17 @@ export async function cashOpsRoutes(app: FastifyInstance) {
     const qs = z.object({ casinoId: z.string().uuid().optional(), status: z.string().max(20).optional() }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     return (await pool.query(
-      `SELECT m.id, m.kind, m.purpose, m.status, m.amount_cents, m.cashier_session_id, m.requested_by, m.requested_at, m.expires_at, m.decided_by, m.money_transaction_id,
+      // Blind count (Step 7e): the receiving side confirms an open movement with its own count, so it does not
+      // get the requested amount (the requester does; decided movements show it).
+      `SELECT m.id, m.kind, m.purpose, m.status,
+         CASE WHEN m.status <> 'REQUESTED' OR m.requested_by = $4 THEN m.amount_cents
+           WHEN m.kind = 'FILL' AND s.employee_id = $4 THEN NULL
+           WHEN m.kind = 'DROP' AND $5::boolean THEN NULL ELSE m.amount_cents END AS amount_cents,
+         m.cashier_session_id, m.requested_by, m.requested_at, m.expires_at, m.decided_by, m.money_transaction_id,
          s.employee_id AS cashier_id
        FROM cash_movements m JOIN cashier_sessions s ON s.id = m.cashier_session_id
        WHERE m.org_id = $1 AND m.casino_id = $2 AND ($3::text IS NULL OR m.status = $3) ORDER BY m.requested_at DESC LIMIT 200`,
-      [req.auth.orgId, casinoId, qs.status ?? null],
+      [req.auth.orgId, casinoId, qs.status ?? null, req.auth.sub, hasPermission(req.auth.role, 'cash.manage')],
     )).rows;
   });
 

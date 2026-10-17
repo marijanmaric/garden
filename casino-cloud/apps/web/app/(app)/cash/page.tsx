@@ -24,11 +24,10 @@ function Collection({ onDone }: { onDone: () => void }) {
     setMsg(null);
     if (id) setExp(await api(`/cash/collections/expected/${id}`));
   };
-  const diff = exp && cash !== '' && tickets !== '' ? Number(cash) + Number(tickets) - (exp.cashCents + exp.ticketsCents) / 100 : null;
   const save = async () => {
     try {
       const r = await api('/cash/collections', { method: 'POST', json: { machineId, countedCash: Number(cash), countedTickets: Number(tickets), note: note || undefined } });
-      setMsg({ tone: r.difference ? 'bad' : 'good', text: r.difference ? `Saved with difference ${formatEuro(r.difference)}, alert raised.` : 'Saved, drop matches the meters.' });
+      setMsg({ tone: r.difference ? 'bad' : 'good', text: `Saved. Expected ${formatEuro(Number(r.expected_cash) + Number(r.expected_tickets))}, counted ${formatEuro(Number(r.counted_cash) + Number(r.counted_tickets))}: ${r.difference ? `difference ${formatEuro(r.difference)}, alert raised.` : 'no difference.'}` });
       setCash(''); setTickets(''); setNote(''); setExp(null); setMachineId('');
       onDone();
     } catch (e) {
@@ -43,11 +42,16 @@ function Collection({ onDone }: { onDone: () => void }) {
           {machines.data?.map((m) => <option key={m.id} value={m.id}>{m.asset_no} · {m.manufacturer} · {m.floor_name}</option>)}
         </select>
       </Field>
-      {exp && (
-        <div data-testid="expected-collection" data-basis={exp.basis} data-cash-cents={exp.cashCents}>
+      {exp && exp.blind && (
+        <div data-testid="expected-collection" data-blind="true" data-basis={exp.basis}>
+          <Notice>Blind count: the expected amount is not shown before the count. It is disclosed to the second person who reviews a submitted count{exp.basis === 'LEDGER_CASHBOX' ? '' : ' (legacy machine: shown after you save your count)'}.</Notice>
+        </div>
+      )}
+      {exp && !exp.blind && (
+        <div data-testid="expected-collection" data-blind="false" data-basis={exp.basis} data-cash-cents={exp.cashCents}>
           <Notice>
-            Expected {exp.since ? `since ${formatDateTime(exp.since)}` : 'since the first event'}: cash <b data-testid="expected-cash">{formatCents(exp.cashCents)}</b>, tickets <b>{formatCents(exp.ticketsCents)}</b>
-            <div className="mt-1 text-xs text-sub">{exp.basis === 'LEDGER_CASHBOX' ? 'Basis: the machine\'s CASHBOX on the ledger (what the collection is settled against).' : 'Basis: cash reported by the machine since its last collection (the MACHINE cutover uses the same amount).'}</div>
+            Review of the count by {exp.countedByName}: counted <b data-testid="collection-counted">{formatCents(exp.countedCents)}</b>, expected <b data-testid="expected-cash">{formatCents(exp.cashCents)}</b>, difference <b data-testid="collection-difference">{formatCents(exp.differenceCents)}</b>
+            <div className="mt-1 text-xs text-sub">{exp.basis === 'LEDGER_CASHBOX' ? 'Basis: the machine\'s CASHBOX on the ledger (what the collection is settled against).' : 'Basis: cash reported by the machine since its last collection (the MACHINE cutover uses the same amount).'} Approve or reject it in the Vault screen.</div>
           </Notice>
         </div>
       )}
@@ -61,7 +65,6 @@ function Collection({ onDone }: { onDone: () => void }) {
             <Field label="Counted tickets"><input className="input" inputMode="decimal" value={tickets} onChange={(e) => setTickets(e.target.value)} /></Field>
           </div>
           <Field label="Note"><input className="input" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-          {diff !== null && <Notice tone={Math.abs(diff) < 0.005 ? 'good' : 'bad'}>Difference: {formatEuro(diff)}</Notice>}
           <button className="btn-primary w-full" disabled={cash === '' || tickets === ''} onClick={save}>Save collection</button>
         </>
       )}

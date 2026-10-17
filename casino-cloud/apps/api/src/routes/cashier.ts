@@ -19,15 +19,19 @@ export async function cashierRoutes(app: FastifyInstance) {
   app.get('/api/v1/cashier/desks', { preHandler: guard() }, async (req) => {
     if (!hasPermission(req.auth.role, 'cash.transact') && !hasPermission(req.auth.role, 'cashier.supervise')) throw new HttpError(403, 'Missing permission cash.transact');
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
+    // Blind count (Step 7e): on a ledger casino a drawer's balance is never shown to its own cashier, and
+    // only supervisors see the other drawers.
+    const ledger = await cashOnLedger(pool, req.auth.orgId, casinoId);
     const r = await pool.query(
       `SELECT d.id, d.name, d.kind, s.id AS session_id, s.opened_at, s.opening_balance, e.name AS employee,
-         s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) AS balance,
+         CASE WHEN $3::boolean AND (s.employee_id = $4 OR NOT $5::boolean) THEN NULL
+           ELSE s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) END AS balance,
          (SELECT count(*) FROM cash_transactions ct WHERE ct.session_id = s.id) AS transactions
        FROM cash_desks d
        LEFT JOIN cashier_sessions s ON s.cash_desk_id = d.id AND s.status = 'OPEN'
        LEFT JOIN employees e ON e.id = s.employee_id
        WHERE d.org_id = $1 AND d.casino_id = $2 AND d.active ORDER BY d.kind, d.name`,
-      [req.auth.orgId, casinoId],
+      [req.auth.orgId, casinoId, ledger, req.auth.sub, hasPermission(req.auth.role, 'cashier.supervise')],
     );
     return r.rows;
   });
@@ -42,7 +46,8 @@ export async function cashierRoutes(app: FastifyInstance) {
     const s = r.rows[0];
     if (!s) return { session: null };
     // Ledger casinos: the cashier counts blind, the expected drawer balance is shown to supervisors only.
-    const blind = (await cashOnLedger(pool, req.auth.orgId, s.casino_id)) && !hasPermission(req.auth.role, 'cashier.supervise');
+    // Ledger casinos: the cashier counts the own drawer blind, whatever the role (Step 7e: supervisors included).
+    const blind = await cashOnLedger(pool, req.auth.orgId, s.casino_id);
     const [totals, tx] = await Promise.all([
       sessionTotals(pool, s.id, s.opening_balance),
       pool.query(
@@ -115,10 +120,11 @@ export async function cashierRoutes(app: FastifyInstance) {
     const r = await pool.query(
       `SELECT s.id, s.status, s.opened_at, s.closed_at, s.opening_balance, s.expected_balance, s.counted_balance, s.difference, s.close_note,
          d.name AS desk, e.name AS employee,
-         s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) AS current_balance
+         CASE WHEN own.blind THEN NULL ELSE s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) END AS current_balance
        FROM cashier_sessions s JOIN cash_desks d ON d.id = s.cash_desk_id JOIN employees e ON e.id = s.employee_id
+       CROSS JOIN LATERAL (SELECT $4::boolean AND s.employee_id = $5 AND s.status IN ('OPEN', 'COUNTING') AS blind) own
        WHERE s.org_id = $1 AND s.casino_id = $2 ORDER BY s.opened_at DESC LIMIT $3`,
-      [req.auth.orgId, casinoId, qs.limit],
+      [req.auth.orgId, casinoId, qs.limit, await cashOnLedger(pool, req.auth.orgId, casinoId), req.auth.sub],
     );
     return r.rows;
   });

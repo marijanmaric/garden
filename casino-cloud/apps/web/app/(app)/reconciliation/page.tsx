@@ -71,14 +71,14 @@ function Meters() {
           <table className="table">
             <thead><tr><th>Machine</th><th>Money</th><th className="text-right">Meters (machine)</th><th className="text-right">Ledger</th><th className="text-right">Exceptions</th><th className="text-right">Deferred</th><th className="text-right">Unexplained</th></tr></thead>
             <tbody>
-              {m.data.machines.flatMap((mc: any) => mc.lines.filter((l: any) => l.meterCents || l.ledgerCents || l.exceptionCents || l.deferredCents).map((l: any, i: number) => (
+              {m.data.machines.flatMap((mc: any) => mc.lines.filter((l: any) => l.meterCents === null || l.meterCents || l.ledgerCents || l.exceptionCents || l.deferredCents).map((l: any, i: number) => (
                 <tr key={`${mc.machineId}-${l.type}`} data-testid="meter-row">
                   <td className="font-semibold">{i === 0 ? mc.assetNo : ''}</td>
                   <td>{MACHINE_MONEY_LABEL[l.type] ?? l.type}</td>
-                  <td className="text-right tabular-nums">{formatCents(l.meterCents)}</td>
-                  <td className="text-right tabular-nums">{formatCents(l.ledgerCents)}</td>
-                  <td className="text-right tabular-nums">{formatCents(l.exceptionCents)}</td>
-                  <td className="text-right tabular-nums">{formatCents(l.deferredCents)}</td>
+                  <td className="text-right tabular-nums">{l.meterCents === null ? 'blind' : formatCents(l.meterCents)}</td>
+                  <td className="text-right tabular-nums">{l.ledgerCents === null ? 'blind' : formatCents(l.ledgerCents)}</td>
+                  <td className="text-right tabular-nums">{l.exceptionCents === null ? 'blind' : formatCents(l.exceptionCents)}</td>
+                  <td className="text-right tabular-nums">{l.deferredCents === null ? 'blind' : formatCents(l.deferredCents)}</td>
                   <td className={clsx('text-right font-semibold tabular-nums', l.unexplainedCents ? 'text-red-600' : 'text-emerald-600')}>{formatCents(l.unexplainedCents)}</td>
                 </tr>
               )))}

@@ -131,6 +131,27 @@ interface Ctx {
   ledger: Record<string, number>;
 }
 
+/** Desks with their latest legacy shift (the CASH cutover basis). */
+const DESKS_SQL = `SELECT d.id, d.name, s.id AS session_id, s.closed_at,
+       round(s.opening_balance * 100)::bigint AS opening_cents,
+       round(s.expected_balance * 100)::bigint AS expected_cents,
+       round(s.counted_balance * 100)::bigint AS counted_cents,
+       round(s.difference * 100)::bigint AS difference_cents,
+       round(COALESCE((SELECT sum(ct.amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) * 100)::bigint AS movement_cents
+     FROM cash_desks d
+     LEFT JOIN LATERAL (SELECT * FROM cashier_sessions x WHERE x.cash_desk_id = d.id ORDER BY x.opened_at DESC, x.id DESC LIMIT 1) s ON true`;
+
+/** The legacy cash a desk must hold at the CASH cutover (what its DRAWER_CUTOVER count must match). */
+function drawerLegacyCents(d: { session_id: string | null; opening_cents: number; movement_cents: number; difference_cents: number | null }) {
+  return d.session_id ? d.opening_cents + d.movement_cents + (d.difference_cents ?? 0) : 0;
+}
+
+/** Same value for one desk (blind-count review of a DRAWER_CUTOVER count). */
+export async function drawerLegacyBalance(db: Db, casinoId: string, deskId: string): Promise<number> {
+  const d = (await db.query(`${DESKS_SQL} WHERE d.casino_id = $1 AND d.id = $2`, [casinoId, deskId])).rows[0];
+  return d ? Number(drawerLegacyCents(d)) : 0;
+}
+
 const check = (ctx: Ctx, name: string, ok: boolean, detail?: unknown) => {
   ctx.checks.push(detail === undefined ? { name, ok } : { name, ok, detail });
   return ok;
@@ -221,15 +242,7 @@ async function planCash(ctx: Ctx): Promise<RailPlan> {
   const vaultId = await mainVault(ctx);
 
   const desks = (await db.query(
-    `SELECT d.id, d.name, s.id AS session_id, s.closed_at,
-       round(s.opening_balance * 100)::bigint AS opening_cents,
-       round(s.expected_balance * 100)::bigint AS expected_cents,
-       round(s.counted_balance * 100)::bigint AS counted_cents,
-       round(s.difference * 100)::bigint AS difference_cents,
-       round(COALESCE((SELECT sum(ct.amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) * 100)::bigint AS movement_cents
-     FROM cash_desks d
-     LEFT JOIN LATERAL (SELECT * FROM cashier_sessions x WHERE x.cash_desk_id = d.id ORDER BY x.opened_at DESC, x.id DESC LIMIT 1) s ON true
-     WHERE d.casino_id = $1 AND (d.active OR s.id IS NOT NULL) ORDER BY d.name, d.id`,
+    `${DESKS_SQL} WHERE d.casino_id = $1 AND (d.active OR s.id IS NOT NULL) ORDER BY d.name, d.id`,
     p,
   )).rows;
 
@@ -242,7 +255,7 @@ async function planCash(ctx: Ctx): Promise<RailPlan> {
       const calculated = d.opening_cents + d.movement_cents;
       check(ctx, `${label}:expected_consistent`, d.expected_cents === calculated, { stored: d.expected_cents, calculated });
       check(ctx, `${label}:counted_consistent`, d.counted_cents === d.expected_cents + d.difference_cents, { counted: d.counted_cents, expected: d.expected_cents, difference: d.difference_cents });
-      legacy = calculated + (d.difference_cents ?? 0);
+      legacy = drawerLegacyCents(d);
     }
     legacyTotal += legacy;
     ctx.legacy[`${label}:balance`] = legacy;
@@ -721,7 +734,7 @@ export async function verifyCutoverCount(db: Db, a: ScopedActor, countId: string
   }
   await writeAudit(db as PoolClient, {
     orgId: a.orgId, casinoId: c.casino_id, actorType: 'EMPLOYEE', actorId: a.employeeId, actorName: a.employeeEmail ?? null, ip: a.ip ?? null,
-    action: v.matches ? 'cash_count.verified' : 'cash_count.verification_mismatch', entityType: 'cash_count', entityId: countId, details: { totalCents: total, matches: v.matches },
+    action: v.matches ? 'cash_count.verified' : 'cash_count.verification_mismatch', entityType: 'cash_count', entityId: countId, details: { totalCents: total, matches: v.matches, countedCents: Number((await one<{ t: number }>(db, 'SELECT total_cents AS t FROM cash_counts WHERE id = $1', [countId])).t), countedBy: (await one<{ b: string }>(db, 'SELECT counted_by AS b FROM cash_counts WHERE id = $1', [countId])).b, verifiedBy: a.employeeId },
   });
   return v as { id: number; matches: boolean; total_cents: number };
 }

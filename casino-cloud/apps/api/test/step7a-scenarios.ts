@@ -171,8 +171,11 @@ export function registerStep7aScenarios(get: () => Ctx7a) {
       // LegacyProjection: the legacy drawer row references the ledger transaction
       const proj = await q('SELECT type, amount, money_transaction_id FROM cash_transactions WHERE session_id = $1', [state.s1]);
       assert.deepEqual(proj, [{ type: 'FILL', amount: 1000, money_transaction_id: done.json().movement.money_transaction_id }]);
+      // Step 7e blind count: the cashier never gets the own drawer balance; a supervisor sees it
       const desks = (await get_('cashier@example.com', `/api/v1/cashier/desks?casinoId=${c.casinoId}`)).json();
-      assert.equal(desks.find((d: { session_id: string }) => d.session_id === state.s1).balance, 1000);
+      assert.equal(desks.find((d: { session_id: string }) => d.session_id === state.s1).balance, null);
+      const sup = (await get_('manager@example.com', `/api/v1/cashier/desks?casinoId=${c.casinoId}`)).json();
+      assert.equal(sup.find((d: { session_id: string }) => d.session_id === state.s1).balance, 1000);
     });
 
     test('drop: handed in by the cashier, confirmed by the vault; never more than the drawer', async () => {

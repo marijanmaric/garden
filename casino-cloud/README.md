@@ -315,6 +315,16 @@ cannot produce a ledger movement on a legacy rail. The window C is operational, 
   (CASH_IN / COIN_IN events received since its last collection). Paper tickets are reported separately and never
   change the cash expectation. Ledger machines cannot use the legacy booking route (409); their collection is the
   blind count + blind second count in the Vault screen.
+- **Blind count, enforced by the API** (`services/blind-count.ts`): a role that counts a target (cash.manage for
+  vault, machine cashbox and cutover counts; the cashier for the own drawer) gets no expected amount and no
+  balance revealing it: `/cash/collections/expected` is blind, `/vault/status` has no vault balance,
+  `/ledger/accounts` withholds VAULT / CASHBOX / DRAWER balances, desks / sessions / cash overview leave the
+  own drawer out, open fills / drops / hopper fills hide the amount from the confirming side, the meters
+  report withholds cash amounts and the cutover dry run hides legacy amounts until the counts are verified.
+  The submitted count, the authoritative expected amount and the difference are disclosed only by
+  `GET /counts/:id/review` to a different employee with cash.manage (403 for the counter), who approves
+  (verification with the same total: the approved settlement, the reviewer as approver) or rejects with an
+  own different count (nothing booked, recount). The audit records both people and the values.
 - Operator wording uses CASH, TITO, CASHLESS, HANDPAY and MACHINE CREDIT; gaming meters are shown as bets /
   wins (database fields `coin_in` / `coin_out` stay for adapter compatibility).
 

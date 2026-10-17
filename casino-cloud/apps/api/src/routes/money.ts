@@ -4,7 +4,17 @@ import { CUTOVER_RAILS, CUTOVER_SCOPE, RAIL_PRODUCTION_READY, maintenanceWindowO
 import { HttpError, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
-import { cutoverRail, dryRunCutover, railStatus, recordCutoverCount, verifyCutoverCount } from '../services/cutover';
+import { CutoverAborted, cutoverRail, dryRunCutover, railStatus, recordCutoverCount, verifyCutoverCount, type CutoverReport } from '../services/cutover';
+
+/** Blind count: until every count of the cutover is verified by a second person, no legacy amount is returned. */
+function blindReport(report: CutoverReport) {
+  const unverified = report.checks.some((c) => (c.name.endsWith(':count_verified') || c.name.endsWith(':count_exists')) && !c.ok);
+  if (!unverified) return report;
+  return {
+    ...report, legacy: {}, blind: true,
+    checks: report.checks.map((c) => (c.detail !== undefined ? { ...c, detail: 'hidden until the counts are verified (blind count)' } : c)),
+  };
+}
 
 /**
  * Rail cutover (migration 006). Nothing here runs by itself: every cutover is an explicit,
@@ -33,7 +43,13 @@ export async function moneyRoutes(app: FastifyInstance) {
     return railStatus(pool, req.auth.orgId, casinoId);
   });
 
-  app.post('/api/v1/money/cutover/dry-run', { preHandler: guard('money.cutover') }, async (req) => dryRunCutover(pool, scoped(req), parseTarget(req)));
+  /**
+   * Blind count (Step 7e): while a cutover count is not verified by a second person, the dry run does not
+   * reveal the legacy amounts the count is compared with (legacy totals and the amount details of checks).
+   */
+  app.post('/api/v1/money/cutover/dry-run', { preHandler: guard('money.cutover') }, async (req) => {
+    return blindReport(await dryRunCutover(pool, scoped(req), parseTarget(req)));
+  });
 
   app.post('/api/v1/money/cutover', { preHandler: guard('money.cutover') }, async (req, reply) => {
     const body = parseTarget(req);
@@ -45,7 +61,12 @@ export async function moneyRoutes(app: FastifyInstance) {
         ? `${body.rail} cutover is not released yet: ledger operations missing for ${r.implementationMissing.join(', ')} (implementation dependency; dry run is available)`
         : `${body.rail} cutover is not released yet: it goes live in one maintenance window with ${maintenanceWindowOf(body.rail).filter((x) => x !== body.rail).join(', ')}, and ledger operations are still missing for ${r.windowMissing.join(', ')} (maintenance-window dependency, not a technical one; dry run is available)`);
     }
-    return idempotent(req, reply, (db) => cutoverRail(db, scoped(req), body));
+    try {
+      return await idempotent(req, reply, (db) => cutoverRail(db, scoped(req), body));
+    } catch (err) {
+      if (err instanceof CutoverAborted) err.body = { report: blindReport(err.report) };
+      throw err;
+    }
   });
 
   app.post('/api/v1/money/counts', { preHandler: guard('cash.manage') }, async (req, reply) => {

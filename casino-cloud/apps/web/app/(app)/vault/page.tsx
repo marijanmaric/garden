@@ -7,6 +7,7 @@ import { formatCents, parseAmountCents, parseCountCents } from '@/lib/money';
 import { useSession } from '@/lib/session';
 import { AmountField, FreezeBanner, RailBadge, useConfirm, useOperatorContext } from '@/components/money-ui';
 import { Card, Empty, ErrorNote, Field, Kpi, Notice, PageHeader } from '@/components/ui';
+import { CountReview } from '@/components/count-review';
 
 /**
  * Step 7e, vault / cash control (one screen): vault session with blind counts verified by a second
@@ -68,7 +69,7 @@ export default function VaultPage() {
         <>
           <div className="grid gap-4 md:grid-cols-3">
             <Kpi label="Vault session" value={s ? (s.status === 'OPEN' ? (s.verified ? 'OPEN' : 'OPEN · awaiting 2nd count') : 'COUNTING') : 'CLOSED'} sub={s ? `${s.business_date} · opened by ${s.opened_by_name} ${timeAgo(s.opened_at)}` : 'Open the vault with a blind count'} />
-            <Kpi label="Vault balance (ledger)" value={d.balanceCents !== null ? formatCents(d.balanceCents) : 'hidden'} sub={d.balanceCents !== null ? 'Verified open vault' : 'Hidden while counting (blind)'} />
+            <Kpi label="Vault balance" value="blind" sub="Shown only to the second person reviewing a submitted count" />
             <Kpi label="Open requests" value={d.movements.length} sub={`${d.shifts.length} cashier shift(s) open`} />
           </div>
 
@@ -93,10 +94,7 @@ export default function VaultPage() {
                       })} />}
                     </>
                   ) : (
-                    <CountBox label="Your blind count" button="Verify count" testId="vault-verify" onSubmit={(cents) => confirm.ask({
-                      title: 'Verify vault count', summary: 'Your independent blind count. Matching counts settle the vault count (a difference to the ledger is booked with you as approver).',
-                      amountCents: cents, details: [['First count by', c.counted_by_name]], path: `/vault/counts/${c.id}/verify`, body: { totalCents: cents }, describe: verified,
-                    })} />
+                    <CountReview countId={c.id} verifyPath={`/vault/counts/${c.id}/verify`} onDone={() => void st.reload()} label={`vault ${c.context === 'VAULT_OPEN' ? 'opening' : 'closing'}`} />
                   )}
                 </div>
               ))}
@@ -162,11 +160,7 @@ export default function VaultPage() {
                 <div key={c.id} className="mb-3 space-y-2 rounded-xl border border-sky-500/40 bg-sky-500/5 p-3" data-testid="collection-pending">
                   <div className="text-sm font-semibold">Collection {c.asset_no}: count by {c.counted_by_name} waiting for verification</div>
                   {c.counted_by === meId ? <Notice>A different employee must count blind to verify it.</Notice> : (
-                    <CountBox label="Your blind count" button="Verify collection" testId="collection-verify" onSubmit={(cents) => confirm.ask({
-                      title: 'Verify machine collection', summary: 'Matching counts book the drop into the vault (and a difference to the ledger with you as approver). A mismatch books nothing.',
-                      amountCents: cents, details: [['Machine', c.asset_no], ['First count by', c.counted_by_name]], path: `/machines/collections/counts/${c.id}/verify`, body: { totalCents: cents },
-                      describe: (r) => r?.matches === false ? 'Counts differ: nothing booked. Count again.' : 'Collection booked into the vault.',
-                    })} />
+                    <CountReview countId={c.id} verifyPath={`/machines/collections/counts/${c.id}/verify`} onDone={() => void st.reload()} label={`collection ${c.asset_no}`} />
                   )}
                 </div>
               ))}

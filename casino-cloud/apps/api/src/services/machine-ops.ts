@@ -119,7 +119,7 @@ export async function verifyCollectionCount(db: Db, a: CashActor, countId: strin
     throw err;
   }
   if (!v.matches) {
-    await audit(db, a, c.casino_id, 'machine.collection_count_mismatch', 'cash_count', countId, { counted: c.total_cents, verified: total });
+    await audit(db, a, c.casino_id, 'machine.collection_count_mismatch', 'cash_count', countId, { counted: c.total_cents, verified: total, countedBy: c.counted_by, verifiedBy: a.employeeId });
     return { matches: false as const, settlement: null, collection: null };
   }
   const later = await one<{ n: number }>(db, `SELECT count(*)::int n FROM machine_events WHERE machine_id = $1 AND type = 'CASH_IN' AND received_at > $2`, [m.id, c.created_at]);
@@ -155,6 +155,6 @@ export async function verifyCollectionCount(db: Db, a: CashActor, countId: strin
        SELECT $1, $2, $3, COALESCE((SELECT max(period_end) FROM cash_collections WHERE machine_id = $3), (SELECT as_of FROM money_rail_cutovers WHERE rail = 'MACHINE' AND machine_id = $3)),
          now(), $4::bigint / 100.0, 0, $5::bigint / 100.0, 0, $6::bigint / 100.0, 'ledger collection', $7, $8, $9 RETURNING *`,
       [a.orgId, m.casino_id, m.id, ledgerCents, counted, difference, c.counted_by, countId, dropTx ?? diffTx])).rows[0];
-  await audit(db, a, m.casino_id, 'machine.collection_settled', 'cash_count', countId, { machineId: m.id, ledgerCents, countedCents: counted, differenceCents: difference, dropTx, diffTx });
+  await audit(db, a, m.casino_id, 'machine.collection_settled', 'cash_count', countId, { machineId: m.id, ledgerCents, countedCents: counted, differenceCents: difference, dropTx, diffTx, countedBy: c.counted_by, verifiedBy: a.employeeId });
   return { matches: true as const, settlement, collection };
 }
