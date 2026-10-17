@@ -32,6 +32,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-local-demo-secret-change-me}
       GATEWAY_KEY: ${GATEWAY_KEY:-demo-gateway-key}
       AUTO_SEED: "true"
+      # Demo stack only: accepts the default secrets above (refused when DEMO_MODE is not true and NODE_ENV=production)
+      DEMO_MODE: ${DEMO_MODE:-true}
     ports:
       - "4000:4000"
     depends_on:
