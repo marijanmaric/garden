@@ -8,7 +8,7 @@ import { bus } from '../bus';
  * query parameter. Messages are filtered by tenant and casino access.
  */
 export async function streamRoutes(app: FastifyInstance) {
-  app.get('/api/v1/stream', async (req, reply) => {
+  app.get('/api/v1/stream', { config: { feature: 'core' } }, async (req, reply) => {
     const qs = z.object({ token: z.string(), casinoId: z.string().uuid().optional() }).parse(req.query);
     const auth = await authenticate(req, qs.token);
     const allowed = new Set(qs.casinoId ? auth.casinoIds.filter((c) => c === qs.casinoId) : auth.casinoIds);

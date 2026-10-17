@@ -6,7 +6,7 @@ import { bus } from '../bus';
 import { pool } from '../db';
 
 export async function alertRoutes(app: FastifyInstance) {
-  app.get('/api/v1/alerts', { preHandler: guard('alert.view') }, async (req) => {
+  app.get('/api/v1/alerts', { config: { feature: 'core' }, preHandler: guard('alert.view') }, async (req) => {
     const qs = z.object({
       casinoId: z.string().uuid().optional(), status: z.enum(['OPEN', 'ACKNOWLEDGED', 'RESOLVED', 'ACTIVE', 'ALL']).default('ACTIVE'),
       limit: z.coerce.number().int().min(1).max(500).default(200),
@@ -24,7 +24,7 @@ export async function alertRoutes(app: FastifyInstance) {
   });
 
   for (const action of ['acknowledge', 'resolve'] as const) {
-    app.post(`/api/v1/alerts/:id/${action}`, { preHandler: guard('alert.manage') }, async (req) => {
+    app.post(`/api/v1/alerts/:id/${action}`, { config: { feature: 'core' }, preHandler: guard('alert.manage') }, async (req) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
       const sql =
         action === 'acknowledge'

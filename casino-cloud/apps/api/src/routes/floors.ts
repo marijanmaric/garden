@@ -11,7 +11,7 @@ const fixture = z.object({
 });
 
 export async function floorRoutes(app: FastifyInstance) {
-  app.get('/api/v1/floors', { preHandler: guard('floor.view') }, async (req) => {
+  app.get('/api/v1/floors', { config: { feature: 'core' }, preHandler: guard('floor.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const [floors, machines] = await Promise.all([
       pool.query('SELECT id, name, width, height, layout FROM floors WHERE org_id = $1 AND casino_id = $2 ORDER BY sort_order, name', [req.auth.orgId, casinoId]),
@@ -26,7 +26,7 @@ export async function floorRoutes(app: FastifyInstance) {
   });
 
   /** Saves machine positions and fixtures of a floor (drag & drop editor). Configuration changes are audited. */
-  app.put('/api/v1/floors/:id/layout', { preHandler: guard('floor.edit') }, async (req) => {
+  app.put('/api/v1/floors/:id/layout', { config: { feature: 'core' }, preHandler: guard('floor.edit') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z.object({
       machines: z.array(z.object({ id: z.string().uuid(), x: z.number().int().min(0).max(5000), y: z.number().int().min(0).max(5000) })).max(2000),

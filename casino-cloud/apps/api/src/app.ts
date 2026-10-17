@@ -42,6 +42,13 @@ export async function buildApp() {
     return reply.status(500).send({ error: 'Internal server error' });
   });
 
+  // Production readiness: every API route must declare its commercial feature (enforced by the guard).
+  // A route without one is a programming error and stops the start (fail closed, audit finding C1).
+  app.addHook('onRoute', (route) => {
+    if (route.url.startsWith('/api/v1/') && !(route.config as { feature?: string } | undefined)?.feature)
+      throw new Error(`Route ${route.method} ${route.url} declares no entitlement feature`);
+  });
+
   app.get('/health', async () => {
     await pool.query('SELECT 1');
     return { ok: true, service: 'm1-casino-api' };

@@ -8,7 +8,7 @@ import { idempotent } from '../services/idempotency';
 import { financialSummary } from './dashboard';
 
 export async function accountingRoutes(app: FastifyInstance) {
-  app.get('/api/v1/accounting/summary', { preHandler: guard('accounting.view') }, async (req) => {
+  app.get('/api/v1/accounting/summary', { config: { feature: 'core' }, preHandler: guard('accounting.view') }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), days: z.coerce.number().int().min(1).max(90).default(1) }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     const from = `((date_trunc('day', now() AT TIME ZONE c.timezone) - make_interval(days => $3 - 1)) AT TIME ZONE c.timezone)`;
@@ -43,7 +43,7 @@ export async function accountingRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/api/v1/transactions', { preHandler: guard('accounting.view') }, async (req) => {
+  app.get('/api/v1/transactions', { config: { feature: 'core' }, preHandler: guard('accounting.view') }, async (req) => {
     const qs = z.object({
       casinoId: z.string().uuid().optional(), type: z.enum(LEDGER_TYPES).optional(), machineId: z.string().uuid().optional(),
       limit: z.coerce.number().int().min(1).max(500).default(100), before: z.coerce.number().int().optional(),
@@ -65,7 +65,7 @@ export async function accountingRoutes(app: FastifyInstance) {
   });
 
   /** Corrections never modify the ledger; they append an ADJUSTMENT entry with a mandatory reason. */
-  app.post('/api/v1/transactions/adjustments', { preHandler: guard('casino.manage') }, async (req, reply) => {
+  app.post('/api/v1/transactions/adjustments', { config: { feature: 'core' }, preHandler: guard('casino.manage') }, async (req, reply) => {
     const body = z.object({
       casinoId: z.string().uuid(), machineId: z.string().uuid().optional(), amount: z.number().refine((n) => n !== 0).refine((n) => Math.abs(n) < 1e9),
       reason: z.string().min(3).max(500),

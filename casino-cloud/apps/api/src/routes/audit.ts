@@ -5,10 +5,15 @@ import { guard } from '../auth';
 import { pool } from '../db';
 
 export async function auditRoutes(app: FastifyInstance) {
-  app.get('/api/v1/audit', { preHandler: guard('audit.view') }, async (req) => {
+  app.get('/api/v1/audit', { config: { feature: 'core' }, preHandler: guard('audit.view') }, async (req) => {
     const qs = z.object({ limit: z.coerce.number().int().min(1).max(500).default(200), action: z.string().optional(), before: z.coerce.number().int().optional() }).parse(req.query);
     const params: unknown[] = [req.auth.orgId];
     let where = 'a.org_id = $1';
+    // Audit finding M1: below the organisation admin, entries of the own casinos plus the own actions only
+    if (req.auth.role !== 'SUPER_ADMIN') {
+      params.push(req.auth.casinoIds, req.auth.sub);
+      where += ` AND (a.casino_id = ANY($${params.length - 1}) OR a.actor_id = $${params.length})`;
+    }
     if (qs.action) { params.push(`${qs.action}%`); where += ` AND a.action LIKE $${params.length}`; }
     if (qs.before) { params.push(qs.before); where += ` AND a.id < $${params.length}`; }
     params.push(qs.limit);
@@ -21,7 +26,7 @@ export async function auditRoutes(app: FastifyInstance) {
   });
 
   /** Recomputes the org's hash chain to detect tampering. */
-  app.get('/api/v1/audit/verify', { preHandler: guard('audit.view') }, async (req) => {
+  app.get('/api/v1/audit/verify', { config: { feature: 'reconciliation.advanced' }, preHandler: guard('audit.view') }, async (req) => {
     const r = await pool.query(
       `SELECT id, org_id, actor_type, actor_id, action, entity_type, entity_id, details, created_at, prev_hash, hash
        FROM audit_logs WHERE org_id = $1 ORDER BY id`,

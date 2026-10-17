@@ -38,7 +38,7 @@ const scoped = (req: FastifyRequest) => ({
 });
 
 export async function moneyRoutes(app: FastifyInstance) {
-  app.get('/api/v1/money/rails', { preHandler: guard('money.cutover') }, async (req) => {
+  app.get('/api/v1/money/rails', { config: { feature: 'money.admin' }, preHandler: guard('money.cutover') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     return railStatus(pool, req.auth.orgId, casinoId);
   });
@@ -47,11 +47,11 @@ export async function moneyRoutes(app: FastifyInstance) {
    * Blind count (Step 7e): while a cutover count is not verified by a second person, the dry run does not
    * reveal the legacy amounts the count is compared with (legacy totals and the amount details of checks).
    */
-  app.post('/api/v1/money/cutover/dry-run', { preHandler: guard('money.cutover') }, async (req) => {
+  app.post('/api/v1/money/cutover/dry-run', { config: { feature: 'money.admin' }, preHandler: guard('money.cutover') }, async (req) => {
     return blindReport(await dryRunCutover(pool, scoped(req), parseTarget(req)));
   });
 
-  app.post('/api/v1/money/cutover', { preHandler: guard('money.cutover') }, async (req, reply) => {
+  app.post('/api/v1/money/cutover', { config: { feature: 'money.admin' }, preHandler: guard('money.cutover') }, async (req, reply) => {
     const body = parseTarget(req);
     // Only rails whose complete ledger operations are released may be cut over in production.
     if (!RAIL_PRODUCTION_READY.includes(body.rail))
@@ -69,7 +69,7 @@ export async function moneyRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/api/v1/money/counts', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/money/counts', { config: { feature: 'money.admin' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const body = count.extend({
       casinoId: z.string().uuid().optional(), context: z.enum(['VAULT_CUTOVER', 'DRAWER_CUTOVER', 'MACHINE_DROP']),
       vaultId: z.string().uuid().optional(), cashDeskId: z.string().uuid().optional(), machineId: z.string().uuid().optional(),
@@ -78,7 +78,7 @@ export async function moneyRoutes(app: FastifyInstance) {
     return idempotent(req, reply, (db) => recordCutoverCount(db, scoped(req), { ...body, casinoId }));
   });
 
-  app.post('/api/v1/money/counts/:id/verify', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/money/counts/:id/verify', { config: { feature: 'money.admin' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => verifyCutoverCount(db, scoped(req), id, body));

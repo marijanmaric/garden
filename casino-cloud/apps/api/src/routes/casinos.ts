@@ -1,12 +1,10 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { writeAudit } from '@m1/database';
-import { MODULES } from '@m1/shared';
-import { HttpError, actor, guard, scopeCasino } from '../auth';
+import { guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 
 export async function casinoRoutes(app: FastifyInstance) {
-  app.get('/api/v1/casinos', { preHandler: guard('casino.view') }, async (req) => {
+  app.get('/api/v1/casinos', { config: { feature: 'core' }, preHandler: guard('casino.view') }, async (req) => {
     const r = await pool.query(
       `SELECT c.id, c.code, c.name, c.city, c.country, c.timezone, c.currency,
          (SELECT count(*) FROM floors f WHERE f.casino_id = c.id) floors,
@@ -21,36 +19,14 @@ export async function casinoRoutes(app: FastifyInstance) {
     return r.rows;
   });
 
-  app.get('/api/v1/casinos/:id/modules', { preHandler: guard('casino.view') }, async (req) => {
-    const casinoId = scopeCasino(req, z.object({ id: z.string().uuid() }).parse(req.params).id);
-    const r = await pool.query('SELECT module_key, enabled, updated_at FROM casino_modules WHERE org_id = $1 AND casino_id = $2', [req.auth.orgId, casinoId]);
-    return MODULES.map((m) => {
-      const row = r.rows.find((x) => x.module_key === m.key);
-      return { ...m, enabled: !!m.core || !!row?.enabled, updatedAt: row?.updated_at ?? null };
-    });
-  });
-
-  app.put('/api/v1/casinos/:id/modules/:key', { preHandler: guard('settings.manage') }, async (req) => {
-    const p = z.object({ id: z.string().uuid(), key: z.string() }).parse(req.params);
-    const { enabled } = z.object({ enabled: z.boolean() }).parse(req.body);
-    const casinoId = scopeCasino(req, p.id);
-    const mod = MODULES.find((m) => m.key === p.key);
-    if (!mod) throw new HttpError(404, 'Unknown module');
-    if (mod.core) throw new HttpError(409, 'Core modules cannot be disabled');
-    await pool.query(
-      `INSERT INTO casino_modules (org_id, casino_id, module_key, enabled) VALUES ($1,$2,$3,$4)
-       ON CONFLICT (casino_id, module_key) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = now()`,
-      [req.auth.orgId, casinoId, p.key, enabled],
-    );
-    await writeAudit(pool, { ...actor(req), casinoId, action: enabled ? 'module.enabled' : 'module.disabled', entityType: 'module', entityId: p.key });
-    return { key: p.key, enabled };
-  });
+  // Per-casino module switches were removed (audit findings C1 / C2): what a customer may use is decided by its
+  // commercial entitlements (platform), switched by the organisation admin (/api/v1/org/modules).
 
   /**
    * Player search. Cards come from player_cards (any card number of the player matches, the
    * active card is returned), names from player_profiles. Response shape kept for the UI.
    */
-  app.get('/api/v1/players', { preHandler: guard('player.view') }, async (req) => {
+  app.get('/api/v1/players', { config: { feature: 'core' }, preHandler: guard('player.view') }, async (req) => {
     const qs = z.object({ search: z.string().optional() }).parse(req.query);
     const r = await pool.query(
       `SELECT p.id, p.player_no, p.status, p.verification_status, ac.card_number, ac.status AS card_status,
@@ -73,7 +49,7 @@ export async function casinoRoutes(app: FastifyInstance) {
     return r.rows;
   });
 
-  app.get('/api/v1/jackpots', { preHandler: guard('jackpot.view') }, async (req) => {
+  app.get('/api/v1/jackpots', { config: { feature: 'core' }, preHandler: guard('jackpot.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query('SELECT * FROM jackpots WHERE org_id = $1 AND casino_id = $2 ORDER BY current_value DESC', [req.auth.orgId, casinoId]);
     return r.rows;

@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { computeGgr, round2 } from '@m1/shared';
+import { computeGgr, hasPermission, round2, type ProductModule } from '@m1/shared';
+import { cashOnLedger } from '../services/cash-ops';
+import { loadEntitlements } from '../services/entitlements';
 import { guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 
@@ -35,7 +37,7 @@ export async function financialSummary(orgId: string, casinoId: string, fromSql:
 }
 
 export async function dashboardRoutes(app: FastifyInstance) {
-  app.get('/api/v1/dashboard', { preHandler: guard('dashboard.view') }, async (req) => {
+  app.get('/api/v1/dashboard', { config: { feature: 'core' }, preHandler: guard('dashboard.view') }, async (req) => {
     const casinoId = scopeCasino(req, q.parse(req.query).casinoId);
     const org = req.auth.orgId;
     const [machines, financial, players, jackpots, alerts, hourly, topMachines, topPlayers, recent, gateways, cashier, tickets] = await Promise.all([
@@ -100,16 +102,49 @@ export async function dashboardRoutes(app: FastifyInstance) {
       ),
       pool.query(`SELECT id, device_id, name, status, last_heartbeat_at FROM gateways WHERE org_id = $1 AND casino_id = $2`, [org, casinoId]),
       pool.query(
+        // Blind count: on a ledger casino a drawer balance is shown to supervisors only, never to its own cashier
         `SELECT d.name AS desk, d.kind, e.name AS employee, s.opened_at,
-           s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) AS balance
+           CASE WHEN $3::boolean AND (s.employee_id = $4 OR NOT $5::boolean) THEN NULL
+             ELSE s.opening_balance + COALESCE((SELECT sum(amount) FROM cash_transactions ct WHERE ct.session_id = s.id), 0) END AS balance
          FROM cashier_sessions s JOIN cash_desks d ON d.id = s.cash_desk_id JOIN employees e ON e.id = s.employee_id
          WHERE s.org_id = $1 AND s.casino_id = $2 AND s.status = 'OPEN' ORDER BY d.name`,
-        [org, casinoId],
+        [org, casinoId, await cashOnLedger(pool, org, casinoId), req.auth.sub, hasPermission(req.auth.role, 'cashier.supervise')],
       ),
       pool.query(`SELECT count(*) n, COALESCE(sum(amount), 0) liability FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID'`, [org, casinoId]),
     ]);
     const jp = jackpots.rows;
+    const ent = await loadEntitlements(org);
+    const uses = (m: ProductModule) => ent.inUse.has(m);
+    const one = async (sql: string) => (await pool.query(sql, [org, casinoId])).rows[0];
+    // Module sections: only what the organisation uses; no cash, vault, wallet or handpay figures otherwise.
+    const [tito, handpay, cashless, machineMoney, vault] = await Promise.all([
+      uses('TITO') ? one(
+        `SELECT (SELECT count(*)::int FROM tickets t JOIN casinos c ON c.id = t.casino_id WHERE t.org_id = $1 AND t.casino_id = $2 AND t.issued_at >= ${TODAY}) AS issued_today,
+           (SELECT count(*)::int FROM tickets t JOIN casinos c ON c.id = t.casino_id WHERE t.org_id = $1 AND t.casino_id = $2 AND t.redeemed_at >= ${TODAY}) AS redeemed_today,
+           (SELECT count(*)::int FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID') AS outstanding,
+           (SELECT COALESCE(sum(amount), 0) FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID') AS liability,
+           (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.org_id = $1 AND x.casino_id = $2 AND x.rail = 'TITO'
+              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('ticket_event:' || x.event_id, 'machine_event:' || x.event_id))) AS exceptions`) : null,
+      uses('HANDPAY') ? one(
+        `SELECT count(*) FILTER (WHERE h.status IN ('PENDING', 'APPROVED'))::int AS open, COALESCE(sum(h.amount_cents) FILTER (WHERE h.status IN ('PENDING', 'APPROVED')), 0)::bigint AS open_cents,
+           count(*) FILTER (WHERE h.paid_at >= ${TODAY})::int AS paid_today, COALESCE(sum(h.amount_cents) FILTER (WHERE h.paid_at >= ${TODAY}), 0)::bigint AS paid_today_cents
+         FROM handpays h JOIN casinos c ON c.id = h.casino_id WHERE h.org_id = $1 AND h.casino_id = $2`) : null,
+      uses('CASHLESS') ? one(
+        `SELECT (SELECT count(*)::int FROM wallets WHERE org_id = $1 AND status = 'ACTIVE') AS wallets,
+           (SELECT COALESCE(sum(available_cents + reserved_cents), 0)::bigint FROM wallet_balances WHERE org_id = $1) AS wallet_liability_cents,
+           (SELECT count(*)::int FROM wallet_transfers WHERE org_id = $1 AND casino_id = $2 AND status IN ('REQUESTED', 'SENT')) AS active_transfers,
+           (SELECT count(*)::int FROM wallet_transfers t JOIN casinos c ON c.id = t.casino_id WHERE t.org_id = $1 AND t.casino_id = $2 AND t.requested_at >= ${TODAY}) AS transfers_today`) : null,
+      uses('MACHINE') ? one(
+        `SELECT (SELECT count(*)::int FROM money_rail_cutovers WHERE org_id = $1 AND casino_id = $2 AND rail = 'MACHINE') AS on_ledger,
+           (SELECT count(*)::int FROM money_rail_freezes WHERE org_id = $1 AND casino_id = $2 AND rail = 'MACHINE' AND machine_id IS NOT NULL AND lifted_at IS NULL) AS frozen,
+           (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.org_id = $1 AND x.casino_id = $2 AND x.rail IN ('MACHINE', 'CASHLESS')
+              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key = 'machine_event:' || x.event_id)) AS exceptions`) : null,
+      uses('VAULT') ? one(
+        `SELECT (SELECT status FROM vault_sessions WHERE org_id = $1 AND casino_id = $2 AND status IN ('OPEN', 'COUNTING') ORDER BY opened_at DESC LIMIT 1) AS session_status,
+           (SELECT count(*)::int FROM cash_movements WHERE org_id = $1 AND casino_id = $2 AND status = 'REQUESTED') AS open_movements`) : null,
+    ]);
     return {
+      modules: [...ent.inUse],
       machines: machines.rows[0],
       financial,
       players: {
@@ -125,8 +160,9 @@ export async function dashboardRoutes(app: FastifyInstance) {
       topPlayers: topPlayers.rows,
       recentTransactions: recent.rows,
       gateways: gateways.rows,
-      cashier: cashier.rows,
-      tickets: tickets.rows[0],
+      cashier: uses('CASH') ? cashier.rows : null,
+      tickets: uses('TITO') ? tickets.rows[0] : null,
+      tito, handpay, cashless, machineMoney, vault,
     };
   });
 }

@@ -13,7 +13,7 @@ import { openAlert } from '../services/alerts';
 
 /** Expected cashbox content of a machine since its last collection, derived from the ledger. */
 export async function cashRoutes(app: FastifyInstance) {
-  app.get('/api/v1/cash/overview', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/cash/overview', { config: { feature: 'cash' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const today = `(date_trunc('day', now() AT TIME ZONE c.timezone) AT TIME ZONE c.timezone)`;
     // Blind count (Step 7e): on a ledger casino the viewer's own open shift is left out, so a supervisor who
@@ -42,7 +42,7 @@ export async function cashRoutes(app: FastifyInstance) {
     return { today: byType.rows, open: open.rows[0], tickets: liability.rows[0], collections: collections.rows };
   });
 
-  app.get('/api/v1/cash/collections/expected/:machineId', { preHandler: guard('cash.manage') }, async (req) => {
+  app.get('/api/v1/cash/collections/expected/:machineId', { config: { feature: 'machine' }, preHandler: guard('cash.manage') }, async (req) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
     const m = await pool.query('SELECT id, asset_no FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3)', [machineId, req.auth.orgId, req.auth.casinoIds]);
     if (!m.rowCount) throw new HttpError(404, 'Machine not found');
@@ -62,7 +62,7 @@ export async function cashRoutes(app: FastifyInstance) {
   });
 
   /** Records a machine drop count. Differences against the meters raise an alert. */
-  app.post('/api/v1/cash/collections', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/cash/collections', { config: { feature: 'machine' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const body = z.object({
       machineId: z.string().uuid(), countedCash: z.number().min(0).max(1e7), countedTickets: z.number().min(0).max(1e7), note: z.string().max(500).optional(),
     }).parse(req.body);

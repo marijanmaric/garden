@@ -2,9 +2,10 @@ import bcrypt from 'bcryptjs';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { withTransaction, writeAudit, type PoolClient } from '@m1/database';
-import { ROLES, ROLE_PERMISSIONS } from '@m1/shared';
+import { ROLES, ROLE_PERMISSIONS, type Role } from '@m1/shared';
 import { HttpError, actor, guard } from '../auth';
 import { pool } from '../db';
+import { requireLimit } from '../services/entitlements';
 
 const base = {
   name: z.string().trim().min(2).max(100),
@@ -15,9 +16,14 @@ const base = {
 const createSchema = z.object({ ...base, email: z.string().trim().toLowerCase().email(), password: z.string().min(8).max(200) });
 const updateSchema = z.object({ ...base, active: z.boolean(), password: z.string().min(8).max(200).optional() });
 
-/** Only a SUPER_ADMIN may create or modify SUPER_ADMIN accounts. */
-function checkRoleChange(req: FastifyRequest, role: string) {
+/**
+ * Only a SUPER_ADMIN may create or modify SUPER_ADMIN accounts, and nobody assigns (or edits) a role carrying a
+ * permission they do not hold themselves (no escalation through user management).
+ */
+function checkRoleChange(req: FastifyRequest, role: Role) {
   if (role === 'SUPER_ADMIN' && req.auth.role !== 'SUPER_ADMIN') throw new HttpError(403, 'Only a super admin can assign SUPER_ADMIN');
+  const own = new Set(ROLE_PERMISSIONS[req.auth.role as Role] ?? []);
+  if (ROLE_PERMISSIONS[role].some((p) => !own.has(p))) throw new HttpError(403, 'You cannot assign a role with permissions you do not hold');
 }
 
 async function setCasinos(db: PoolClient, req: FastifyRequest, employeeId: string, casinoIds: string[]) {
@@ -28,7 +34,7 @@ async function setCasinos(db: PoolClient, req: FastifyRequest, employeeId: strin
 }
 
 export async function employeeRoutes(app: FastifyInstance) {
-  app.get('/api/v1/employees', { preHandler: guard('employee.view') }, async (req) => {
+  app.get('/api/v1/employees', { config: { feature: 'core' }, preHandler: guard('employee.view') }, async (req) => {
     const r = await pool.query(
       `SELECT e.id, e.email, e.name, e.role, e.active, e.phone, e.last_login_at, e.created_at,
          COALESCE((SELECT json_agg(json_build_object('id', c.id, 'name', c.name)) FROM employee_casinos ec JOIN casinos c ON c.id = ec.casino_id WHERE ec.employee_id = e.id), '[]') casinos,
@@ -39,10 +45,11 @@ export async function employeeRoutes(app: FastifyInstance) {
     return { employees: r.rows, rolePermissions: ROLE_PERMISSIONS };
   });
 
-  app.post('/api/v1/employees', { preHandler: guard('user.manage') }, async (req) => {
+  app.post('/api/v1/employees', { config: { feature: 'core' }, preHandler: guard('user.manage') }, async (req) => {
     const body = createSchema.parse(req.body);
     checkRoleChange(req, body.role);
     return withTransaction(pool, async (db) => {
+      await requireLimit(db, req.auth.orgId, 'MAX_USERS');
       const hash = await bcrypt.hash(body.password, 10);
       let id: string;
       try {
@@ -59,7 +66,7 @@ export async function employeeRoutes(app: FastifyInstance) {
     });
   });
 
-  app.put('/api/v1/employees/:id', { preHandler: guard('user.manage') }, async (req) => {
+  app.put('/api/v1/employees/:id', { config: { feature: 'core' }, preHandler: guard('user.manage') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = updateSchema.parse(req.body);
     return withTransaction(pool, async (db) => {
@@ -69,6 +76,7 @@ export async function employeeRoutes(app: FastifyInstance) {
       checkRoleChange(req, e.role);
       checkRoleChange(req, body.role);
       if (id === req.auth.sub && (!body.active || body.role !== e.role)) throw new HttpError(409, 'You cannot deactivate yourself or change your own role');
+      if (!e.active && body.active) await requireLimit(db, req.auth.orgId, 'MAX_USERS'); // reactivation takes a seat
       const hash = body.password ? await bcrypt.hash(body.password, 10) : null;
       await db.query(
         `UPDATE employees SET name = $2, role = $3, active = $4, phone = $5, password_hash = COALESCE($6, password_hash), updated_at = now() WHERE id = $1`,
@@ -86,7 +94,7 @@ export async function employeeRoutes(app: FastifyInstance) {
   });
 
   /** Activity of one employee: audit trail and cashier shifts. */
-  app.get('/api/v1/employees/:id/activity', { preHandler: guard('employee.view') }, async (req) => {
+  app.get('/api/v1/employees/:id/activity', { config: { feature: 'core' }, preHandler: guard('employee.view') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const e = await pool.query('SELECT id FROM employees WHERE id = $1 AND org_id = $2', [id, req.auth.orgId]);
     if (!e.rowCount) throw new HttpError(404, 'Employee not found');

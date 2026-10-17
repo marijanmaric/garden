@@ -27,24 +27,24 @@ const actorOf = (req: FastifyRequest): CashActor => ({
 
 export async function machineMoneyRoutes(app: FastifyInstance) {
   // ---- hopper fill: requested by the vault, confirmed at the machine ----
-  app.post('/api/v1/machines/:id/hopper-fills', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/machines/:id/hopper-fills', { config: { feature: 'machine' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z.object({ amountCents: z.number().int().positive().max(1e13), note: z.string().max(500).optional() }).parse(req.body);
     return idempotent(req, reply, (db) => requestHopperFill(db, actorOf(req), { machineId: id, amountCents: body.amountCents, note: body.note, requestKey: `hopper:${req.headers['idempotency-key']}` }));
   });
-  app.post('/api/v1/machines/hopper-fills/:id/confirm', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/machines/hopper-fills/:id/confirm', { config: { feature: 'machine' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => confirmHopperFill(db, actorOf(req), id, body));
   });
 
   // ---- machine collection: blind count, blind second count by a different employee ----
-  app.post('/api/v1/machines/:id/collections/count', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/machines/:id/collections/count', { config: { feature: 'machine' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => recordCollectionCount(db, actorOf(req), id, body));
   });
-  app.post('/api/v1/machines/collections/counts/:id/verify', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/machines/collections/counts/:id/verify', { config: { feature: 'machine' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => verifyCollectionCount(db, actorOf(req), id, body));
@@ -53,7 +53,7 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
   // ---- cashier <-> wallet ----
   const walletBody = z.object({ playerCard: z.string().min(1).max(40), amount: z.number().positive().max(1_000_000) });
   for (const [path, kind] of [['deposit', 'CASH_DEPOSIT'], ['withdraw', 'CASH_WITHDRAWAL']] as const) {
-    app.post(`/api/v1/cashier/wallet/${path}`, { preHandler: guard('cash.transact') }, async (req, reply) => {
+    app.post(`/api/v1/cashier/wallet/${path}`, { config: { feature: 'cashless.cashier' }, preHandler: guard('cash.transact') }, async (req, reply) => {
       const body = walletBody.parse(req.body);
       return idempotent(req, reply, async (db) => {
         const card = await requireUsableCard(db, req.auth.orgId, body.playerCard);
@@ -61,7 +61,7 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
       });
     });
   }
-  app.post('/api/v1/cashier/wallet/approval-request', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/cashier/wallet/approval-request', { config: { feature: 'cashless.cashier' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = walletBody.extend({ kind: z.enum(['CASH_DEPOSIT', 'CASH_WITHDRAWAL']) }).parse(req.body);
     return idempotent(req, reply, async (db) => {
       const card = await requireUsableCard(db, req.auth.orgId, body.playerCard);
@@ -70,7 +70,7 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
   });
 
   // ---- machine event exceptions (money part rejected, event kept) ----
-  app.get('/api/v1/machines/event-exceptions', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/machines/event-exceptions', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     return (await pool.query(
       `SELECT x.*, m.asset_no, e.amount, e.occurred_at,
@@ -82,7 +82,7 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
   });
 
   // ---- late-event booking of a deferred event whose business date is closed (four eyes) ----
-  app.post('/api/v1/money/deferred/:eventId/late-booking', { preHandler: guard('cashier.supervise') }, async (req, reply) => {
+  app.post('/api/v1/money/deferred/:eventId/late-booking', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req, reply) => {
     const { eventId } = z.object({ eventId: z.string().uuid() }).parse(req.params);
     const { reason } = z.object({ reason: z.string().min(10).max(1000) }).parse(req.body);
     const out: BusMessage[] = [];

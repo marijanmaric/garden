@@ -30,7 +30,7 @@ async function loadMachine(orgId: string, casinoIds: string[], id: string) {
 }
 
 export async function machineRoutes(app: FastifyInstance) {
-  app.get('/api/v1/machines', { preHandler: guard('machine.view') }, async (req) => {
+  app.get('/api/v1/machines', { config: { feature: 'core' }, preHandler: guard('machine.view') }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), status: z.string().optional(), search: z.string().optional() }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     const params: unknown[] = [req.auth.orgId, casinoId];
@@ -46,7 +46,7 @@ export async function machineRoutes(app: FastifyInstance) {
     return (await pool.query(`${MACHINE_SELECT} ${where} ORDER BY m.asset_no`, params)).rows;
   });
 
-  app.get('/api/v1/machines/:id', { preHandler: guard('machine.view') }, async (req) => {
+  app.get('/api/v1/machines/:id', { config: { feature: 'core' }, preHandler: guard('machine.view') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const machine = await loadMachine(req.auth.orgId, req.auth.casinoIds, id);
     const [events, session, today, commands] = await Promise.all([
@@ -66,7 +66,7 @@ export async function machineRoutes(app: FastifyInstance) {
   });
 
   /** Remote command, delivered to the edge gateway on its next heartbeat. */
-  app.post('/api/v1/machines/:id/commands', { preHandler: guard('machine.command') }, async (req) => {
+  app.post('/api/v1/machines/:id/commands', { config: { feature: 'core' }, preHandler: guard('machine.command') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { type } = z.object({ type: z.enum(MACHINE_COMMANDS) }).parse(req.body);
     const m = await loadMachine(req.auth.orgId, req.auth.casinoIds, id);
@@ -79,7 +79,7 @@ export async function machineRoutes(app: FastifyInstance) {
     return r.rows[0];
   });
 
-  app.put('/api/v1/machines/:id/maintenance', { preHandler: guard('machine.configure') }, async (req) => {
+  app.put('/api/v1/machines/:id/maintenance', { config: { feature: 'core' }, preHandler: guard('machine.configure') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { maintenance } = z.object({ maintenance: z.boolean() }).parse(req.body);
     const status = await withTransaction(pool, async (db) => {

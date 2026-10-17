@@ -1,3 +1,4 @@
+import type { Feature } from '@m1/shared';
 import { pool } from '../db';
 
 export type ColumnType = 'text' | 'money' | 'number' | 'percent' | 'datetime' | 'date';
@@ -27,6 +28,8 @@ export interface ReportDef {
   filters: Array<'machine' | 'employee'>;
   columns: Column[];
   sql: string;
+  /** Commercial feature the report belongs to (reports of modules the customer does not use are not offered). */
+  feature: Feature;
 }
 
 /**
@@ -52,7 +55,7 @@ const money = (key: string, label: string): Column => ({ key, label, type: 'mone
 
 export const REPORTS: ReportDef[] = [
   {
-    key: 'daily-gaming', title: 'Daily Gaming Report', group: 'Gaming', filters: ['machine'],
+    key: 'daily-gaming', feature: 'reporting', title: 'Daily Gaming Report', group: 'Gaming', filters: ['machine'],
     description: 'Bets, wins, jackpots, GGR and hold per business day.',
     columns: [
       { key: 'day', label: 'Day', type: 'date' }, money('coin_in', 'Bets'), money('coin_out', 'Wins'), money('jackpots', 'Jackpots'),
@@ -69,7 +72,7 @@ export const REPORTS: ReportDef[] = [
       GROUP BY 1 ORDER BY 1`,
   },
   {
-    key: 'machine-performance', title: 'Machine Performance', group: 'Gaming', filters: ['machine'],
+    key: 'machine-performance', feature: 'reporting', title: 'Machine Performance', group: 'Gaming', filters: ['machine'],
     description: 'Per machine result for the period, sorted by GGR.',
     columns: [
       { key: 'asset_no', label: 'Asset', type: 'text' }, { key: 'manufacturer', label: 'Manufacturer', type: 'text' },
@@ -85,7 +88,7 @@ export const REPORTS: ReportDef[] = [
       GROUP BY m.id, mm.manufacturer, f.name ORDER BY ggr DESC`,
   },
   {
-    key: 'manufacturer-performance', title: 'Manufacturer Performance', group: 'Gaming', filters: ['machine'],
+    key: 'manufacturer-performance', feature: 'reporting', title: 'Manufacturer Performance', group: 'Gaming', filters: ['machine'],
     description: 'Results grouped by manufacturer, including GGR per machine.',
     columns: [
       { key: 'manufacturer', label: 'Manufacturer', type: 'text' }, { key: 'machines', label: 'Machines', type: 'number' },
@@ -100,7 +103,7 @@ export const REPORTS: ReportDef[] = [
       GROUP BY 1 ORDER BY ggr DESC`,
   },
   {
-    key: 'jackpot-wins', title: 'Jackpot Wins', group: 'Gaming', filters: ['machine'],
+    key: 'jackpot-wins', feature: 'handpay', title: 'Jackpot Wins', group: 'Gaming', filters: ['machine'],
     description: 'Every jackpot hit in the period.',
     columns: [{ key: 'occurred_at', label: 'Time', type: 'datetime' }, { key: 'asset_no', label: 'Asset', type: 'text' }, { key: 'manufacturer', label: 'Manufacturer', type: 'text' }, { key: 'game', label: 'Game', type: 'text' }, money('amount', 'Amount')],
     sql: `${P} SELECT t.occurred_at, m.asset_no, mm.manufacturer, m.game, t.amount
@@ -109,7 +112,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY t.occurred_at DESC`,
   },
   {
-    key: 'tickets', title: 'Tickets (TITO)', group: 'Tickets & Cash', filters: ['machine'],
+    key: 'tickets', feature: 'tito', title: 'Tickets (TITO)', group: 'Tickets & Cash', filters: ['machine'],
     description: 'Tickets issued in the period with their current status.',
     columns: [
       { key: 'barcode', label: 'Barcode', type: 'text' }, money('amount', 'Amount'), { key: 'status', label: 'Status', type: 'text' },
@@ -126,7 +129,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY tk.issued_at DESC`,
   },
   {
-    key: 'cashier-sessions', title: 'Cashier Sessions', group: 'Tickets & Cash', filters: ['employee'],
+    key: 'cashier-sessions', feature: 'cash', title: 'Cashier Sessions', group: 'Tickets & Cash', filters: ['employee'],
     description: 'Shifts with opening, expected and counted balance and differences.',
     columns: [
       { key: 'opened_at', label: 'Opened', type: 'datetime' }, { key: 'closed_at', label: 'Closed', type: 'datetime' }, { key: 'desk', label: 'Desk', type: 'text' },
@@ -139,7 +142,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY s.opened_at DESC`,
   },
   {
-    key: 'cash-transactions', title: 'Cash Transactions', group: 'Tickets & Cash', filters: ['employee'],
+    key: 'cash-transactions', feature: 'cash', title: 'Cash Transactions', group: 'Tickets & Cash', filters: ['employee'],
     description: 'Every drawer movement (signed: + into the drawer, - out of it).',
     columns: [
       { key: 'created_at', label: 'Time', type: 'datetime' }, { key: 'desk', label: 'Desk', type: 'text' }, { key: 'employee', label: 'Employee', type: 'text' },
@@ -152,7 +155,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY ct.id DESC`,
   },
   {
-    key: 'collections', title: 'Drop Collections', group: 'Tickets & Cash', filters: ['machine', 'employee'],
+    key: 'collections', feature: 'machine', title: 'Drop Collections', group: 'Tickets & Cash', filters: ['machine', 'employee'],
     description: 'Machine cashbox counts against meter values.',
     columns: [
       { key: 'created_at', label: 'Time', type: 'datetime' }, { key: 'asset_no', label: 'Machine', type: 'text' }, money('expected_cash', 'Exp. Cash'),
@@ -165,7 +168,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY cc.created_at DESC`,
   },
   {
-    key: 'alerts', title: 'Alerts', group: 'Operations', filters: ['machine'],
+    key: 'alerts', feature: 'reporting', title: 'Alerts', group: 'Operations', filters: ['machine'],
     description: 'All alerts raised in the period and how they were handled.',
     columns: [
       { key: 'created_at', label: 'Raised', type: 'datetime' }, { key: 'severity', label: 'Severity', type: 'text' }, { key: 'type', label: 'Type', type: 'text' },
@@ -178,7 +181,7 @@ export const REPORTS: ReportDef[] = [
       ORDER BY a.created_at DESC`,
   },
   {
-    key: 'audit', title: 'Audit Trail', group: 'Operations', filters: ['employee'],
+    key: 'audit', feature: 'reporting', title: 'Audit Trail', group: 'Operations', filters: ['employee'],
     description: 'Security and configuration relevant actions.',
     columns: [
       { key: 'created_at', label: 'Time', type: 'datetime' }, { key: 'actor_name', label: 'Actor', type: 'text' }, { key: 'action', label: 'Action', type: 'text' },

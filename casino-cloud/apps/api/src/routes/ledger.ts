@@ -7,10 +7,10 @@ import { countsTargets } from '../services/blind-count';
 
 /** Read-only ledger endpoints. Money is written only through the ledger service. */
 export async function ledgerRoutes(app: FastifyInstance) {
-  app.get('/api/v1/ledger/health', { preHandler: guard('accounting.view') }, async (req) => checkLedgerInvariants(pool, req.auth.orgId));
+  app.get('/api/v1/ledger/health', { config: { feature: 'core' }, preHandler: guard('accounting.view') }, async (req) => checkLedgerInvariants(pool, req.auth.orgId));
 
   /** Balances of the casino's accounts plus the organisation-level (wallet) accounts. */
-  app.get('/api/v1/ledger/accounts', { preHandler: guard('accounting.view') }, async (req) => {
+  app.get('/api/v1/ledger/accounts', { config: { feature: 'core' }, preHandler: guard('accounting.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT a.id, a.kind, k.class, k.scope, a.casino_id, a.machine_id, a.wallet_id, a.cashier_session_id, a.vault_id,

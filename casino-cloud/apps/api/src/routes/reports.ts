@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { writeAudit } from '@m1/database';
-import { hasPermission } from '@m1/shared';
+import { featureAvailable, hasPermission } from '@m1/shared';
+import { loadEntitlements, requireFeature } from '../services/entitlements';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
 import { toCsv, toPdf, toXlsx } from '../services/export';
@@ -10,12 +11,15 @@ import { REPORTS, runReport } from '../services/reports';
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 export async function reportRoutes(app: FastifyInstance) {
-  app.get('/api/v1/reports', { preHandler: guard('report.view') }, async () =>
-    REPORTS.map(({ key, title, description, group, filters, columns }) => ({ key, title, description, group, filters, columns })),
-  );
+  // Only the reports of modules the organisation uses (Reporting itself is checked by the guard).
+  app.get('/api/v1/reports', { config: { feature: 'reporting' }, preHandler: guard('report.view') }, async (req) => {
+    const ent = await loadEntitlements(req.auth.orgId);
+    return REPORTS.filter((r) => featureAvailable(r.feature, ent.inUse))
+      .map(({ key, title, description, group, filters, columns, feature }) => ({ key, title, description, group, filters, columns, feature }));
+  });
 
   /** Filter options: floors, manufacturers, machines and employees of the casino. */
-  app.get('/api/v1/reports/options', { preHandler: guard('report.view') }, async (req) => {
+  app.get('/api/v1/reports/options', { config: { feature: 'reporting' }, preHandler: guard('report.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const [floors, manufacturers, machines, employees] = await Promise.all([
       pool.query('SELECT id, name FROM floors WHERE org_id = $1 AND casino_id = $2 ORDER BY sort_order', [req.auth.orgId, casinoId]),
@@ -26,10 +30,11 @@ export async function reportRoutes(app: FastifyInstance) {
     return { floors: floors.rows, manufacturers: manufacturers.rows.map((r) => r.manufacturer), machines: machines.rows, employees: employees.rows };
   });
 
-  app.get('/api/v1/reports/:key', { preHandler: guard('report.view') }, async (req, reply) => {
+  app.get('/api/v1/reports/:key', { config: { feature: 'reporting' }, preHandler: guard('report.view') }, async (req, reply) => {
     const { key } = z.object({ key: z.string() }).parse(req.params);
     const def = REPORTS.find((r) => r.key === key);
     if (!def) throw new HttpError(404, 'Unknown report');
+    requireFeature(await loadEntitlements(req.auth.orgId), def.feature, { read: true });
     const qs = z.object({
       casinoId: z.string().uuid().optional(), from: day, to: day, format: z.enum(['json', 'csv', 'xlsx', 'pdf']).default('json'),
       floorId: z.string().uuid().optional(), manufacturer: z.string().max(80).optional(), machineId: z.string().uuid().optional(), employeeId: z.string().uuid().optional(),

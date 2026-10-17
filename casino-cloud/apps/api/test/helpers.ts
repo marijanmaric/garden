@@ -74,3 +74,16 @@ export async function createEmptyDatabase(name: string) {
   url.pathname = `/${name}`;
   return url.toString();
 }
+
+/**
+ * Upgraded organisations only receive the conservative usage-derived entitlements of migration 012. Tests
+ * that exercise every rail on an upgraded organisation assign a plan explicitly, as a platform admin would.
+ */
+export async function assignPlan(pool: import('pg').Pool, orgId: string, code = 'ENTERPRISE') {
+  await pool.query(
+    `INSERT INTO subscriptions (org_id, plan_id, status)
+     SELECT $1, id, 'ACTIVE' FROM plans WHERE code = $2 ORDER BY version DESC LIMIT 1
+     ON CONFLICT (org_id) DO UPDATE SET plan_id = EXCLUDED.plan_id, status = 'ACTIVE', ends_at = NULL, updated_at = now()`,
+    [orgId, code],
+  );
+}

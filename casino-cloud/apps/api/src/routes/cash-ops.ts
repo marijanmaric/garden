@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { hasPermission } from '@m1/shared';
+import { featureAvailable, hasPermission, type Feature } from '@m1/shared';
 import { HttpError, guard, scopeCasino } from '../auth';
 import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
@@ -13,6 +13,15 @@ import { decideHandpayApproval } from '../services/handpays';
 import { decideException } from '../services/handpay-exceptions';
 import { decideTicketApproval } from '../services/tito';
 import { decideLateEventBooking } from '../services/late-events';
+import { loadEntitlements, requireFeature } from '../services/entitlements';
+
+/** The feature an approval belongs to (deciding it executes the action of that module). */
+const APPROVAL_FEATURE: Record<string, Feature> = {
+  DRAWER_SHORT_OVER: 'cash', HANDPAY_PAY: 'handpay', HANDPAY_EXCEPTION: 'handpay',
+  TITO_REDEEM_CASHIER: 'tito.cashier', TITO_CANCEL: 'tito', TITO_VOID: 'tito',
+  CASH_DEPOSIT: 'cashless.cashier', CASH_WITHDRAWAL: 'cashless.cashier',
+  RECONCILIATION_RESOLUTION: 'reconciliation', LATE_EVENT_BOOKING: 'reconciliation',
+};
 
 /**
  * Step 7a: ledger-backed vault and drawer operations, approvals, reconciliation, freezes, day close.
@@ -37,7 +46,7 @@ async function withEvents<T>(fn: (out: BusMessage[]) => Promise<T>) {
 
 export async function cashOpsRoutes(app: FastifyInstance) {
   // ---- vault sessions and counts ----
-  app.post('/api/v1/vault/sessions', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/vault/sessions', { config: { feature: 'vault' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const body = z.object({ casinoId: z.string().uuid().optional(), vaultId: z.string().uuid().optional(), count, note: z.string().max(500).optional() }).parse(req.body);
     const casinoId = scopeCasino(req, body.casinoId);
     return idempotent(req, reply, async (db) => {
@@ -48,7 +57,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
   });
 
   /** Closing count (blind). On the ledger the session closes when a second employee verifies it. */
-  app.post('/api/v1/vault/sessions/:id/close', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/vault/sessions/:id/close', { config: { feature: 'vault' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, async (db) => {
@@ -58,20 +67,20 @@ export async function cashOpsRoutes(app: FastifyInstance) {
     });
   });
 
-  app.post('/api/v1/vault/sessions/:id/recount', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/vault/sessions/:id/recount', { config: { feature: 'vault' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => recountVault(db, actorOf(req), id, body));
   });
 
-  app.post('/api/v1/vault/counts/:id/verify', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/vault/counts/:id/verify', { config: { feature: 'vault' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     return idempotent(req, reply, (db) => verifyVaultCount(db, actorOf(req), id, body));
   });
 
   // ---- vault <-> drawer movements ----
-  app.get('/api/v1/cash/movements', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/cash/movements', { config: { feature: 'cash' }, preHandler: guard() }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), status: z.string().max(20).optional() }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     return (await pool.query(
@@ -90,7 +99,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
   });
 
   /** FILL: issued by the vault (cash.manage) for a shift. DROP: handed in by the cashier from the own shift. */
-  app.post('/api/v1/cash/movements', { preHandler: guard() }, async (req, reply) => {
+  app.post('/api/v1/cash/movements', { config: { feature: 'cash' }, preHandler: guard() }, async (req, reply) => {
     const body = z.object({
       kind: z.enum(['FILL', 'DROP']), cashierSessionId: z.string().uuid().optional(), amountCents: z.number().int().positive().max(1e13),
       requestKey: z.string().min(8).max(128).optional(), note: z.string().max(500).optional(),
@@ -108,7 +117,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
   });
 
   /** The receiving side confirms with its own count: FILL by the cashier, DROP by the vault. */
-  app.post('/api/v1/cash/movements/:id/confirm', { preHandler: guard() }, async (req, reply) => {
+  app.post('/api/v1/cash/movements/:id/confirm', { config: { feature: 'cash' }, preHandler: guard() }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = count.parse(req.body);
     const m = (await pool.query('SELECT kind FROM cash_movements WHERE id = $1 AND org_id = $2', [id, req.auth.orgId])).rows[0];
@@ -118,15 +127,16 @@ export async function cashOpsRoutes(app: FastifyInstance) {
     return idempotent(req, reply, (db) => confirmMovement(db, actorOf(req), id, body));
   });
 
-  app.post('/api/v1/cash/movements/:id/cancel', { preHandler: guard() }, async (req, reply) => {
+  app.post('/api/v1/cash/movements/:id/cancel', { config: { feature: 'cash' }, preHandler: guard() }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     return idempotent(req, reply, (db) => cancelMovement(db, actorOf(req), id));
   });
 
   // ---- approvals inbox (four eyes) ----
-  app.get('/api/v1/approvals', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/approvals', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), status: z.string().max(20).default('PENDING') }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
+    const ent = await loadEntitlements(req.auth.orgId);
     // Step 7e: plus who asked, who decided and the affected entity (ticket, machine, player), read-only.
     return (await pool.query(
       `SELECT a.id, a.action, a.entity_type, a.entity_id, a.amount_cents, a.payload, a.status, a.requested_by, a.created_at, a.expires_at,
@@ -152,15 +162,19 @@ export async function cashOpsRoutes(app: FastifyInstance) {
        LEFT JOIN players pp ON pp.id::text = a.payload->>'playerId' AND a.entity_type <> 'wallet' LEFT JOIN player_profiles ppr ON ppr.player_id = pp.id
        LEFT JOIN cash_counts cc ON a.action = 'DRAWER_SHORT_OVER' AND cc.id::text = a.entity_id
        LEFT JOIN cashier_sessions cs ON cs.id = cc.cashier_session_id LEFT JOIN cash_desks cd ON cd.id = cs.cash_desk_id LEFT JOIN employees ce ON ce.id = cs.employee_id
-       WHERE a.org_id = $1 AND a.casino_id = $2 AND ($3 = 'ALL' OR a.status = $3) ORDER BY a.created_at DESC LIMIT 200`, [req.auth.orgId, casinoId, qs.status, req.auth.sub])).rows;
+       WHERE a.org_id = $1 AND a.casino_id = $2 AND ($3 = 'ALL' OR a.status = $3) ORDER BY a.created_at DESC LIMIT 200`, [req.auth.orgId, casinoId, qs.status, req.auth.sub])).rows
+      // only approvals of modules the organisation uses
+      .filter((a) => featureAvailable(APPROVAL_FEATURE[a.action] ?? 'reconciliation', ent.inUse));
   });
 
-  app.post('/api/v1/approvals/:id/decide', { preHandler: guard('cashier.supervise') }, async (req, reply) => {
+  app.post('/api/v1/approvals/:id/decide', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z.object({ decision: z.enum(['APPROVED', 'REJECTED']), note: z.string().max(500).optional() }).parse(req.body);
     return idempotent(req, reply, async (db) => {
       const ap = (await db.query('SELECT action, casino_id FROM approvals WHERE id = $1 AND org_id = $2', [id, req.auth.orgId])).rows[0];
       if (!ap || !req.auth.casinoIds.includes(ap.casino_id)) throw new HttpError(404, 'Approval not found');
+      // the approval's own module must be entitled (deciding executes it)
+      requireFeature(await loadEntitlements(req.auth.orgId), APPROVAL_FEATURE[ap.action] ?? 'reconciliation');
       if (ap.action === 'DRAWER_SHORT_OVER') return decideShortOver(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'RECONCILIATION_RESOLUTION') return decideResolution(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'HANDPAY_PAY') return decideHandpayApproval(db, actorOf(req), id, body.decision, body.note);
@@ -172,12 +186,12 @@ export async function cashOpsRoutes(app: FastifyInstance) {
   });
 
   // ---- reconciliation, freezes, day close ----
-  app.post('/api/v1/money/reconciliation', { preHandler: guard('cashier.supervise') }, async (req, reply) => {
+  app.post('/api/v1/money/reconciliation', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req, reply) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.body ?? {}).casinoId);
     return withEvents((out) => idempotent(req, reply, (db) => runReconciliation(db, { orgId: req.auth.orgId, casinoId, trigger: 'MANUAL', employeeId: req.auth.sub }, out)));
   });
 
-  app.get('/api/v1/money/reconciliation', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/money/reconciliation', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const [last, freezes] = await Promise.all([
       pool.query('SELECT id, trigger, ok, checks, created_at FROM reconciliation_runs WHERE org_id = $1 AND casino_id = $2 ORDER BY created_at DESC LIMIT 1', [req.auth.orgId, casinoId]),
@@ -186,13 +200,13 @@ export async function cashOpsRoutes(app: FastifyInstance) {
     return { lastRun: last.rows[0] ?? null, freezes: freezes.rows };
   });
 
-  app.post('/api/v1/money/resolutions', { preHandler: guard('cashier.supervise') }, async (req, reply) => {
+  app.post('/api/v1/money/resolutions', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req, reply) => {
     const body = z.object({ casinoId: z.string().uuid().optional(), itemKey: z.string().min(3).max(200), explanation: z.string().min(10).max(2000) }).parse(req.body);
     const casinoId = scopeCasino(req, body.casinoId);
     return idempotent(req, reply, (db) => requestResolution(db, actorOf(req), { casinoId, itemKey: body.itemKey, explanation: body.explanation }));
   });
 
-  app.post('/api/v1/money/freezes/:id/lift', { preHandler: guard('money.cutover') }, async (req, reply) => {
+  app.post('/api/v1/money/freezes/:id/lift', { config: { feature: 'reconciliation' }, preHandler: guard('money.cutover') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { reason } = z.object({ reason: z.string().min(5).max(500) }).parse(req.body);
     const r = await withEvents((out) => idempotent(req, reply, (db) => liftFreeze(db, actorOf(req), id, reason, out)));
@@ -200,7 +214,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
     return r;
   });
 
-  app.post('/api/v1/money/day-close', { preHandler: guard('cash.manage') }, async (req, reply) => {
+  app.post('/api/v1/money/day-close', { config: { feature: 'reconciliation' }, preHandler: guard('cash.manage') }, async (req, reply) => {
     const body = z.object({ casinoId: z.string().uuid().optional(), businessDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).parse(req.body);
     const casinoId = scopeCasino(req, body.casinoId);
     const r = await withEvents((out) => idempotent(req, reply, (db) => closeBusinessDay(db, actorOf(req), { casinoId, businessDate: body.businessDate }, out)));

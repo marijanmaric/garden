@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
-import { createEmptyDatabase, insertLegacyData } from './helpers';
+import { assignPlan, createEmptyDatabase, insertLegacyData } from './helpers';
 import { createLedgerCasino, cutoverCasinoRails, ensureVaultOpen, type LedgerCasino } from './ledger-casino';
 import { registerStep7cScenarios, type Ctx7c } from './step7c-scenarios';
 
@@ -43,6 +43,7 @@ before(async () => {
     await pool.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3)', [emp[email], legacy.casino, legacy.org]);
   }
   const casino = await createLedgerCasino(pool, { orgId: legacy.org, code: '7C-U', rails: ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS'], machines: 8, gateway: true, vaultCents: 50_000_000 });
+  await assignPlan(pool, legacy.org); // every rail is exercised: the plan is assigned explicitly
   const { buildApp } = await import('../src/app');
   app = await buildApp();
   await app.ready();

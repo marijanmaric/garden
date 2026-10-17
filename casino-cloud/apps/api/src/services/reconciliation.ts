@@ -1,5 +1,5 @@
 import { withTransaction, writeAudit, type Pool, type PoolClient } from '@m1/database';
-import type { FreezeRail } from '@m1/shared';
+import { RAIL_MODULE, type FreezeRail } from '@m1/shared';
 import { HttpError } from '../auth';
 import type { BusMessage } from '../bus';
 import { openAlert } from './alerts';
@@ -30,6 +30,11 @@ export interface ReconCheck {
   ok: boolean;
   items: string[];
   resolved: string[];
+  /**
+   * Entitlement-aware (production readiness H4): the check of a rail whose module the organisation does not use
+   * is still run and recorded, but it neither freezes nor blocks the day close. Global invariants always count.
+   */
+  advisory?: boolean;
 }
 
 export interface ReconResult {
@@ -42,6 +47,16 @@ export interface ReconResult {
 }
 
 const rows = async (db: Db, sql: string, params: unknown[]) => (await db.query(sql, params)).rows;
+
+/**
+ * Rails whose module the organisation uses (purchased + switched on, subscription status ignored: money that keeps
+ * flowing on an expired subscription is still reconciled and frozen). Others are advisory.
+ */
+export async function railsInUse(db: Db, orgId: string): Promise<Set<string>> {
+  const { loadEntitlements } = await import('./entitlements');
+  const e = await loadEntitlements(orgId, db as never);
+  return new Set((Object.keys(RAIL_MODULE) as Array<keyof typeof RAIL_MODULE>).filter((r) => e.inUse.has(RAIL_MODULE[r])));
+}
 
 async function cutoverTime(db: Db, orgId: string, casinoId: string, rail: 'CASH' | 'VAULT' | 'HANDPAY' | 'TITO'): Promise<string | null> {
   const r = await rows(db, `SELECT as_of FROM money_rail_cutovers WHERE org_id = $1 AND casino_id = $2 AND rail = $3 AND created_txid <> pg_current_xact_id()`, [orgId, casinoId, rail]);
@@ -402,18 +417,19 @@ export async function runReconciliation(
 
   const keys = raw.flatMap((c) => c.items);
   const resolved = new Set(keys.length ? (await rows(db, 'SELECT item_key FROM reconciliation_resolutions WHERE org_id = $1 AND item_key = ANY($2)', [orgId, keys])).map((r) => r.item_key) : []);
+  const inUse = await railsInUse(db, orgId);
   const checks: ReconCheck[] = raw.map((c) => {
     const open = c.items.filter((i) => !resolved.has(i));
-    return { key: c.key, rail: c.rail, ok: open.length === 0, items: open, resolved: c.items.filter((i) => resolved.has(i)) };
+    return { key: c.key, rail: c.rail, ok: open.length === 0, items: open, resolved: c.items.filter((i) => resolved.has(i)), advisory: c.rail !== 'GLOBAL' && !inUse.has(c.rail) };
   });
-  const ok = checks.every((c) => c.ok);
+  const ok = checks.every((c) => c.ok || c.advisory);
   const run = (await rows(db,
     'INSERT INTO reconciliation_runs (org_id, casino_id, trigger, ok, checks, employee_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id',
     [orgId, casinoId, input.trigger, ok, JSON.stringify(checks), input.employeeId ?? null]))[0];
 
   const frozen: ReconResult['frozen'] = [];
   for (const rail of ['CASH', 'VAULT', 'HANDPAY', 'TITO', 'MACHINE', 'CASHLESS', 'GLOBAL'] as const) {
-    const failed = checks.filter((c) => c.rail === rail && !c.ok);
+    const failed = checks.filter((c) => c.rail === rail && !c.ok && !c.advisory);
     if (!failed.length) continue;
     const reason = failed.map((c) => `${c.key} (${c.items.length})`).join(', ');
     if (rail === 'MACHINE') {
@@ -447,7 +463,7 @@ export async function liftFreeze(db: Db, a: CashActor, freezeId: string, reason:
   if (!f || (f.casino_id && !a.casinoIds.includes(f.casino_id))) throw new HttpError(404, 'Freeze not found');
   if (f.lifted_at) throw new HttpError(409, 'Freeze already lifted');
   const result = await runReconciliation(db, { orgId: a.orgId, casinoId: f.casino_id, trigger: 'LIFT', employeeId: a.employeeId }, out);
-  const blocking = result.checks.filter((c) => !c.ok && (c.rail === 'GLOBAL'
+  const blocking = result.checks.filter((c) => !c.ok && !c.advisory && (c.rail === 'GLOBAL'
     || (c.rail === f.rail && (f.rail !== 'MACHINE' || !f.machine_id || c.items.some((i) => result.machineOf?.[i] === f.machine_id)))));
   if (blocking.length) return { lifted: false as const, result };
   await rows(db, 'UPDATE money_rail_freezes SET lifted_at = now(), lifted_by = $2, lift_reason = $3, lift_run_id = $4 WHERE id = $1', [freezeId, a.employeeId, reason, result.runId]);
@@ -489,14 +505,16 @@ export async function closeBusinessDay(db: Db, a: CashActor, input: { casinoId: 
   if (input.businessDate >= today) throw new HttpError(409, 'Only a past business date can be closed');
   if ((await rows(db, 'SELECT 1 FROM business_day_closes WHERE casino_id = $1 AND business_date = $2', [input.casinoId, input.businessDate])).length)
     throw new HttpError(409, 'Business date already closed');
-  const frozen = await rows(db,
-    `SELECT id, rail FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL AND (casino_id = $2 OR casino_id IS NULL)`, [a.orgId, input.casinoId]);
+  const inUse = await railsInUse(db, a.orgId);
+  const frozen = (await rows(db,
+    `SELECT id, rail FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL AND (casino_id = $2 OR casino_id IS NULL)`, [a.orgId, input.casinoId]))
+    .filter((f) => f.rail === 'GLOBAL' || inUse.has(f.rail));
   if (frozen.length) return { closed: false as const, reason: `Frozen: ${frozen.map((f) => f.rail).join(', ')}`, result: null };
   // A pending deferred event blocks the close unless it was explicitly explained (four eyes), e.g. one
   // whose original business date is already closed and that goes through the late-event process.
   const deferred = await rows(db,
-    `SELECT count(*)::int n FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING'
-       AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = d.org_id AND r.item_key = 'deferred_event:' || d.event_id)`, [input.casinoId]);
+    `SELECT count(*)::int n FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING' AND d.rail = ANY($2)
+       AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = d.org_id AND r.item_key = 'deferred_event:' || d.event_id)`, [input.casinoId, [...inUse]]);
   if (deferred[0].n) return { closed: false as const, reason: `${deferred[0].n} deferred money event(s) not processed yet`, result: null };
   const result = await runReconciliation(db, { orgId: a.orgId, casinoId: input.casinoId, trigger: 'DAY_CLOSE', employeeId: a.employeeId }, out);
   if (!result.ok) return { closed: false as const, reason: 'Reconciliation mismatch', result };

@@ -4,6 +4,7 @@ import { writeAudit, type PoolClient } from '@m1/database';
 import { TICKET_STATUSES, hasPermission } from '@m1/shared';
 import { HttpError, actor, guard, scopeCasino } from '../auth';
 import { pool } from '../db';
+import { loadEntitlements, requireModule } from '../services/entitlements';
 import { idempotent } from '../services/idempotency';
 import { addCashTx, newBarcode, requireOpenSession } from '../services/cashier';
 import { requireUsableCard } from '../services/players';
@@ -38,7 +39,7 @@ function requireValid(t: { status: string; expires_at: string }) {
 }
 
 export async function ticketRoutes(app: FastifyInstance) {
-  app.get('/api/v1/tickets', { preHandler: guard('ticket.view') }, async (req) => {
+  app.get('/api/v1/tickets', { config: { feature: 'tito' }, preHandler: guard('ticket.view') }, async (req) => {
     const qs = z.object({
       casinoId: z.string().uuid().optional(), status: z.enum(TICKET_STATUSES).optional(), search: z.string().max(40).optional(),
       limit: z.coerce.number().int().min(1).max(500).default(200),
@@ -52,7 +53,7 @@ export async function ticketRoutes(app: FastifyInstance) {
     return r.rows;
   });
 
-  app.get('/api/v1/tickets/summary', { preHandler: guard('ticket.view') }, async (req) => {
+  app.get('/api/v1/tickets/summary', { config: { feature: 'tito' }, preHandler: guard('ticket.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const today = `(date_trunc('day', now() AT TIME ZONE c.timezone) AT TIME ZONE c.timezone)`;
     const r = await pool.query(
@@ -72,7 +73,7 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Validation for cashier and mobile cashier: returns the ticket and whether it may be paid. */
-  app.get('/api/v1/tickets/lookup/:barcode', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/tickets/lookup/:barcode', { config: { feature: 'tito' }, preHandler: guard() }, async (req) => {
     if (!hasPermission(req.auth.role, 'ticket.view') && !hasPermission(req.auth.role, 'ticket.payout')) throw new HttpError(403, 'Missing permission ticket.view');
     const barcode = barcodeSchema.parse((req.params as { barcode: string }).barcode);
     const r = await pool.query(`${TICKET_SELECT} WHERE t.org_id = $1 AND t.casino_id = ANY($2) AND t.barcode = $3`, [req.auth.orgId, req.auth.casinoIds, barcode]);
@@ -82,7 +83,7 @@ export async function ticketRoutes(app: FastifyInstance) {
     return { ...t, reason };
   });
 
-  app.get('/api/v1/tickets/:id', { preHandler: guard('ticket.view') }, async (req) => {
+  app.get('/api/v1/tickets/:id', { config: { feature: 'tito' }, preHandler: guard('ticket.view') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const r = await pool.query(`${TICKET_SELECT} WHERE t.id = $1 AND t.org_id = $2 AND t.casino_id = ANY($3)`, [id, req.auth.orgId, req.auth.casinoIds]);
     if (!r.rowCount) throw new HttpError(404, 'Ticket not found');
@@ -96,8 +97,9 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Cashier pays out a ticket from the drawer. Atomic: a ticket can only ever be redeemed once. */
-  app.post('/api/v1/tickets/redeem', { preHandler: guard('ticket.payout') }, async (req, reply) => {
+  app.post('/api/v1/tickets/redeem', { config: { feature: 'tito.cashier' }, preHandler: guard('ticket.payout') }, async (req, reply) => {
     const { barcode, payTo, playerCard } = z.object({ barcode: barcodeSchema, payTo: z.enum(['CASH', 'WALLET']).default('CASH'), playerCard: z.string().max(40).optional() }).parse(req.body);
+    if (payTo === 'WALLET') requireModule(await loadEntitlements(req.auth.orgId), 'CASHLESS');
     const result = await idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       if (await titoOnLedger(db, req.auth.orgId, session.casino_id)) {
@@ -126,8 +128,9 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Cashier sells a ticket for cash (player takes it to a machine). */
-  app.post('/api/v1/tickets/issue', { preHandler: guard('ticket.payout') }, async (req, reply) => {
+  app.post('/api/v1/tickets/issue', { config: { feature: 'tito.cashier' }, preHandler: guard('ticket.payout') }, async (req, reply) => {
     const { amount, payFrom, playerCard } = z.object({ amount: z.number().positive().max(100000), payFrom: z.enum(['CASH', 'WALLET']).default('CASH'), playerCard: z.string().max(40).optional() }).parse(req.body);
+    if (payFrom === 'WALLET') requireModule(await loadEntitlements(req.auth.orgId), 'CASHLESS');
     return idempotent(req, reply, async (db) => {
       const session = await requireOpenSession(db, req.auth.orgId, req.auth.sub);
       if (await titoOnLedger(db, req.auth.orgId, session.casino_id)) {
@@ -154,7 +157,7 @@ export async function ticketRoutes(app: FastifyInstance) {
   const reasonBody = z.object({ reason: z.string().trim().min(3).max(300) });
 
   for (const [action, status, event] of [['cancel', 'CANCELLED', 'CANCELLED'], ['void', 'VOID', 'VOIDED']] as const) {
-    app.post(`/api/v1/tickets/:id/${action}`, { preHandler: guard('ticket.manage') }, async (req, reply) => {
+    app.post(`/api/v1/tickets/:id/${action}`, { config: { feature: 'tito' }, preHandler: guard('ticket.manage') }, async (req, reply) => {
       const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
       const { reason } = reasonBody.parse(req.body);
       return idempotent(req, reply, async (db) => {
@@ -172,12 +175,12 @@ export async function ticketRoutes(app: FastifyInstance) {
   }
 
   /** Step 7c: four-eyes approval request for a ticket payout above the casino's limit (decided under /api/v1/approvals/:id/decide). */
-  app.post('/api/v1/tickets/:id/approval-request', { preHandler: guard('ticket.payout') }, async (req, reply) => {
+  app.post('/api/v1/tickets/:id/approval-request', { config: { feature: 'tito.cashier' }, preHandler: guard('ticket.payout') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     return idempotent(req, reply, async (db) => requestTicketApproval(db, moneyActor(req), id, 'TITO_REDEEM_CASHIER'));
   });
 
-  app.post('/api/v1/tickets/:id/reprint', { preHandler: guard('ticket.manage') }, async (req, reply) => {
+  app.post('/api/v1/tickets/:id/reprint', { config: { feature: 'tito' }, preHandler: guard('ticket.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     return idempotent(req, reply, async (db) => {
       const t = await loadTicket(db, req, id);
@@ -190,7 +193,7 @@ export async function ticketRoutes(app: FastifyInstance) {
   });
 
   /** Amount correction: the old ticket is cancelled and replaced by a new one (tickets are never edited). */
-  app.post('/api/v1/tickets/:id/adjust', { preHandler: guard('ticket.manage') }, async (req, reply) => {
+  app.post('/api/v1/tickets/:id/adjust', { config: { feature: 'tito' }, preHandler: guard('ticket.manage') }, async (req, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { amount, reason } = z.object({ amount: z.number().positive().max(100000), reason: z.string().trim().min(3).max(300) }).parse(req.body);
     return idempotent(req, reply, async (db) => {

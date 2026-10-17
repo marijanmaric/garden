@@ -116,6 +116,8 @@ export interface NewPlayer {
 
 /** Registers a player: identity row, profile (personal data) and optionally a first card. */
 export async function createPlayer(db: Db, a: Actor, input: NewPlayer) {
+  const { requireLimit } = await import('./entitlements');
+  await requireLimit(db, a.orgId, 'MAX_PLAYERS');
   const p = await db.query(
     `INSERT INTO players (org_id, home_casino_id) VALUES ($1,$2) RETURNING id, org_id, player_no, status, verification_status`,
     [a.orgId, input.homeCasinoId ?? null],

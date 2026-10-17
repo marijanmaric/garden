@@ -6,6 +6,8 @@ import { pool } from '../db';
 import { cardRejectionMessage, resolveCard } from '../services/players';
 import { walletBalances } from '../services/wallets';
 import { countsTargets, reviewCount } from '../services/blind-count';
+import { railsInUse } from '../services/reconciliation';
+import { loadEntitlements, requireFeature } from '../services/entitlements';
 
 /**
  * Step 7e: read-only views for the operator screens (cashier, vault, approvals, admin, reconciliation,
@@ -60,7 +62,7 @@ async function activeFreezes(orgId: string, casinoId: string) {
 
 export async function operatorRoutes(app: FastifyInstance) {
   /** Rail modes, active freezes and approval limits: lets every screen show guards before an action. */
-  app.get('/api/v1/operator/context', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/operator/context', { config: { feature: 'core' }, preHandler: guard() }, async (req) => {
     const casinoId = scopeCasino(req, casinoQuery.parse(req.query).casinoId);
     const [modes, freezes, settings, today] = await Promise.all([
       railModes(req.auth.orgId, casinoId),
@@ -84,7 +86,7 @@ export async function operatorRoutes(app: FastifyInstance) {
    * The signed-in cashier's shift including the close states (COUNTING), the fills / drops waiting for a
    * confirmation and the cashier's own approval requests (so the screen can show "waiting for supervisor").
    */
-  app.get('/api/v1/cashier/shift', { preHandler: guard('cash.transact') }, async (req) => {
+  app.get('/api/v1/cashier/shift', { config: { feature: 'cash' }, preHandler: guard('cash.transact') }, async (req) => {
     const s = (await rows(
       `SELECT s.id, s.status, s.casino_id, s.opened_at, s.cash_desk_id, d.name AS desk_name,
          EXISTS (SELECT 1 FROM money_rail_cutovers c WHERE c.org_id = s.org_id AND c.casino_id = s.casino_id AND c.rail = 'CASH') AS ledger
@@ -112,7 +114,7 @@ export async function operatorRoutes(app: FastifyInstance) {
   });
 
   /** Player / card lookup with the wallet from the ledger and its recent history (per ledger transaction). */
-  app.get('/api/v1/players/lookup/:card', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/players/lookup/:card', { config: { feature: 'core' }, preHandler: guard() }, async (req) => {
     if (!hasPermission(req.auth.role, 'player.view') && !hasPermission(req.auth.role, 'cash.transact')) throw new HttpError(403, 'Missing permission player.view');
     const { card } = z.object({ card: z.string().trim().min(1).max(40) }).parse(req.params);
     const res = await resolveCard(pool, req.auth.orgId, card);
@@ -121,7 +123,9 @@ export async function operatorRoutes(app: FastifyInstance) {
       `SELECT p.id, p.player_no, p.status, p.verification_status, p.tier, pr.first_name, pr.last_name, m.asset_no AS current_machine
        FROM players p LEFT JOIN player_profiles pr ON pr.player_id = p.id LEFT JOIN machines m ON m.current_player_id = p.id
        WHERE p.id = $1`, [res.player.id]))[0];
-    const walletRow = (await rows('SELECT id, status, status_reason FROM wallets WHERE player_id = $1 AND org_id = $2', [res.player.id, req.auth.orgId]))[0];
+    // the wallet is part of the Cashless module: without it the lookup shows the player and card only
+    const cashless = (await loadEntitlements(req.auth.orgId)).inUse.has('CASHLESS');
+    const walletRow = cashless ? (await rows('SELECT id, status, status_reason FROM wallets WHERE player_id = $1 AND org_id = $2', [res.player.id, req.auth.orgId]))[0] : undefined;
     let wallet = null;
     if (walletRow) {
       const b = await walletBalances(pool, req.auth.orgId, walletRow.id);
@@ -154,7 +158,7 @@ export async function operatorRoutes(app: FastifyInstance) {
   });
 
   /** Vault screen: session, counts waiting for the second count, open movements, shifts, collections. */
-  app.get('/api/v1/vault/status', { preHandler: guard('cash.manage') }, async (req) => {
+  app.get('/api/v1/vault/status', { config: { feature: 'vault' }, preHandler: guard('cash.manage') }, async (req) => {
     const casinoId = scopeCasino(req, casinoQuery.parse(req.query).casinoId);
     const vault = (await rows('SELECT id, name FROM vaults WHERE casino_id = $1 AND active ORDER BY created_at, id LIMIT 1', [casinoId]))[0] ?? null;
     const modes = await railModes(req.auth.orgId, casinoId);
@@ -203,13 +207,21 @@ export async function operatorRoutes(app: FastifyInstance) {
    * different employee with cash.manage (403 for the counter). Confirm with POST .../verify (same total),
    * reject with a different count of your own (nothing booked, the counter counts again).
    */
-  app.get('/api/v1/counts/:id/review', { preHandler: guard('cash.manage') }, async (req) => {
+  app.get('/api/v1/counts/:id/review', { config: { feature: 'money.admin' }, preHandler: guard('cash.manage') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+    // a count of the vault needs Vault, a collection of a ledger machine needs Machine Money; cutover counts are infrastructure
+    const c = (await rows(`SELECT c.context, EXISTS (SELECT 1 FROM money_rail_cutovers mc WHERE mc.rail = 'MACHINE' AND mc.machine_id = c.machine_id) AS ledger_machine
+                           FROM cash_counts c WHERE c.id = $1 AND c.org_id = $2`, [id, req.auth.orgId]))[0];
+    if (c) {
+      const ent = await loadEntitlements(req.auth.orgId);
+      if (c.context === 'VAULT_OPEN' || c.context === 'VAULT_CLOSE') requireFeature(ent, 'vault', { read: true });
+      if (c.context === 'MACHINE_DROP' && c.ledger_machine) requireFeature(ent, 'machine', { read: true });
+    }
     return reviewCount(pool, { orgId: req.auth.orgId, employeeId: req.auth.sub, role: req.auth.role, casinoIds: req.auth.casinoIds }, id);
   });
 
   /** Deferred money events of all rails (HANDPAY / TITO / MACHINE) with the state of their business date. */
-  app.get('/api/v1/money/deferred', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/money/deferred', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const qs = casinoQuery.extend({ status: z.enum(['PENDING', 'PROCESSED', 'ALL']).default('PENDING') }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     return rows(
@@ -227,28 +239,39 @@ export async function operatorRoutes(app: FastifyInstance) {
    * What blocks the business-day close, read-only. The close itself (POST /money/day-close) checks the
    * same conditions and runs a fresh reconciliation; this view uses the latest run.
    */
-  app.get('/api/v1/money/day-close/status', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/money/day-close/status', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const casinoId = scopeCasino(req, casinoQuery.parse(req.query).casinoId);
     const today = await casinoToday(casinoId);
-    const [freezes, deferred, lastRun, closes, openDates] = await Promise.all([
+    // Entitlement-aware (H4): only rails of modules the organisation uses block the close; global invariants always.
+    const inUse = await railsInUse(pool, req.auth.orgId);
+    const [allFreezes, deferred, lastRun, closes, openDates, pendingApprovals, openShifts] = await Promise.all([
       activeFreezes(req.auth.orgId, casinoId),
-      rows(`SELECT count(*)::int n, COALESCE(sum(amount_cents), 0)::bigint cents FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING'
-              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = d.org_id AND r.item_key = 'deferred_event:' || d.event_id)`, [casinoId]),
+      rows(`SELECT count(*)::int n, COALESCE(sum(amount_cents), 0)::bigint cents FROM deferred_money_events d WHERE d.casino_id = $1 AND d.status = 'PENDING' AND d.rail = ANY($2)
+              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = d.org_id AND r.item_key = 'deferred_event:' || d.event_id)`, [casinoId, [...inUse]]),
       rows('SELECT id, trigger, ok, checks, created_at FROM reconciliation_runs WHERE org_id = $1 AND casino_id = $2 ORDER BY created_at DESC LIMIT 1', [req.auth.orgId, casinoId]),
       rows('SELECT business_date::text, closed_at FROM business_day_closes WHERE casino_id = $1 ORDER BY business_date DESC LIMIT 10', [casinoId]),
       rows(
         `SELECT DISTINCT t.business_date::text AS d FROM money_transactions t
          WHERE t.casino_id = $1 AND t.business_date < $2::date AND NOT EXISTS (SELECT 1 FROM business_day_closes c WHERE c.casino_id = $1 AND c.business_date = t.business_date)
          ORDER BY 1 DESC LIMIT 14`, [casinoId, today]),
+      rows(`SELECT count(*)::int n FROM approvals WHERE org_id = $1 AND casino_id = $2 AND status = 'PENDING' AND expires_at > now()`, [req.auth.orgId, casinoId]),
+      rows(`SELECT count(*)::int n FROM cashier_sessions WHERE org_id = $1 AND casino_id = $2 AND status IN ('OPEN', 'COUNTING')`, [req.auth.orgId, casinoId]),
     ]);
+    const freezes = allFreezes.filter((f) => f.rail === 'GLOBAL' || inUse.has(f.rail));
     const run = lastRun[0] ?? null;
     const blockers: Array<{ code: string; message: string }> = [];
     for (const f of freezes) blockers.push({ code: 'FROZEN', message: `${f.rail}${f.asset_no ? ` (machine ${f.asset_no})` : ''} is frozen: ${f.reason}` });
     if (deferred[0].n) blockers.push({ code: 'DEFERRED_EVENTS', message: `${deferred[0].n} deferred money event(s) not processed yet` });
     if (!run) blockers.push({ code: 'NO_RECONCILIATION', message: 'No reconciliation run yet' });
-    else for (const c of (run.checks as Array<{ key: string; ok: boolean; items: string[] }>).filter((x) => !x.ok))
+    else for (const c of (run.checks as Array<{ key: string; ok: boolean; items: string[]; advisory?: boolean; rail: string }>).filter((x) => !x.ok && !x.advisory && (x.rail === 'GLOBAL' || inUse.has(x.rail))))
       blockers.push({ code: 'RECONCILIATION', message: `${c.key}: ${c.items.length} unresolved item(s)` });
-    return { today, freezes, pendingDeferred: deferred[0].n, pendingDeferredCents: Number(deferred[0].cents), lastRun: run, closed: closes, openDates: openDates.map((r) => r.d), blockers, canClose: blockers.length === 0 };
+    // Shown but not blocking: approvals execute on the open date, shifts book on the open date.
+    const info: Array<{ code: string; message: string }> = [];
+    if (pendingApprovals[0].n) info.push({ code: 'PENDING_APPROVALS', message: `${pendingApprovals[0].n} approval request(s) pending (they book on the open business date)` });
+    if (openShifts[0].n) info.push({ code: 'OPEN_SHIFTS', message: `${openShifts[0].n} cashier shift(s) open (they book on the open business date)` });
+    const advisory = run ? (run.checks as Array<{ ok: boolean; advisory?: boolean }>).filter((x) => !x.ok && x.advisory).length : 0;
+    if (advisory) info.push({ code: 'ADVISORY', message: `${advisory} check(s) of modules not in use failed (recorded, not blocking)` });
+    return { today, freezes, pendingDeferred: deferred[0].n, pendingDeferredCents: Number(deferred[0].cents), lastRun: run, closed: closes, openDates: openDates.map((r) => r.d), blockers, info, railsInUse: [...inUse], canClose: blockers.length === 0 };
   });
 
   /**
@@ -257,7 +280,7 @@ export async function operatorRoutes(app: FastifyInstance) {
    * business date for late postings). Differences are explained by exception records or pending
    * deferred events; anything else is a reconciliation finding.
    */
-  app.get('/api/v1/money/reconciliation/meters', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/money/reconciliation/meters', { config: { feature: 'reconciliation.meters' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const qs = casinoQuery.extend({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional() }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     const today = await casinoToday(casinoId);
@@ -315,7 +338,7 @@ export async function operatorRoutes(app: FastifyInstance) {
    * Cutover counts of the casino with their verification state (admin screen). No amounts: the second
    * count is blind, and the cutover itself compares the verified count with the legacy balance.
    */
-  app.get('/api/v1/money/counts', { preHandler: guard('cash.manage') }, async (req) => {
+  app.get('/api/v1/money/counts', { config: { feature: 'money.admin' }, preHandler: guard('cash.manage') }, async (req) => {
     const casinoId = scopeCasino(req, casinoQuery.parse(req.query).casinoId);
     return rows(
       `SELECT c.id, c.context, c.vault_id, c.cash_desk_id, c.machine_id, v.name AS vault_name, d.name AS desk_name, m.asset_no,
@@ -331,7 +354,7 @@ export async function operatorRoutes(app: FastifyInstance) {
   });
 
   /** Machine money status: rail, freeze, credit meter, pending / deferred events, exceptions, open handpays. */
-  app.get('/api/v1/machines/:id/money', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/machines/:id/money', { config: { feature: 'machine' }, preHandler: guard('machine.view') }, async (req) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const m = (await rows('SELECT id, casino_id, asset_no, credit_meter_reliable FROM machines WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3)', [id, req.auth.orgId, req.auth.casinoIds]))[0];
     if (!m) throw new HttpError(404, 'Machine not found');

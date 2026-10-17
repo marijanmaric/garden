@@ -11,12 +11,13 @@ import { payHandpay } from '../services/handpays';
 import { openAlert, resolveAlerts } from '../services/alerts';
 import { addCashTx, requireOpenSession, sessionTotals } from '../services/cashier';
 import { cashOnLedger, submitCloseCount } from '../services/cash-ops';
+import { loadEntitlements, requireModule } from '../services/entitlements';
 
 const money = z.number().min(0).max(1_000_000);
 
 export async function cashierRoutes(app: FastifyInstance) {
   /** Cash desks of the casino with their current shift and expected drawer balance. */
-  app.get('/api/v1/cashier/desks', { preHandler: guard() }, async (req) => {
+  app.get('/api/v1/cashier/desks', { config: { feature: 'cash' }, preHandler: guard() }, async (req) => {
     if (!hasPermission(req.auth.role, 'cash.transact') && !hasPermission(req.auth.role, 'cashier.supervise')) throw new HttpError(403, 'Missing permission cash.transact');
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     // Blind count (Step 7e): on a ledger casino a drawer's balance is never shown to its own cashier, and
@@ -37,7 +38,7 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** The signed-in cashier's open shift, with totals and the latest movements. */
-  app.get('/api/v1/cashier/session', { preHandler: guard('cash.transact') }, async (req) => {
+  app.get('/api/v1/cashier/session', { config: { feature: 'cash' }, preHandler: guard('cash.transact') }, async (req) => {
     const r = await pool.query(
       `SELECT s.*, d.name AS desk_name, d.kind AS desk_kind FROM cashier_sessions s JOIN cash_desks d ON d.id = s.cash_desk_id
        WHERE s.org_id = $1 AND s.employee_id = $2 AND s.status = 'OPEN'`,
@@ -61,7 +62,7 @@ export async function cashierRoutes(app: FastifyInstance) {
     return { session: { ...s, ...totals }, transactions: tx.rows };
   });
 
-  app.post('/api/v1/cashier/session/open', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/cashier/session/open', { config: { feature: 'cash' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({ cashDeskId: z.string().uuid(), openingBalance: money }).parse(req.body);
     return idempotent(req, reply, async (db) => {
       const d = await db.query('SELECT id, casino_id FROM cash_desks WHERE id = $1 AND org_id = $2 AND casino_id = ANY($3) AND active', [body.cashDeskId, req.auth.orgId, req.auth.casinoIds]);
@@ -83,7 +84,7 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** Closes the shift: counted cash vs. expected balance. Any difference raises an alert. */
-  app.post('/api/v1/cashier/session/close', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/cashier/session/close', { config: { feature: 'cash' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({ countedBalance: money, note: z.string().max(500).optional() }).parse(req.body);
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
@@ -114,7 +115,7 @@ export async function cashierRoutes(app: FastifyInstance) {
     return result;
   });
 
-  app.get('/api/v1/cashier/sessions', { preHandler: guard('cashier.supervise') }, async (req) => {
+  app.get('/api/v1/cashier/sessions', { config: { feature: 'cash' }, preHandler: guard('cashier.supervise') }, async (req) => {
     const qs = z.object({ casinoId: z.string().uuid().optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
     const casinoId = scopeCasino(req, qs.casinoId);
     const r = await pool.query(
@@ -130,7 +131,7 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** Manual drawer movements. Vault transfers and adjustments are supervisor operations. */
-  app.post('/api/v1/cashier/transactions', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/cashier/transactions', { config: { feature: 'cash' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const body = z.object({
       type: z.enum(['CASH_IN', 'CASH_OUT', 'FILL', 'DROP', 'ADJUSTMENT']),
       amount: z.number().refine((n) => n !== 0 && Math.abs(n) <= 1_000_000),
@@ -160,7 +161,7 @@ export async function cashierRoutes(app: FastifyInstance) {
   });
 
   /** Unpaid handpays (PENDING / APPROVED) of the casino, from the handpay entity. */
-  app.get('/api/v1/cashier/handpays', { preHandler: guard('cash.transact') }, async (req) => {
+  app.get('/api/v1/cashier/handpays', { config: { feature: 'handpay' }, preHandler: guard('cash.transact') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT m.id, m.asset_no, m.game, mm.manufacturer, f.name AS floor, m.position_label,
@@ -182,11 +183,13 @@ export async function cashierRoutes(app: FastifyInstance) {
    * through the legacy cash transaction, to the Step 1 unique index: a jackpot is paid at most once.
    * Payment does not depend on the machine; the reset is requested separately.
    */
-  app.post('/api/v1/cashier/handpays/:machineId', { preHandler: guard('cash.transact') }, async (req, reply) => {
+  app.post('/api/v1/cashier/handpays/:machineId', { config: { feature: 'handpay.pay' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
     const { playerCard, jackpotEventId, payTo } = z.object({
       playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional(), payTo: z.enum(['CASH', 'WALLET']).default('CASH'),
     }).parse(req.body ?? {});
+    // payment target: from a drawer needs Cash, into a wallet needs Cashless
+    requireModule(await loadEntitlements(req.auth.orgId), payTo === 'WALLET' ? 'CASHLESS' : 'CASH');
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
       const actorRef = { orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip };

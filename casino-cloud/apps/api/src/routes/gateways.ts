@@ -11,6 +11,14 @@ import { confirmHandpayReset } from '../services/handpays';
 import { holdTicket, releaseTicketHold } from '../services/ticket-holds';
 import { assertHoldAllowed } from '../services/tito';
 import { closeCashlessSession, endTransfer, markTransferSent, openCashlessSession, requestTransfer } from '../services/cashless';
+import { can, loadEntitlements, requireFeature } from '../services/entitlements';
+
+/**
+ * Entitlements at the device API: physical facts (machine events, acks, the end of something already started,
+ * command results, heartbeats) are always recorded, whatever the customer's plan, so no money fact is lost.
+ * Requests that start new business at the machine (a ticket hold for redemption, a cashless session or
+ * transfer) need the module.
+ */
 
 const eventSchema = z.object({
   eventId: z.string().uuid(),
@@ -35,7 +43,7 @@ function gatewayAuth(req: FastifyRequest) {
 
 export async function gatewayRoutes(app: FastifyInstance) {
   // ---- Device API (used by the edge gateway, authenticated with device id + key) ----
-  app.post('/api/v1/gateway/heartbeat', async (req) => {
+  app.post('/api/v1/gateway/heartbeat', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const body = z.object({
       version: z.string().max(40).optional(),
@@ -45,7 +53,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     return heartbeat(gw, body, req.ip);
   });
 
-  app.post('/api/v1/gateway/events', { bodyLimit: 5 * 1024 * 1024 }, async (req) => {
+  app.post('/api/v1/gateway/events', { config: { feature: 'gateway' }, bodyLimit: 5 * 1024 * 1024 }, async (req) => {
     const gw = await gatewayAuth(req);
     const { events } = z.object({ events: z.array(eventSchema).max(1000) }).parse(req.body);
     return ingestEvents(gw, events);
@@ -53,19 +61,20 @@ export async function gatewayRoutes(app: FastifyInstance) {
 
   // ---- TITO validation: a machine scans a ticket, the system holds it for that machine (no money).
   // The machine commits with its TITO_IN event (holdId = the accept ack) or releases the hold on reject.
-  app.post('/api/v1/gateway/tickets/hold', async (req) => {
+  app.post('/api/v1/gateway/tickets/hold', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const body = z.object({ machineId: z.string().min(1).max(64), barcode: z.string().trim().regex(/^\d{6,30}$/) }).parse(req.body);
     return withTransaction(pool, async (db) => {
       const m = (await db.query('SELECT id FROM machines WHERE org_id = $1 AND casino_id = $2 AND machine_code = $3', [gw.orgId, gw.casinoId, body.machineId])).rows[0];
       if (!m) return { ok: false, reason: 'UNKNOWN_MACHINE' };
+      if (!can(await loadEntitlements(gw.orgId), 'tito.machine')) return { ok: false, reason: 'MODULE_NOT_ENTITLED' };
       const blocked = await assertHoldAllowed(db, gw.orgId, gw.casinoId);
       if (blocked) return { ok: false, reason: blocked };
       return holdTicket(db, { orgId: gw.orgId, barcode: body.barcode, machineId: m.id });
     });
   });
 
-  app.post('/api/v1/gateway/tickets/release', async (req) => {
+  app.post('/api/v1/gateway/tickets/release', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const body = z.object({ holdId: z.string().uuid(), reason: z.string().max(200).default('machine rejected') }).parse(req.body);
     return { released: await withTransaction(pool, (db) => releaseTicketHold(db, { orgId: gw.orgId, holdId: body.holdId, reason: body.reason })) };
@@ -78,8 +87,9 @@ export async function gatewayRoutes(app: FastifyInstance) {
     const s = (await db.query('SELECT id FROM cashless_sessions WHERE id = $1 AND org_id = $2 AND casino_id = $3', [sessionId, gw.orgId, gw.casinoId])).rows[0];
     if (!s) throw new HttpError(404, 'Cashless session not found');
   };
-  app.post('/api/v1/gateway/cashless/sessions', async (req) => {
+  app.post('/api/v1/gateway/cashless/sessions', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
+    requireFeature(await loadEntitlements(gw.orgId), 'cashless.machine');
     const body = z.object({ machineId: z.string().min(1).max(64), cardNumber: z.string().min(1).max(64), requestKey: z.string().min(8).max(128) }).parse(req.body);
     return withTransaction(pool, async (db) => {
       const m = (await db.query('SELECT id FROM machines WHERE org_id = $1 AND casino_id = $2 AND machine_code = $3', [gw.orgId, gw.casinoId, body.machineId])).rows[0];
@@ -87,7 +97,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
       return openCashlessSession(db, { orgId: gw.orgId }, { cardNumber: body.cardNumber, machineId: m.id, requestKey: `gw:${body.requestKey}` });
     });
   });
-  app.post('/api/v1/gateway/cashless/sessions/:id/close', async (req) => {
+  app.post('/api/v1/gateway/cashless/sessions/:id/close', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     return withTransaction(pool, async (db) => {
@@ -95,8 +105,9 @@ export async function gatewayRoutes(app: FastifyInstance) {
       return closeCashlessSession(db, { orgId: gw.orgId }, id, 'card removed');
     });
   });
-  app.post('/api/v1/gateway/cashless/transfers', async (req) => {
+  app.post('/api/v1/gateway/cashless/transfers', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
+    requireFeature(await loadEntitlements(gw.orgId), 'cashless.machine');
     const body = z.object({ sessionId: z.string().uuid(), direction: z.enum(['TO_MACHINE', 'FROM_MACHINE']), amountCents: z.number().int().positive().max(1e13), requestKey: z.string().min(8).max(128) }).parse(req.body);
     return withTransaction(pool, async (db) => {
       await sessionOfGateway(db as never, gw, body.sessionId);
@@ -106,7 +117,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   const transferOfGateway = async (db: { query: typeof pool.query }, gw: { orgId: string; casinoId: string }, id: string) => {
     if (!(await db.query('SELECT 1 FROM wallet_transfers WHERE id = $1 AND org_id = $2 AND casino_id = $3', [id, gw.orgId, gw.casinoId])).rowCount) throw new HttpError(404, 'Transfer not found');
   };
-  app.post('/api/v1/gateway/cashless/transfers/:id/sent', async (req) => {
+  app.post('/api/v1/gateway/cashless/transfers/:id/sent', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     return withTransaction(pool, async (db) => {
@@ -114,7 +125,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
       return markTransferSent(db, { orgId: gw.orgId }, id);
     });
   });
-  app.post('/api/v1/gateway/cashless/transfers/:id/fail', async (req) => {
+  app.post('/api/v1/gateway/cashless/transfers/:id/fail', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const { reason } = z.object({ reason: z.string().min(1).max(200) }).parse(req.body);
@@ -124,7 +135,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     });
   });
 
-  app.post('/api/v1/gateway/commands/:id/result', async (req) => {
+  app.post('/api/v1/gateway/commands/:id/result', { config: { feature: 'gateway' } }, async (req) => {
     const gw = await gatewayAuth(req);
     const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
     const body = z.object({ success: z.boolean(), message: z.string().max(500).optional() }).parse(req.body);
@@ -142,7 +153,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   });
 
   // ---- Management API ----
-  app.get('/api/v1/gateways', { preHandler: guard('gateway.view') }, async (req) => {
+  app.get('/api/v1/gateways', { config: { feature: 'core' }, preHandler: guard('gateway.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT g.id, g.device_id, g.name, g.hardware, g.status, g.last_heartbeat_at, g.last_ip, g.version, g.stats, g.config, g.created_at,
@@ -155,7 +166,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
   });
 
   // ---- Simulation controller (remote configuration pushed to the casino's gateways) ----
-  app.get('/api/v1/simulation', { preHandler: guard('dashboard.view') }, async (req) => {
+  app.get('/api/v1/simulation', { config: { feature: 'core' }, preHandler: guard('dashboard.view') }, async (req) => {
     const casinoId = scopeCasino(req, z.object({ casinoId: z.string().uuid().optional() }).parse(req.query).casinoId);
     const r = await pool.query(
       `SELECT g.config, (SELECT count(*) FROM machines m WHERE m.casino_id = $2 AND m.adapter_key = 'simulator') machines
@@ -166,7 +177,7 @@ export async function gatewayRoutes(app: FastifyInstance) {
     return { running: !!sim.running, eventsPerSecond: sim.eventsPerSecond ?? 2, machines: r.rows[0]?.machines ?? 0, gateways: r.rowCount };
   });
 
-  app.put('/api/v1/simulation', { preHandler: guard('simulation.control') }, async (req) => {
+  app.put('/api/v1/simulation', { config: { feature: 'core' }, preHandler: guard('simulation.control') }, async (req) => {
     const body = z.object({ casinoId: z.string().uuid().optional(), running: z.boolean(), eventsPerSecond: z.number().min(1).max(5) }).parse(req.body);
     const casinoId = scopeCasino(req, body.casinoId);
     const sim = { running: body.running, eventsPerSecond: body.eventsPerSecond };

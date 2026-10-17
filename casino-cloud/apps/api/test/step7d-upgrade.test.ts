@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { FastifyInstance } from 'fastify';
 import bcrypt from 'bcryptjs';
 import pg from 'pg';
-import { createEmptyDatabase, insertLegacyData } from './helpers';
+import { assignPlan, createEmptyDatabase, insertLegacyData } from './helpers';
 import { createLedgerCasino, cutoverCasinoRails, type LedgerCasino } from './ledger-casino';
 import { registerStep7dScenarios, type Ctx7d } from './step7d-scenarios';
 
@@ -42,6 +42,7 @@ before(async () => {
     await pool.query('INSERT INTO employee_casinos (employee_id, casino_id, org_id) VALUES ($1,$2,$3)', [emp[email], legacy.casino, legacy.org]);
   }
   const casino = await createLedgerCasino(pool, { orgId: legacy.org, code: '7D-U', machines: 8, gateway: true, vaultCents: 50_000_000 });
+  await assignPlan(pool, legacy.org); // every rail is exercised: the plan is assigned explicitly
   const { buildApp } = await import('../src/app');
   app = await buildApp();
   await app.ready();
