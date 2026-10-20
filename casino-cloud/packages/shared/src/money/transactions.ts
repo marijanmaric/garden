@@ -84,7 +84,7 @@ export const MONEY_TRANSACTIONS: Record<MoneyTransactionType, MoneyTransactionDe
   // ---- HANDPAY ----
   HANDPAY_CREATE_JACKPOT: { rail: 'HANDPAY', label: 'Jackpot handpay created', requires: ['machine', 'handpay'], optional: ['player', 'card'], approval: NONE, idempotency: 'GATEWAY_EVENT', reversal: { kind: 'REVERSAL' } },
   HANDPAY_CREATE_CANCEL_CREDIT: { rail: 'HANDPAY', label: 'Cancel-credit handpay created', requires: ['machine', 'handpay'], optional: ['player', 'card'], approval: NONE, idempotency: 'GATEWAY_EVENT', reversal: { kind: 'REVERSAL' } },
-  HANDPAY_PAY: { rail: 'HANDPAY', label: 'Handpay paid', requires: ['machine', 'handpay'], optional: ['player', 'wallet', 'card', 'cashierSession'], approval: { kind: 'LIMIT', setting: 'handpay_approval_cents' }, verificationThreshold: 'verification_threshold_cents', idempotency: 'ENTITY', reversal: { kind: 'ADJUSTMENT_ONLY' } },
+  HANDPAY_PAY: { rail: 'HANDPAY', label: 'Handpay paid', requires: ['machine', 'handpay'], optional: ['player', 'wallet', 'card', 'cashierSession', 'ticket'], approval: { kind: 'LIMIT', setting: 'handpay_approval_cents' }, verificationThreshold: 'verification_threshold_cents', idempotency: 'ENTITY', reversal: { kind: 'ADJUSTMENT_ONLY' } },
   // ---- CASHIER / VAULT ----
   VAULT_FILL: { rail: 'VAULT', label: 'Fill from vault to drawer', requires: ['cashierSession', 'vault'], approval: { kind: 'CONFIRMATION' }, idempotency: 'CLIENT_KEY', reversal: { kind: 'VIA', type: 'VAULT_DROP' } },
   VAULT_DROP: { rail: 'VAULT', label: 'Drop from drawer to vault', requires: ['cashierSession', 'vault'], approval: { kind: 'CONFIRMATION' }, idempotency: 'CLIENT_KEY', reversal: { kind: 'VIA', type: 'VAULT_FILL' } },
@@ -126,8 +126,11 @@ export interface MoneyContext {
   ticketId?: string;
   handpayId?: string;
   transferId?: string;
-  /** HANDPAY_PAY, TITO_REDEEM_CASHIER, CASH_ADVANCE: pay out in cash (default) or into the wallet. */
-  payTo?: 'CASH' | 'WALLET';
+  /**
+   * HANDPAY_PAY, TITO_REDEEM_CASHIER, CASH_ADVANCE: pay out in cash (default) or into the wallet.
+   * HANDPAY_PAY also as a TITO voucher (F3): the handpay payable becomes a ticket liability.
+   */
+  payTo?: 'CASH' | 'WALLET' | 'TICKET';
   /** TITO_ISSUE_CASHIER: paid with cash (default) or from the wallet. */
   payFrom?: 'CASH' | 'WALLET';
   /**
@@ -185,7 +188,11 @@ export function postings(type: MoneyTransactionType, ctx: MoneyContext): Posting
   /** The machine side of a ticket: MACHINE_CREDIT, or the D1 clearing account of a LEGACY machine. */
   const ticketMachine = (): AccountRef => machine(ctx.floorClearing ? 'LEGACY_FLOOR_CLEARING' : 'MACHINE_CREDIT');
   const casino = (kind: AccountKind): AccountRef => ({ kind, casinoId: c });
-  const cashOrWallet = (choice: 'CASH' | 'WALLET' | undefined) => (choice === 'WALLET' ? wallet() : drawer());
+  const cashOrWallet = (choice: 'CASH' | 'WALLET' | 'TICKET' | undefined) => {
+    if (choice === 'TICKET') throw new MoneyError(`${type}: a ticket payout is only for a handpay`);
+    return choice === 'WALLET' ? wallet() : drawer();
+  };
+  const ticket = (): AccountRef => need(casino('TICKET_LIABILITY'), 'ticket');
 
   function need(ref: AccountRef, what: MoneyRef): AccountRef {
     const field = REF_FIELD[what];
@@ -223,7 +230,7 @@ export function postings(type: MoneyTransactionType, ctx: MoneyContext): Posting
     case 'TITO_CANCEL': result = move(casino('TICKET_LIABILITY'), casino('TITO_ADJUSTMENT')); break;
     case 'HANDPAY_CREATE_JACKPOT': result = move(casino('GAMING_JACKPOT_EXPENSE'), casino('HANDPAY_PAYABLE')); break;
     case 'HANDPAY_CREATE_CANCEL_CREDIT': result = move(machine('MACHINE_CREDIT'), casino('HANDPAY_PAYABLE')); break;
-    case 'HANDPAY_PAY': result = move(casino('HANDPAY_PAYABLE'), cashOrWallet(ctx.payTo)); break;
+    case 'HANDPAY_PAY': result = move(casino('HANDPAY_PAYABLE'), ctx.payTo === 'TICKET' ? ticket() : cashOrWallet(ctx.payTo)); break;
     case 'VAULT_FILL': result = move(drawer(), vault()); break;
     case 'VAULT_DROP': result = move(vault(), drawer()); break;
     // positive = over (more cash than expected), negative = short

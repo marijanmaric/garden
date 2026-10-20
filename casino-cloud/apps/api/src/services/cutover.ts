@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { withTransaction, writeAudit, type Pool, type PoolClient } from '@m1/database';
 import {
-  ACCOUNT_KIND_RAIL, CUTOVER_PREREQUISITES, CUTOVER_SCOPE, MACHINE_MONEY_EVENT_TYPES, cents,
+  ACCOUNT_KIND_RAIL, CUTOVER_PREREQUISITES, CUTOVER_SCOPE, CUTOVER_WORKFLOW_PREREQUISITES, MACHINE_MONEY_EVENT_TYPES, cents,
   type AccountKind, type AccountRef, type BackfillSource, type CutoverRail,
 } from '@m1/shared';
 import { expectedCollection } from './collections';
 import { HttpError } from '../auth';
 import { executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
-import { railOnLedger } from './rails';
+import { railInUse, railOnLedger } from './rails';
 import { unexplainedFloorClearing } from './tito';
 import { countTotal, recordCashCount, type CountInput } from './vault';
 
@@ -604,6 +604,12 @@ export async function cutoverRail(db: Db, actor: CutoverActor, target: CutoverTa
   // 3. Preconditions.
   for (const pre of CUTOVER_PREREQUISITES[rail])
     check(ctx, `prerequisite:${pre}`, await railOnLedger(db, orgId, pre, casinoId), { rail: pre });
+  // F3: a workflow prerequisite only where the other rail is in use (contracted module or legacy records)
+  for (const pre of CUTOVER_WORKFLOW_PREREQUISITES[rail]) {
+    const use = await railInUse(db, orgId, pre, casinoId);
+    if (use.inUse) check(ctx, `prerequisite:${pre}`, await railOnLedger(db, orgId, pre, casinoId), { rail: pre, workflow: true, module: use.module, legacyRecords: use.records });
+    else ctx.checks.push({ name: `not_in_use:${pre}`, ok: true, detail: { rail: pre, workflow: true } });
+  }
   await ledgerEmpty(ctx, rail);
   const plan = await PLANNERS[rail](ctx);
   if (ctx.checks.some((c) => !c.ok)) throw new CutoverAborted(report(false, []));

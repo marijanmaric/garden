@@ -173,10 +173,11 @@ export async function moduleCards(db: Db, e: OrgEntitlements) {
     const has = (x: ProductModule) => e.inUse.has(x);
     const limitations: string[] = [];
     if (m.module === 'TITO' && m.purchased && !has('CASH')) limitations.push('Tickets are accepted and redeemed at machines only: cage redemption and ticket sale need Cash.');
-    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && !has('CASHLESS')) limitations.push('Handpays can be created and approved but not paid: payment needs Cash (drawer) or Cashless (wallet).');
-    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && has('CASHLESS')) limitations.push('Handpays are paid into player wallets only: cash payment needs Cash.');
+    const payouts = [has('TITO') && 'as TITO vouchers', has('CASHLESS') && 'into player wallets'].filter(Boolean).join(' or ');
+    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && !payouts) limitations.push('Handpays can be created and approved but not paid: payment needs Cash (drawer), Cashless (wallet) or TITO (voucher).');
+    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && payouts) limitations.push(`Handpays are paid ${payouts} only: cash payment needs Cash.`);
     if (m.module === 'CASHLESS' && m.purchased && !has('CASH')) limitations.push('Wallets are funded and emptied through machines only: cage deposit and withdrawal need Cash.');
-    // ledger readiness (the existing cutover order, not a new rule): see ledgerGaps in @m1/shared
+    // ledger readiness (unconditional cutover prerequisites, F3): see ledgerGaps in @m1/shared
     for (const g of ledgerGaps(e.inUse).filter((x) => def.rails.includes(x.rail)))
       if (m.purchased) limitations.push(`${g.rail} money cannot run on the ledger without ${g.needs.join(', ')} (${g.needs.map((b) => PRODUCT_MODULE_DEFS[RAIL_MODULE[b]].name).join(', ')} not purchased): it stays in legacy mode without ledger reconciliation.`);
     const disableBlock = m.enabled && m.purchased && m.module !== 'CORE' ? await disableBlockers(db, e, m.module) : [];

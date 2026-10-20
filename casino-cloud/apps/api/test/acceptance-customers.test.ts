@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from '@m1/database';
 import { ENTITLEMENT_ERRORS } from '@m1/shared';
+import { withTransaction } from '@m1/database';
 import { setupTestDatabase } from './helpers';
 
 /**
@@ -33,8 +34,11 @@ interface Org {
 }
 const O: Record<'A' | 'B' | 'C' | 'D' | 'E', Org> = {} as never;
 const PLAN = { A: 'TITO_STARTER', B: 'TITO_HANDPAY', C: 'CASH_OPERATIONS', D: 'CASHLESS_MACHINE', E: 'ENTERPRISE' } as const;
-/** Rails each customer can cut over. A, B and D cannot reach the ledger with their purchased modules (cutover order). */
-const RAILS = { A: [], B: [], C: ['VAULT', 'CASH', 'HANDPAY', 'TITO'], D: ['VAULT'], E: ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'MACHINE'] } as const;
+/**
+ * Rails each customer cuts over (F3): exactly its purchased money rails. TITO and HANDPAY no longer need Cash where
+ * Cash is not in use; MACHINE needs only the vault (count room) and the wallets, plus TITO / HANDPAY where they are used.
+ */
+const RAILS = { A: ['TITO'], B: ['TITO', 'HANDPAY'], C: ['VAULT', 'CASH', 'HANDPAY', 'TITO'], D: ['VAULT', 'MACHINE'], E: ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'MACHINE'] } as const;
 
 // ---- helpers ------------------------------------------------------------------------------------------
 const call = (token: string | undefined, method: string, url: string, payload?: unknown, key: string = randomUUID()) =>
@@ -60,6 +64,20 @@ const balance = async (o: Org, kind: string, ref: Record<string, string | null> 
     WHERE a.org_id = $1 AND a.kind = $2 ${where}`, [o.id, kind, ...Object.values(ref)]);
   return Number(r.v);
 };
+/** Raw ledger balance (debit positive, credit negative), independent of the account's normal side. */
+const rawBalance = async (o: Org, kind: string, ref: Record<string, string> = {}) => {
+  const where = Object.keys(ref).map((k, i) => `AND a.${k} = $${i + 3}`).join(' ');
+  return Number((await one(`SELECT COALESCE(sum(b.balance_cents), 0)::bigint AS v FROM ledger_accounts a JOIN ledger_balances b ON b.account_id = a.id WHERE a.org_id = $1 AND a.kind = $2 ${where}`,
+    [o.id, kind, ...Object.values(ref)])).v);
+};
+/** The postings of the transactions of an organisation, as "TYPE KIND+cents" lines (proof of the accounting). */
+const postingsOf = async (o: Org, where = 'TRUE', p: unknown[] = []) => (await q(
+  `SELECT t.type, a.kind, e.amount_cents::bigint AS c, t.id FROM money_transactions t JOIN ledger_entries e ON e.transaction_id = t.id JOIN ledger_accounts a ON a.id = e.account_id
+   WHERE t.org_id = $1 AND ${where} ORDER BY t.created_at, t.id, e.amount_cents DESC`, [o.id, ...p])).map((r) => `${r.type} ${r.kind}${Number(r.c) > 0 ? '+' : ''}${Number(r.c)}`);
+const reconcile = async (o: Org) => ok(await post(o.t.FLOOR_SUPERVISOR, '/api/v1/money/reconciliation', { casinoId: o.casino })).json();
+const failed = (run: { checks: Array<{ ok: boolean; key: string; items: string[] }> }) => run.checks.filter((c) => !c.ok).map((c) => `${c.key}: ${c.items.join(',')}`);
+const yesterdayOf = async (o: Org) => (await one(`SELECT ((now() AT TIME ZONE timezone)::date - 1)::text d FROM casinos WHERE id = $1`, [o.casino])).d as string;
+const railMode = async (o: Org) => Object.fromEntries((await get(o.t.admin, `/api/v1/money/rails?casinoId=${o.casino}`)).json().rails.map((x: { rail: string; mode: string }) => [x.rail, x.mode]));
 const moneyTx = async (o: Org) => Number((await one('SELECT count(*)::int n FROM money_transactions WHERE org_id = $1', [o.id])).n);
 const invariants = async () => {
   const unbalanced = (await one(`SELECT count(*)::int n FROM (SELECT transaction_id FROM ledger_entries GROUP BY transaction_id HAVING sum(amount_cents) <> 0) x`)).n;
@@ -171,7 +189,7 @@ after(async () => {
 });
 
 describe('Final acceptance: five customers', () => {
-  test('setup: rails as onboarded; the cutover order refuses TITO / HANDPAY without Cash and MACHINE without TITO + HANDPAY; visible to customer and platform', async () => {
+  test('setup (F3): every customer runs exactly its purchased rails on the ledger; true dependencies still enforced; visible to customer and platform', async () => {
     for (const [k, rails] of Object.entries(RAILS)) {
       const o = O[k as keyof typeof O];
       const r = (await get(o.t.admin, `/api/v1/money/rails?casinoId=${o.casino}`)).json();
@@ -179,28 +197,37 @@ describe('Final acceptance: five customers', () => {
       if ((rails as readonly string[]).includes('MACHINE')) assert.equal(r.machinesOnLedger, 4, k);
       assert.equal(r.rails.find((x: { rail: string }) => x.rail === 'CASHLESS').mode, 'LEDGER', `${k}: the organisation-wide cashless rail starts on the ledger (no money)`);
     }
-    // the existing cutover order is enforced for every customer (no shortcut, no half state)
+    // what is not purchased stays legacy (nothing was cut over to make another rail work)
+    assert.deepEqual([(await railMode(O.A)).VAULT, (await railMode(O.A)).CASH, (await railMode(O.B)).CASH, (await railMode(O.D)).CASH, (await railMode(O.D)).TITO, (await railMode(O.D)).HANDPAY],
+      ['LEGACY', 'LEGACY', 'LEGACY', 'LEGACY', 'LEGACY', 'LEGACY']);
+    // the cutover report records why a workflow prerequisite did not apply
+    const checks = async (o: Org, rail: string) => (await one(`SELECT checks FROM money_rail_cutovers WHERE org_id = $1 AND rail = $2 LIMIT 1`, [o.id, rail])).checks.map((c: { name: string }) => c.name);
+    assert.ok((await checks(O.A, 'TITO')).includes('not_in_use:CASH'));
+    assert.ok((await checks(O.B, 'HANDPAY')).includes('not_in_use:CASH'));
+    const dm = await checks(O.D, 'MACHINE');
+    assert.ok(dm.includes('prerequisite:VAULT') && dm.includes('prerequisite:CASHLESS') && dm.includes('not_in_use:TITO') && dm.includes('not_in_use:HANDPAY'), dm.join());
+    // a true dependency is still enforced: machine cash is collected into the vault, so MACHINE needs VAULT
     const before = await moneyTx(O.A);
-    const t = await post(O.A.t.admin, '/api/v1/money/cutover', { rail: 'TITO', casinoId: O.A.casino });
-    assert.equal(t.statusCode, 409);
-    assert.match(t.json().error, /prerequisite:CASH/);
-    assert.match((await post(O.B.t.admin, '/api/v1/money/cutover', { rail: 'HANDPAY', casinoId: O.B.casino })).json().error, /prerequisite:CASH/);
-    await post(O.D.t.MANAGER, '/api/v1/money/counts', { casinoId: O.D.casino, context: 'MACHINE_DROP', machineId: O.D.machines[0].id, totalCents: 0 })
-      .then(async (c) => post(O.D.t.admin, `/api/v1/money/counts/${c.json().id}/verify`, { totalCents: 0 }));
-    const m = await post(O.D.t.admin, '/api/v1/money/cutover', { rail: 'MACHINE', machineId: O.D.machines[0].id });
+    const c = ok(await post(O.A.t.MANAGER, '/api/v1/money/counts', { casinoId: O.A.casino, context: 'MACHINE_DROP', machineId: O.A.machines[0].id, totalCents: 0 })).json();
+    ok(await post(O.A.t.admin, `/api/v1/money/counts/${c.id}/verify`, { totalCents: 0 }));
+    const m = await post(O.A.t.admin, '/api/v1/money/cutover', { rail: 'MACHINE', machineId: O.A.machines[0].id });
     assert.equal(m.statusCode, 409);
-    assert.match(m.json().error, /prerequisite:(TITO|HANDPAY)/);
+    assert.match(m.json().error, /prerequisite:VAULT/);
+    assert.doesNotMatch(m.json().error, /prerequisite:(CASH|HANDPAY)\b/, 'no accidental dependency');
     assert.equal(await moneyTx(O.A), before, 'a refused cutover leaves nothing behind');
-    assert.equal((await one(`SELECT count(*)::int n FROM money_rail_cutovers WHERE org_id = $1 AND rail = 'MACHINE'`, [O.D.id])).n, 0);
-    // shown, never silent: customer module card and platform plan list
+    assert.equal((await one(`SELECT count(*)::int n FROM money_rail_cutovers WHERE org_id = $1 AND rail = 'MACHINE'`, [O.A.id])).n, 0);
+    // shown, never silent: customer module cards and platform plan list
     const lim = async (o: Org, mod: string) => ok(await get(o.t.admin, '/api/v1/org')).json().modules.find((x: { module: string }) => x.module === mod).limitations.join(' ');
-    assert.match(await lim(O.A, 'TITO'), /TITO money cannot run on the ledger without VAULT, CASH/);
-    assert.match(await lim(O.B, 'HANDPAY'), /HANDPAY money cannot run on the ledger without VAULT, CASH/);
-    assert.match(await lim(O.D, 'MACHINE'), /MACHINE money cannot run on the ledger without CASH, HANDPAY, TITO/);
+    assert.equal(await lim(O.A, 'TITO'), 'Tickets are accepted and redeemed at machines only: cage redemption and ticket sale need Cash.');
+    assert.equal(await lim(O.B, 'HANDPAY'), 'Handpays are paid as TITO vouchers only: cash payment needs Cash.');
+    assert.doesNotMatch(await lim(O.D, 'MACHINE'), /cannot run on the ledger/);
     assert.equal(await lim(O.C, 'TITO'), '', 'C is ledger-ready');
     const plans = ok(await get(platform, '/api/v1/platform/plans')).json().plans;
     const gaps = Object.fromEntries(plans.map((p: { code: string; ledgerGaps: unknown[] }) => [p.code, p.ledgerGaps.length]));
-    assert.deepEqual([gaps.TITO_STARTER, gaps.TITO_HANDPAY, gaps.CASHLESS_MACHINE, gaps.CASH_OPERATIONS, gaps.ENTERPRISE], [1, 2, 2, 0, 0]);
+    assert.deepEqual([gaps.TITO_STARTER, gaps.TITO_HANDPAY, gaps.CASHLESS_MACHINE, gaps.CASH_OPERATIONS, gaps.ENTERPRISE], [0, 0, 0, 0, 0]);
+    // no cash account exists where cash is not purchased (no fake dependency)
+    for (const o of [O.A, O.B]) assert.equal((await one(`SELECT count(*)::int n FROM ledger_accounts WHERE org_id = $1 AND kind IN ('DRAWER', 'VAULT', 'CASHBOX', 'HOPPER', 'MACHINE_CREDIT')`, [o.id])).n, 0, o.key);
+    assert.equal((await one(`SELECT count(*)::int n FROM ledger_accounts WHERE org_id = $1 AND kind IN ('DRAWER', 'TICKET_LIABILITY', 'HANDPAY_PAYABLE', 'LEGACY_FLOOR_CLEARING')`, [O.D.id])).n, 0);
     // gateway: machines added later are served by the casino gateway
     const nm = ok(await post(O.A.t.admin, '/api/v1/org/machines', { casinoId: O.A.casino, machineCode: 'A-M5', assetNo: 'A5' })).json();
     assert.ok((await one('SELECT gateway_id FROM machines WHERE id = $1', [nm.id])).gateway_id, 'auto-assigned to the only gateway of the casino');
@@ -213,12 +240,12 @@ describe('Final acceptance: five customers', () => {
   });
 
   // ---------------------------------------------------------------------------------------------
-  test('A (TITO only, legacy money): machine prints, another machine holds and accepts; never twice; expired / void never accepted; everything else refused', async () => {
+  test('A (TITO only, TITO on the ledger, no Cash): print, hold race, accept, expiry, four-eyes cancel; balanced postings; floor clearing attributable; reconciliation and day close', async () => {
     const o = O.A;
     const code1 = barcode();
     const printed = await event(o, 0, 'TITO_OUT', { amount: 25, ticketBarcode: code1 });
     assert.equal(printed.body.accepted, 1, printed.res.body);
-    assert.equal((await one('SELECT status, amount FROM tickets WHERE barcode = $1', [code1])).status, 'VALID');
+    assert.equal((await one('SELECT status FROM tickets WHERE barcode = $1', [code1])).status, 'VALID');
     assert.equal((await event(o, 0, 'TITO_OUT', { amount: 25, ticketBarcode: code1 }, printed.eventId)).body.duplicates, 1, 'a resend creates nothing');
     assert.equal((await one('SELECT count(*)::int n FROM tickets WHERE barcode = $1', [code1])).n, 1);
     // 15 machines race for the same ticket: exactly one hold
@@ -229,27 +256,57 @@ describe('Final acceptance: five customers', () => {
     const acc = await event(o, idx, 'TITO_IN', { ticketBarcode: code1, holdId: winners[0].h.holdId });
     assert.equal(acc.body.accepted, 1, acc.res.body);
     assert.equal((await one('SELECT status FROM tickets WHERE barcode = $1', [code1])).status, 'REDEEMED');
-    // presented again: refused; a second acceptance event changes nothing
-    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[2].code, barcode: code1 })).json().ok, false);
-    await event(o, 3, 'TITO_IN', { ticketBarcode: code1 });
-    assert.equal((await one(`SELECT count(*)::int n FROM ticket_events WHERE ticket_id = (SELECT id FROM tickets WHERE barcode = $1) AND event_type IN ('REDEEMED', 'PAID_OUT')`, [code1]).catch(() => ({ n: 1 }))).n <= 1, true);
-    assert.equal((await one('SELECT status FROM tickets WHERE barcode = $1', [code1])).status, 'REDEEMED');
-    // unknown, expired and void tickets are never accepted
-    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: '999999999999999999' })).json().ok, false);
+    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[2].code, barcode: code1 })).json().ok, false, 'never twice');
+    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: '999999999999999999' })).json().ok, false, 'unknown');
+    // expiry: never accepted, booked as income by the expiry job
     const code2 = barcode();
     await event(o, 0, 'TITO_OUT', { amount: 7, ticketBarcode: code2 });
     await pool.query(`UPDATE tickets SET expires_at = now() - interval '1 minute' WHERE barcode = $1`, [code2]);
     assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: code2 })).json().ok, false, 'expired');
+    const { expireTicketsLedger } = await import('../src/services/tito');
+    await withTransaction(pool, (db) => expireTicketsLedger(db, { casinoId: o.casino }));
+    assert.equal((await one('SELECT status FROM tickets WHERE barcode = $1', [code2])).status, 'EXPIRED');
+    // cancel of a machine ticket: four eyes (the requester cannot approve), then never accepted
     const code3 = barcode();
     await event(o, 0, 'TITO_OUT', { amount: 10, ticketBarcode: code3 });
     const t3 = await one('SELECT id FROM tickets WHERE barcode = $1', [code3]);
-    ok(await post(o.t.MANAGER, `/api/v1/tickets/${t3.id}/void`, { reason: 'printer fault, ticket destroyed' }));
-    assert.equal((await one('SELECT status FROM tickets WHERE id = $1', [t3.id])).status, 'VOID');
-    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: code3 })).json().ok, false, 'void');
-    assert.ok(await one(`SELECT 1 FROM audit_logs WHERE org_id = $1 AND action = 'ticket.void' AND entity_id = $2`, [o.id, t3.id]), 'void audited');
-    assert.equal(await moneyTx(o), 0, 'legacy TITO: no ledger booking at all');
+    const cr = ok(await post(o.t.MANAGER, `/api/v1/tickets/${t3.id}/cancel`, { reason: 'printer fault, ticket destroyed' })).json();
+    assert.ok((await post(o.t.MANAGER, `/api/v1/approvals/${cr.approval.id}/decide`, { decision: 'APPROVED' })).statusCode >= 400, 'no self-approval');
+    ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${cr.approval.id}/decide`, { decision: 'APPROVED' }));
+    assert.equal((await one('SELECT status FROM tickets WHERE id = $1', [t3.id])).status, 'CANCELLED');
+    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: code3 })).json().ok, false, 'cancelled');
+    // one ticket stays outstanding
+    const code4 = barcode();
+    await event(o, 1, 'TITO_OUT', { amount: 12, ticketBarcode: code4 });
+
+    // proof: every booking, balanced, nothing else
+    assert.deepEqual(await postingsOf(o), [
+      'TITO_ISSUE_MACHINE LEGACY_FLOOR_CLEARING+2500', 'TITO_ISSUE_MACHINE TICKET_LIABILITY-2500',
+      'TITO_REDEEM_MACHINE TICKET_LIABILITY+2500', 'TITO_REDEEM_MACHINE LEGACY_FLOOR_CLEARING-2500',
+      'TITO_ISSUE_MACHINE LEGACY_FLOOR_CLEARING+700', 'TITO_ISSUE_MACHINE TICKET_LIABILITY-700',
+      'TITO_EXPIRY TICKET_LIABILITY+700', 'TITO_EXPIRY EXPIRED_TICKET_INCOME-700',
+      'TITO_ISSUE_MACHINE LEGACY_FLOOR_CLEARING+1000', 'TITO_ISSUE_MACHINE TICKET_LIABILITY-1000',
+      'TITO_CANCEL TICKET_LIABILITY+1000', 'TITO_CANCEL TITO_ADJUSTMENT-1000',
+      'TITO_ISSUE_MACHINE LEGACY_FLOOR_CLEARING+1200', 'TITO_ISSUE_MACHINE TICKET_LIABILITY-1200',
+    ]);
+    // ticket liability = the outstanding ticket exactly (raw ledger sign: credit negative)
+    assert.equal(await rawBalance(o, 'TICKET_LIABILITY'), -1_200);
+    assert.equal(Number((await one(`SELECT COALESCE(sum(amount_cents), 0)::bigint s FROM tickets WHERE org_id = $1 AND status IN ('VALID', 'HELD')`, [o.id])).s), 1_200);
+    // the D1 floor clearing per machine = its own ticket events (printed - accepted), attributable, no other source
+    for (const [i, m] of o.machines.entries())
+      assert.equal(await rawBalance(o, 'LEGACY_FLOOR_CLEARING', { machine_id: m.id }), (i === 0 ? 4_200 : 0) + (i === 1 ? 1_200 : 0) + (i === idx ? -2_500 : 0), m.code);
+    assert.equal((await one(`SELECT count(*)::int n FROM ledger_accounts WHERE org_id = $1 AND kind IN ('DRAWER', 'VAULT', 'CASHBOX', 'HOPPER', 'MACHINE_CREDIT', 'WALLET_AVAILABLE')`, [o.id])).n, 0, 'no cash, vault or machine account');
+    // reconciliation (TITO mandatory) and the day close
+    const run = await reconcile(o);
+    assert.equal(run.ok, true, failed(run).join('; '));
+    assert.ok(run.checks.some((c: { key: string; ok: boolean }) => c.key === 'tito.floor_clearing_attributable' && c.ok));
+    const st = ok(await get(o.t.FLOOR_SUPERVISOR, `/api/v1/money/day-close/status?casinoId=${o.casino}`)).json();
+    assert.deepEqual(st.railsInUse, ['TITO']);
+    const close = ok(await post(o.t.MANAGER, '/api/v1/money/day-close', { casinoId: o.casino, businessDate: await yesterdayOf(o) })).json();
+    assert.equal(close.closed, true, JSON.stringify(close).slice(0, 400));
+    assert.ok(await one(`SELECT 1 FROM audit_logs WHERE org_id = $1 AND entity_id = $2 AND action LIKE 'ticket.%'`, [o.id, t3.id]), 'cancel audited');
     // not purchased: cage (Cash), vault, handpay, cashless, machine money, advanced reconciliation
-    refused(await post(o.t.CASHIER, '/api/v1/tickets/redeem', { barcode: code1 }), 'MODULE_NOT_ENTITLED', 'cage redemption needs Cash');
+    refused(await post(o.t.CASHIER, '/api/v1/tickets/redeem', { barcode: code4 }), 'MODULE_NOT_ENTITLED', 'cage redemption needs Cash');
     refused(await get(o.t.admin, `/api/v1/cashier/desks?casinoId=${o.casino}`));
     refused(await get(o.t.admin, `/api/v1/vault/status?casinoId=${o.casino}`));
     refused(await get(o.t.admin, '/api/v1/cashier/handpays'));
@@ -257,42 +314,79 @@ describe('Final acceptance: five customers', () => {
     refused(await post(o.t.admin, `/api/v1/machines/${o.machines[0].id}/hopper-fills`, { amountCents: 100 }));
     refused(await get(o.t.admin, '/api/v1/audit/verify'));
     refused(await gw(o, '/api/v1/gateway/cashless/sessions', { machineId: o.machines[0].code, cardNumber: 'X-1', requestKey: randomUUID() }));
-    const st = ok(await get(o.t.FLOOR_SUPERVISOR, `/api/v1/money/day-close/status?casinoId=${o.casino}`)).json();
-    assert.deepEqual(st.railsInUse, ['TITO']);
     const reps = ok(await get(o.t.admin, '/api/v1/reports')).json().map((r: { key: string }) => r.key);
     assert.ok(reps.includes('tickets') && !reps.includes('cashier-sessions') && !reps.includes('jackpot-wins'), reps.join());
     ok(await get(o.t.admin, `/api/v1/reports/tickets?casinoId=${o.casino}&from=2026-01-01&to=2030-12-31`));
+    assert.deepEqual(await invariants(), { unbalanced: 0, negative: 0 });
   });
 
   // ---------------------------------------------------------------------------------------------
-  test('B (TITO + Handpay, legacy money): jackpot recorded once; handpay cannot be paid without Cash or Cashless (refused, visible); Cash / Vault never reachable', async () => {
+  test('B (TITO + Handpay on the ledger, no Cash): jackpot liability, four-eyes approval, payout as a TITO voucher exactly once, reset, voucher redeemed at a machine; balanced', async () => {
     const o = O.B;
     const jp = await event(o, 0, 'JACKPOT', { amount: 250 });
     assert.equal(jp.body.accepted, 1, jp.res.body);
     assert.equal((await event(o, 0, 'JACKPOT', { amount: 250 }, jp.eventId)).body.duplicates, 1);
-    assert.equal((await one('SELECT count(*)::int n FROM machine_events WHERE event_id = $1', [jp.eventId])).n, 1);
-    const machine = await one('SELECT jackpot_pending FROM machines WHERE id = $1', [o.machines[0].id]);
     const h = await one('SELECT id, status FROM handpays WHERE source_event_id = $1', [jp.eventId]);
-    assert.ok(machine.jackpot_pending || h, 'the jackpot is pending (machine flag or handpay)');
-    // payment: no drawer (Cash) and no wallet (Cashless) purchased -> refused by the backend
-    refused(await post(o.t.ATTENDANT, `/api/v1/cashier/handpays/${o.machines[0].id}`, {}));
-    refused(await post(o.t.ATTENDANT, `/api/v1/cashier/handpays/${o.machines[0].id}`, { payTo: 'WALLET', playerCard: 'X' }));
-    assert.equal(await moneyTx(o), 0, 'nothing paid, nothing booked');
-    const lim = ok(await get(o.t.admin, '/api/v1/org')).json().modules.find((m: { module: string }) => m.module === 'HANDPAY').limitations.join(' ');
-    assert.match(lim, /created and approved but not paid/);
-    // the handpay list is visible (purchased), Cash / Vault are not reachable by any request of the customer
+    assert.equal(h.status, 'PENDING');
+    // cash and wallet payouts are not purchased (refused, nothing booked); the voucher is the payout
+    const tx0 = await moneyTx(o);
+    refused(await post(o.t.CASHIER, `/api/v1/cashier/handpays/${o.machines[0].id}`, {}));
+    refused(await post(o.t.CASHIER, `/api/v1/cashier/handpays/${o.machines[0].id}`, { payTo: 'WALLET', playerCard: 'X' }));
+    assert.equal(await moneyTx(o), tx0);
+    // above the approval limit: four eyes; the approver cannot pay
+    assert.equal((await pool.query('UPDATE casino_money_settings SET handpay_approval_cents = 10000 WHERE casino_id = $1', [o.casino])).rowCount, 1);
+    const early = await post(o.t.CASHIER, `/api/v1/cashier/handpays/${o.machines[0].id}`, { payTo: 'TICKET' });
+    assert.equal(early.statusCode, 409, early.body);
+    const ap = ok(await post(o.t.CASHIER, `/api/v1/handpays/${h.id}/approval-request`)).json();
+    const apId = ap.approval?.id ?? ap.id;
+    assert.ok((await post(o.t.CASHIER, `/api/v1/approvals/${apId}/decide`, { decision: 'APPROVED' })).statusCode >= 400, 'the cashier cannot approve');
+    ok(await post(o.t.MANAGER, `/api/v1/approvals/${apId}/decide`, { decision: 'APPROVED' }));
+    const byApprover = await post(o.t.MANAGER, `/api/v1/cashier/handpays/${o.machines[0].id}`, { payTo: 'TICKET' });
+    assert.ok(byApprover.statusCode >= 400, `the approver cannot pay: ${byApprover.body}`);
+    // 15 parallel voucher payouts of the same jackpot: exactly one
+    const pays = await Promise.all(Array.from({ length: 15 }, () => post(o.t.CASHIER, `/api/v1/cashier/handpays/${o.machines[0].id}`, { payTo: 'TICKET', jackpotEventId: jp.eventId })));
+    const paid = pays.filter((r) => r.statusCode === 200);
+    assert.equal(paid.length, 1, pays.map((r) => `${r.statusCode}`).join());
+    const voucher = paid[0].json().voucher;
+    assert.equal(voucher.amountCents, 25_000);
+    const hp = await one('SELECT status, pay_method, payout_ticket_id, cashier_session_id FROM handpays WHERE id = $1', [h.id]);
+    assert.deepEqual([hp.status, hp.pay_method, hp.payout_ticket_id, hp.cashier_session_id], ['PAID', 'TICKET', voucher.ticketId, null]);
+    const vt = await one('SELECT status, amount_cents, barcode FROM tickets WHERE id = $1', [voucher.ticketId]);
+    assert.deepEqual([vt.status, Number(vt.amount_cents), vt.barcode], ['VALID', 25_000, voucher.barcode]);
+    assert.equal((await one(`SELECT count(*)::int n FROM money_transactions WHERE handpay_id = $1 AND type = 'HANDPAY_PAY'`, [h.id])).n, 1);
+    assert.ok(await one(`SELECT 1 FROM audit_logs WHERE org_id = $1 AND action = 'handpay.paid' AND entity_id = $2`, [o.id, h.id]), 'payment audited');
+    // the machine reset is requested and confirmed independently of the payment
+    const cmds = (await gw(o, '/api/v1/gateway/heartbeat', {})).json().pendingCommands as Array<{ id: string; type: string }>;
+    const resetCmd = cmds.find((x) => x.type === 'RESET_JACKPOT');
+    assert.ok(resetCmd, JSON.stringify(cmds));
+    ok(await gw(o, `/api/v1/gateway/commands/${resetCmd!.id}/result`, { success: true }));
+    assert.equal((await one('SELECT status FROM handpays WHERE id = $1', [h.id])).status, 'MACHINE_RESET');
+    // the voucher is an ordinary ticket: accepted by another machine exactly once
+    const hd = (await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[2].code, barcode: voucher.barcode })).json();
+    assert.equal(hd.ok, true, JSON.stringify(hd));
+    assert.equal((await event(o, 2, 'TITO_IN', { ticketBarcode: voucher.barcode, holdId: hd.holdId })).body.accepted, 1);
+    assert.equal((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[3].code, barcode: voucher.barcode })).json().ok, false);
+    // proof: jackpot expense -> handpay payable -> ticket liability -> the accepting machine; balanced
+    assert.deepEqual(await postingsOf(o), [
+      'HANDPAY_CREATE_JACKPOT GAMING_JACKPOT_EXPENSE+25000', 'HANDPAY_CREATE_JACKPOT HANDPAY_PAYABLE-25000',
+      'HANDPAY_PAY HANDPAY_PAYABLE+25000', 'HANDPAY_PAY TICKET_LIABILITY-25000',
+      'TITO_REDEEM_MACHINE TICKET_LIABILITY+25000', 'TITO_REDEEM_MACHINE LEGACY_FLOOR_CLEARING-25000',
+    ]);
+    assert.deepEqual([await rawBalance(o, 'HANDPAY_PAYABLE'), await rawBalance(o, 'TICKET_LIABILITY')], [0, 0]);
+    assert.equal(await rawBalance(o, 'LEGACY_FLOOR_CLEARING', { machine_id: o.machines[2].id }), -25_000, 'the credit given by the accepting machine, attributable to its event');
+    assert.equal((await one(`SELECT count(*)::int n FROM ledger_accounts WHERE org_id = $1 AND kind IN ('DRAWER', 'VAULT', 'WALLET_AVAILABLE')`, [o.id])).n, 0);
+    // Cash / Vault are never reachable
     ok(await get(o.t.admin, '/api/v1/cashier/handpays'));
     refused(await put(o.t.admin, '/api/v1/org/modules/CASH', { enabled: true }));
     refused(await get(o.t.admin, `/api/v1/vault/status?casinoId=${o.casino}`));
     refused(await post(o.t.CASHIER, '/api/v1/cashier/session/open', { cashDeskId: o.desk, openingBalance: 0 }));
-    // TITO at the machines works
-    const c1 = barcode();
-    await event(o, 1, 'TITO_OUT', { amount: 5, ticketBarcode: c1 });
-    const hd = (await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[2].code, barcode: c1 })).json();
-    assert.equal(hd.ok, true);
-    assert.equal((await event(o, 2, 'TITO_IN', { ticketBarcode: c1, holdId: hd.holdId })).body.accepted, 1);
+    const run = await reconcile(o);
+    assert.equal(run.ok, true, failed(run).join('; '));
     const st = ok(await get(o.t.FLOOR_SUPERVISOR, `/api/v1/money/day-close/status?casinoId=${o.casino}`)).json();
     assert.deepEqual([...st.railsInUse].sort(), ['HANDPAY', 'TITO']);
+    const close = ok(await post(o.t.MANAGER, '/api/v1/money/day-close', { casinoId: o.casino, businessDate: await yesterdayOf(o) })).json();
+    assert.equal(close.closed, true, JSON.stringify(close).slice(0, 400));
+    assert.deepEqual(await invariants(), { unbalanced: 0, negative: 0 });
   });
 
   // ---------------------------------------------------------------------------------------------
@@ -361,42 +455,108 @@ describe('Final acceptance: five customers', () => {
   });
 
   // ---------------------------------------------------------------------------------------------
-  test('D (Cashless + Machine, machines not ledger-ready): players and cards work; cashless transfers are refused until MACHINE is on the ledger; TITO / Cash not reachable', async () => {
+  test('D (Cashless + Machine + Vault on the ledger, no Cash / TITO / Handpay): vault, machine cash in, wallet transfers, settlement, collection, hopper fill; unbooked ticket / jackpot events are exceptions, never gaming', async () => {
     const o = O.D;
+    const [m0, m1, m2, m3] = o.machines.map((m) => m.id);
+    // the vault works without Cash: blind open count verified by a second person (F3: no accidental Cash dependency)
+    await openVault(o);
+    assert.equal(await rawBalance(o, 'VAULT'), 10_000_000);
     const p = await registerPlayer(o);
     ok(await post(o.t.CASHIER, `/api/v1/players/${p.id}/verification`, { status: 'VERIFIED', documentType: 'ID_CARD', documentNumber: 'AB1234567' }));
     const ver = await one('SELECT document_number_masked, document_number_hash FROM player_verifications WHERE player_id = $1', [p.id]);
     assert.ok(!ver.document_number_masked.includes('1234567') && ver.document_number_hash.length === 64, 'document stored masked and hashed only');
+    // bill acceptor: the money entry point of a casino without a cage
     const cin = await event(o, 0, 'CASH_IN', { amount: 50 });
-    assert.equal(cin.body.accepted, 1, 'the physical cash in is recorded');
-    assert.equal(await moneyTx(o) - 1, 0, 'only the vault opening; legacy machine money is not booked');
-    const s = await gw(o, '/api/v1/gateway/cashless/sessions', { machineId: o.machines[0].code, cardNumber: p.card, requestKey: randomUUID() });
-    const sid = s.json().session?.id;
-    if (sid) {
-      const tr = await gw(o, '/api/v1/gateway/cashless/transfers', { sessionId: sid, direction: 'FROM_MACHINE', amountCents: 1_000, requestKey: randomUUID() });
-      assert.equal(tr.statusCode, 409, tr.body);
-      assert.equal(code(tr), 'RAIL_LEGACY', tr.body);
-    } else assert.equal(code(s), 'RAIL_LEGACY', s.body);
-    assert.deepEqual(await wallet(p.id), { a: 0, r: 0 });
-    ok(await post(o.t.CASHIER, `/api/v1/players/cards/${p.cardId}/status`, { status: 'BLOCKED', reason: 'reported by player' }));
-    assert.equal((await one('SELECT status FROM player_cards WHERE id = $1', [p.cardId])).status, 'BLOCKED');
-    // not purchased: TITO and cage (Cash); physical events are still recorded
+    assert.equal(cin.body.accepted, 1, cin.res.body);
+    assert.equal((await event(o, 0, 'CASH_IN', { amount: 50 }, cin.eventId)).body.duplicates, 1);
+    // machine -> wallet, wallet -> machine (reservation, confirmation)
+    const s = (await gw(o, '/api/v1/gateway/cashless/sessions', { machineId: o.machines[0].code, cardNumber: p.card, requestKey: randomUUID() })).json().session;
+    assert.ok(s?.id, 'cashless session');
+    const back = (await gw(o, '/api/v1/gateway/cashless/transfers', { sessionId: s.id, direction: 'FROM_MACHINE', amountCents: 3_000, requestKey: randomUUID() })).json().transfer;
+    await gw(o, `/api/v1/gateway/cashless/transfers/${back.id}/sent`, {});
+    assert.equal((await event(o, 0, 'CASHLESS_OUT', { amount: 30, transferId: back.id })).body.exceptions.length, 0);
+    const to = (await gw(o, '/api/v1/gateway/cashless/transfers', { sessionId: s.id, direction: 'TO_MACHINE', amountCents: 1_000, requestKey: randomUUID() })).json().transfer;
+    assert.deepEqual(await wallet(p.id), { a: 2_000, r: 1_000 });
+    const ack = await event(o, 0, 'CASHLESS_IN', { amount: 10, transferId: to.id });
+    assert.equal((await event(o, 0, 'CASHLESS_IN', { amount: 10, transferId: to.id }, ack.eventId)).body.duplicates, 1, 'a resent ack is a duplicate (parallel acks: see E)');
+    assert.equal((await one(`SELECT count(*)::int n FROM money_transactions WHERE type = 'WALLET_TO_MACHINE_CONFIRM' AND transfer_id = $1`, [to.id])).n, 1);
+    assert.deepEqual(await wallet(p.id), { a: 2_000, r: 0 });
+    // D3 settlement at a reliable credit meter (configuration): players lost 10.00
+    await pool.query('UPDATE machines SET credit_meter_reliable = true WHERE id = ANY($1)', [[m0, m3]]);
+    const meter = await event(o, 0, 'CREDIT_METER', { creditCents: 2_000 });
+    assert.equal(meter.body.accepted, 1, meter.res.body);
+    // the machine pays the rest into the wallet: zero credit
+    const rest = (await gw(o, '/api/v1/gateway/cashless/transfers', { sessionId: s.id, direction: 'FROM_MACHINE', amountCents: 2_000, requestKey: randomUUID() })).json().transfer;
+    await gw(o, `/api/v1/gateway/cashless/transfers/${rest.id}/sent`, {});
+    await event(o, 0, 'CASHLESS_OUT', { amount: 20, transferId: rest.id });
+    assert.deepEqual(await wallet(p.id), { a: 4_000, r: 0 });
+    // collection into the vault (count room): blind count, second person
+    const cc = ok(await post(o.t.MANAGER, `/api/v1/machines/${m0}/collections/count`, { totalCents: 5_000 })).json();
+    ok(await post(o.t.admin, `/api/v1/machines/collections/counts/${cc.id}/verify`, { totalCents: 5_000 }));
+    // hopper fill from the vault, confirmed at the machine by another person
+    const fill = ok(await post(o.t.MANAGER, `/api/v1/machines/${m1}/hopper-fills`, { amountCents: 2_000 })).json();
+    assert.equal(ok(await post(o.t.ATTENDANT, `/api/v1/machines/hopper-fills/${fill.movement.id}/confirm`, { totalCents: 2_000 })).json().movement.status, 'CONFIRMED');
+
+    // proof: every booking, balanced; the wallets hold exactly what came from the bill acceptor minus the gaming result
+    assert.deepEqual((await postingsOf(o, `t.type <> 'OPENING_BALANCE'`)), [
+      'MACHINE_CASH_IN CASHBOX+5000', 'MACHINE_CASH_IN MACHINE_CREDIT-5000',
+      'MACHINE_TO_WALLET MACHINE_CREDIT+3000', 'MACHINE_TO_WALLET WALLET_AVAILABLE-3000',
+      'WALLET_TO_MACHINE_RESERVE WALLET_AVAILABLE+1000', 'WALLET_TO_MACHINE_RESERVE WALLET_RESERVED-1000',
+      'WALLET_TO_MACHINE_CONFIRM WALLET_RESERVED+1000', 'WALLET_TO_MACHINE_CONFIRM MACHINE_CREDIT-1000',
+      'GAMING_SETTLEMENT MACHINE_CREDIT+1000', 'GAMING_SETTLEMENT GAMING_RESULT-1000',
+      'MACHINE_TO_WALLET MACHINE_CREDIT+2000', 'MACHINE_TO_WALLET WALLET_AVAILABLE-2000',
+      'MACHINE_DROP VAULT+5000', 'MACHINE_DROP CASHBOX-5000',
+      'HOPPER_FILL HOPPER+2000', 'HOPPER_FILL VAULT-2000',
+    ]);
+    assert.deepEqual([await rawBalance(o, 'CASHBOX'), await rawBalance(o, 'MACHINE_CREDIT', { machine_id: m0 }), await rawBalance(o, 'WALLET_AVAILABLE'), await rawBalance(o, 'WALLET_RESERVED'), await rawBalance(o, 'GAMING_RESULT'), await rawBalance(o, 'VAULT'), await rawBalance(o, 'HOPPER')],
+      [0, 0, -4_000, 0, -1_000, 10_000_000 + 5_000 - 2_000, 2_000]);
+    let run = await reconcile(o);
+    assert.equal(run.ok, true, failed(run).join('; '));
+
+    // a ticket printed and a jackpot hit on a machine of this casino: TITO / HANDPAY not purchased, not on the ledger.
+    // Physical facts are kept; no money is invented and nothing is folded into the gaming result.
+    const tOut = await event(o, 3, 'TITO_OUT', { amount: 25, ticketBarcode: barcode() });
+    assert.equal(tOut.res.statusCode, 200, tOut.res.body);
+    assert.deepEqual(tOut.body.exceptions.map((x: { code: string }) => x.code), ['TITO_NOT_ON_LEDGER']);
+    const jp = await event(o, 2, 'JACKPOT', { amount: 90 });
+    assert.deepEqual(jp.body.exceptions.map((x: { code: string }) => x.code), ['HANDPAY_NOT_ON_LEDGER']);
+    assert.equal((await one('SELECT count(*)::int n FROM machine_events WHERE event_id = ANY($1)', [[tOut.eventId, jp.eventId]])).n, 2, 'both physical events are recorded');
+    assert.equal((await one('SELECT count(*)::int n FROM money_transactions WHERE source_event_id = ANY($1)', [[tOut.eventId, jp.eventId]])).n, 0);
+    assert.equal((await one('SELECT count(*)::int n FROM tickets WHERE org_id = $1', [o.id])).n + (await one('SELECT count(*)::int n FROM handpays WHERE org_id = $1', [o.id])).n, 0, 'no ticket, no handpay');
+    assert.equal((await event(o, 3, 'TITO_OUT', { amount: 25 }, tOut.eventId)).body.duplicates, 1);
+    // a reliable meter on that machine is NOT settled while the unbooked ticket is unexplained
+    const gr = await rawBalance(o, 'GAMING_RESULT');
+    await event(o, 3, 'CREDIT_METER', { creditCents: 0 });
+    assert.equal(await rawBalance(o, 'GAMING_RESULT'), gr, 'never estimated into gaming');
+    assert.ok(await one(`SELECT 1 FROM audit_logs WHERE org_id = $1 AND action = 'machine.settlement_skipped' AND details->>'reason' LIKE 'unexplained money event exceptions%'`, [o.id]));
+    // reconciliation (MACHINE mandatory) reports exactly these two and freezes only these machines
+    run = await reconcile(o);
+    assert.equal(run.ok, false);
+    assert.deepEqual(failed(run), [`machine.events_accounted: ${[`machine_event:${tOut.eventId}`, `machine_event:${jp.eventId}`].sort().join(',')}`]);
+    const frozen = await q(`SELECT machine_id FROM money_rail_freezes WHERE org_id = $1 AND rail = 'MACHINE' AND lifted_at IS NULL`, [o.id]);
+    assert.deepEqual(frozen.map((f) => f.machine_id).sort(), [m2, m3].sort());
+    // explained with four eyes, then clean; freezes lifted
+    for (const key of [`machine_event:${tOut.eventId}`, `machine_event:${jp.eventId}`]) {
+      const r = ok(await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: key, explanation: 'Event of a module this casino does not run; machine disabled for tickets / jackpots by the operator' })).json();
+      ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' }));
+    }
+    run = await reconcile(o);
+    assert.equal(run.ok, true, failed(run).join('; '));
+    for (const f of await q(`SELECT id FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL`, [o.id]))
+      ok(await post(o.t.admin, `/api/v1/money/freezes/${f.id}/lift`, { reason: 'explained with four eyes' }));
+    // not purchased: TITO, cage (Cash), handpay
     assert.deepEqual((await gw(o, '/api/v1/gateway/tickets/hold', { machineId: o.machines[1].code, barcode: barcode() })).json(), { ok: false, reason: 'MODULE_NOT_ENTITLED' });
     refused(await post(o.t.CASHIER, '/api/v1/cashier/wallet/approval-request', {}), 'MODULE_NOT_ENTITLED', 'cage deposit needs Cash');
+    refused(await post(o.t.CASHIER, '/api/v1/cashier/session/open', { cashDeskId: o.desk, openingBalance: 0 }));
     refused(await get(o.t.admin, '/api/v1/tickets'));
     refused(await get(o.t.admin, '/api/v1/cashier/handpays'));
-    const jp = await event(o, 2, 'JACKPOT', { amount: 90 });
-    assert.equal(jp.body.accepted, 1);
-    assert.equal((await one('SELECT count(*)::int n FROM machine_events WHERE event_id = $1', [jp.eventId])).n, 1, 'the physical jackpot is recorded');
-    // the vault is on the ledger but Cash is not: ledger vault operations are refused before anything is created
-    const vo = await post(o.t.MANAGER, '/api/v1/vault/sessions', { casinoId: o.casino, count: { totalCents: 10_000_000 } });
-    assert.equal(code(vo), 'RAIL_LEGACY', vo.body);
-    assert.equal((await one(`SELECT count(*)::int n FROM vault_sessions WHERE casino_id = $1`, [o.casino])).n, 0, 'no stuck vault session');
     const lims = ok(await get(o.t.admin, '/api/v1/org')).json().modules.filter((m: { module: string }) => ['CASHLESS', 'MACHINE'].includes(m.module)).flatMap((m: { limitations: string[] }) => m.limitations).join(' ');
     assert.match(lims, /through machines only/);
-    assert.match(lims, /MACHINE money cannot run on the ledger without CASH, HANDPAY, TITO/);
+    assert.doesNotMatch(lims, /cannot run on the ledger/);
     const st = ok(await get(o.t.FLOOR_SUPERVISOR, `/api/v1/money/day-close/status?casinoId=${o.casino}`)).json();
     assert.deepEqual([...st.railsInUse].sort(), ['CASHLESS', 'MACHINE', 'VAULT']);
+    const close = ok(await post(o.t.MANAGER, '/api/v1/money/day-close', { casinoId: o.casino, businessDate: await yesterdayOf(o) })).json();
+    assert.equal(close.closed, true, JSON.stringify(close).slice(0, 400));
     assert.deepEqual(await invariants(), { unbalanced: 0, negative: 0 });
   });
 

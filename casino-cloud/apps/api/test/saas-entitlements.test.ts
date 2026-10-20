@@ -117,7 +117,8 @@ describe('SaaS entitlements', () => {
       [['TITO'], null, 'GET', () => '/api/v1/tickets'],
       [['TITO', 'CASH'], null, 'POST', () => '/api/v1/tickets/redeem'],
       [['HANDPAY'], null, 'GET', () => '/api/v1/cashier/handpays'],
-      [['HANDPAY'], ['CASH', 'CASHLESS'], 'POST', (o) => `/api/v1/cashier/handpays/${o.machines[0]}`],
+      // the default payout is cash (needs Cash); voucher (TITO) and wallet (Cashless) payouts are their own probes
+      [['HANDPAY', 'CASH'], null, 'POST', (o) => `/api/v1/cashier/handpays/${o.machines[0]}`],
       [['CASH'], null, 'GET', () => '/api/v1/cashier/desks'],
       [['CASH'], null, 'POST', () => '/api/v1/cashier/session/open'],
       [['VAULT'], null, 'GET', (o) => `/api/v1/vault/status?casinoId=${o.casino}`],
@@ -144,7 +145,7 @@ describe('SaaS entitlements', () => {
           refused++;
           assert.equal(r.statusCode, 403, `${key} ${method} ${url(o)}: ${r.body}`);
           assert.equal(r.json().code, 'MODULE_NOT_ENTITLED', `${key} ${url(o)}`);
-          assert.equal(r.json().error, SAFE);
+          assert.ok(r.json().error.startsWith(SAFE), r.body); // plus the missing module where the route names it
         }
       }
     }

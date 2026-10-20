@@ -18,14 +18,38 @@ export const CUTOVER_SCOPE: Record<CutoverRail, 'CASINO' | 'ORG' | 'MACHINE'> = 
   MACHINE: 'MACHINE',
 };
 
-/** Rails that must already be on the ledger (cutover order). */
+/**
+ * Rails that must already be on the ledger (cutover order), always: the rail's own postings or its
+ * physical money flow need them (F3). CASH: drawer floats and drops go through the vault. MACHINE: cash
+ * from bill acceptors is collected into the vault (count room); wallet transfers need the wallets (the
+ * organisation's CASHLESS rail is cut over at zero at onboarding).
+ */
 export const CUTOVER_PREREQUISITES: Record<CutoverRail, readonly CutoverRail[]> = {
   VAULT: [],
-  CASH: ['VAULT'], // desk cash goes into the vault, drawers are filled from it
-  HANDPAY: ['CASH'], // paid from a drawer
-  TITO: ['CASH'], // sold / paid at a drawer
+  CASH: ['VAULT'],
+  HANDPAY: [],
+  TITO: [],
   CASHLESS: [],
-  MACHINE: ['VAULT', 'TITO', 'HANDPAY', 'CASHLESS'], // drops, tickets, jackpots and transfers touch the machine
+  MACHINE: ['VAULT', 'CASHLESS'],
+};
+
+/**
+ * F3: workflow prerequisites. They apply only where the other rail is IN USE in the casino (its module
+ * is contracted, or legacy money records of it exist): a workflow spanning both rails would otherwise
+ * stop (the rail guards never allow a mixed legacy / ledger booking). Where the other rail is not in
+ * use, the workflow does not exist and nothing is required.
+ *   HANDPAY -> CASH: cash payout from a drawer.
+ *   TITO -> CASH: ticket sale / cash redemption at a drawer.
+ *   MACHINE -> TITO: tickets printed / accepted change the machine's credit.
+ *   MACHINE -> HANDPAY: jackpot events of the machine create handpays.
+ */
+export const CUTOVER_WORKFLOW_PREREQUISITES: Record<CutoverRail, readonly CutoverRail[]> = {
+  VAULT: [],
+  CASH: [],
+  HANDPAY: ['CASH'],
+  TITO: ['CASH'],
+  CASHLESS: [],
+  MACHINE: ['TITO', 'HANDPAY'],
 };
 
 /** Balance-sheet account kinds and the rail that owns them. Income/expense/equity/suspense belong to none. */
@@ -67,10 +91,13 @@ export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDP
  * A. IMPLEMENTATION dependency (technical): the rail's own ledger operations post to accounts of
  *    another rail, so that rail's ledger operations must exist. Derived from the posting matrix:
  *    HANDPAY_CREATE_JACKPOT touches HANDPAY_PAYABLE + expense, HANDPAY_PAY touches HANDPAY_PAYABLE +
- *    DRAWER (CASH) or WALLET_AVAILABLE (CASHLESS, optional payout). HANDPAY never touches TITO.
+ *    DRAWER (CASH), WALLET_AVAILABLE (CASHLESS) or TICKET_LIABILITY (TITO), whichever payout the casino
+ *    has (checked per payment). TITO machine postings touch only the ticket liability and the machine
+ *    side (floor clearing / machine credit); only cashier sale / redemption touch a drawer.
  *
  * B. CUTOVER dependency (technical, enforced by the cutover service): rails that must already be on
- *    the ledger when the rail is cut over = CUTOVER_PREREQUISITES (HANDPAY needs CASH).
+ *    the ledger when the rail is cut over = CUTOVER_PREREQUISITES, plus CUTOVER_WORKFLOW_PREREQUISITES
+ *    where the other rail is in use in the casino.
  *
  * C. MAINTENANCE-WINDOW dependency (operational only): rails that must go live in the same window,
  *    because a legacy operation spans them and would stop working if only one side were on the
@@ -81,10 +108,10 @@ export const RAIL_IMPLEMENTED: readonly CutoverRail[] = ['VAULT', 'CASH', 'HANDP
 export const RAIL_IMPLEMENTATION_REQUIRES: Record<CutoverRail, readonly CutoverRail[]> = {
   VAULT: [],
   CASH: ['VAULT'], // fills / drops
-  HANDPAY: ['CASH'], // cash payout from a drawer (wallet payout additionally needs CASHLESS, checked per payment)
-  TITO: ['CASH'], // cashier sale / payout
+  HANDPAY: [], // payout medium (drawer, wallet, ticket) checked per payment
+  TITO: [], // cashier sale / payout additionally need CASH, checked per operation
   CASHLESS: [],
-  MACHINE: ['VAULT', 'TITO', 'HANDPAY', 'CASHLESS'],
+  MACHINE: ['VAULT', 'CASHLESS'], // collections / hopper fills, wallet transfers; ticket and jackpot events need their rail only where it is used
 };
 
 /** C: rails that go live together (one maintenance window). Rails not listed form a window of their own. */

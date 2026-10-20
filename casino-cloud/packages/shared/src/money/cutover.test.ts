@@ -22,27 +22,40 @@ test('every legacy cash transaction type is mapped to the rails it moves money o
   for (const rails of Object.values(LEGACY_CASH_TX_RAILS)) assert.ok(rails.includes('CASH'));
 });
 
-test('dependencies: HANDPAY needs CASH technically, never TITO; TITO only through the maintenance window', async () => {
-  const { RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_PREREQUISITES, railRelease, railReleaseBlockers } = await import('./cutover');
+test('F3 dependencies: HANDPAY and TITO need CASH only as a workflow; the payout medium is per payment', async () => {
+  const { RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_PREREQUISITES, CUTOVER_WORKFLOW_PREREQUISITES, railRelease, railReleaseBlockers } = await import('./cutover');
   const { MONEY_TRANSACTIONS, postings } = await import('./transactions');
   const { ACCOUNT_KIND_RAIL } = await import('./cutover');
-  // A: derived from the posting matrix: every rail a HANDPAY posting touches
-  const touched = new Set<string>();
-  for (const type of ['HANDPAY_CREATE_JACKPOT', 'HANDPAY_PAY'] as const)
-    for (const payTo of ['CASH', 'WALLET'] as const)
-      for (const p of postings(type, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', handpayId: 'h', cashierSessionId: 's', walletId: 'w', payTo }))
-        if (ACCOUNT_KIND_RAIL[p.account.kind]) touched.add(ACCOUNT_KIND_RAIL[p.account.kind]!);
-  assert.deepEqual([...touched].sort(), ['CASH', 'CASHLESS', 'HANDPAY']);
-  assert.ok(!touched.has('TITO'));
+  // A: derived from the posting matrix: every rail a HANDPAY posting touches, per payout medium
+  const touched = (payTo: 'CASH' | 'WALLET' | 'TICKET') => {
+    const t = new Set<string>();
+    for (const type of ['HANDPAY_CREATE_JACKPOT', 'HANDPAY_PAY'] as const)
+      for (const p of postings(type, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', handpayId: 'h', cashierSessionId: 's', walletId: 'w', ticketId: 't', payTo }))
+        if (ACCOUNT_KIND_RAIL[p.account.kind]) t.add(ACCOUNT_KIND_RAIL[p.account.kind]!);
+    return [...t].sort();
+  };
+  assert.deepEqual(touched('CASH'), ['CASH', 'HANDPAY']);
+  assert.deepEqual(touched('WALLET'), ['CASHLESS', 'HANDPAY']);
+  assert.deepEqual(touched('TICKET'), ['HANDPAY', 'TITO']);
   assert.ok(MONEY_TRANSACTIONS.HANDPAY_PAY.rail === 'HANDPAY');
-  assert.deepEqual([...RAIL_IMPLEMENTATION_REQUIRES.HANDPAY], ['CASH']);
-  // B: the cutover prerequisite
-  assert.deepEqual([...CUTOVER_PREREQUISITES.HANDPAY], ['CASH']);
-  // C: TITO was only a missing rail of the shared maintenance window; since 7c the window is complete
+  assert.deepEqual([...RAIL_IMPLEMENTATION_REQUIRES.HANDPAY], []);
+  assert.deepEqual([...RAIL_IMPLEMENTATION_REQUIRES.TITO], []);
+  // B: unconditional prerequisites vs. workflow prerequisites (only where the other rail is in use)
+  assert.deepEqual(CUTOVER_PREREQUISITES, { VAULT: [], CASH: ['VAULT'], HANDPAY: [], TITO: [], CASHLESS: [], MACHINE: ['VAULT', 'CASHLESS'] });
+  assert.deepEqual(CUTOVER_WORKFLOW_PREREQUISITES, { VAULT: [], CASH: [], HANDPAY: ['CASH'], TITO: ['CASH'], CASHLESS: [], MACHINE: ['TITO', 'HANDPAY'] });
+  // C: the maintenance window is complete since 7c
   const r = railRelease('HANDPAY');
   assert.deepEqual([r.implementationMissing, r.windowMissing, r.released], [[], [], true]);
   assert.deepEqual(railReleaseBlockers('HANDPAY'), []);
   assert.deepEqual(railRelease('CASHLESS').released, true);
+});
+
+test('F3: a ticket payout is only for a handpay; HANDPAY_PAY to a ticket needs the ticket', async () => {
+  const { postings } = await import('./transactions');
+  const base = { casinoId: 'c', amountCents: 500 as never, machineId: 'm', handpayId: 'h', payTo: 'TICKET' as const };
+  assert.deepEqual(postings('HANDPAY_PAY', { ...base, ticketId: 't' }).map((p) => `${p.account.kind}${p.amountCents > 0 ? '+' : '-'}${Math.abs(p.amountCents)}`), ['HANDPAY_PAYABLE+500', 'TICKET_LIABILITY-500']);
+  assert.throws(() => postings('HANDPAY_PAY', base), /ticket required/);
+  assert.throws(() => postings('TITO_REDEEM_CASHIER', { casinoId: 'c', amountCents: 500 as never, ticketId: 't', cashierSessionId: 's', payTo: 'TICKET' }), /only for a handpay/);
 });
 
 test('7c/7d: the maintenance window VAULT, CASH, HANDPAY, TITO is released; MACHINE is released per machine since 7d', async () => {
@@ -50,7 +63,7 @@ test('7c/7d: the maintenance window VAULT, CASH, HANDPAY, TITO is released; MACH
   assert.deepEqual([...maintenanceWindowOf('TITO')], ['VAULT', 'CASH', 'HANDPAY', 'TITO']);
   for (const rail of ['VAULT', 'CASH', 'HANDPAY', 'TITO'] as const) assert.equal(railRelease(rail).released, true, rail);
   assert.deepEqual([...maintenanceWindowOf('MACHINE')], ['MACHINE']);
-  assert.deepEqual(railRelease('MACHINE'), { rail: 'MACHINE', implementationMissing: [], cutoverPrerequisites: ['VAULT', 'TITO', 'HANDPAY', 'CASHLESS'], windowMissing: [], released: true });
+  assert.deepEqual(railRelease('MACHINE'), { rail: 'MACHINE', implementationMissing: [], cutoverPrerequisites: ['VAULT', 'CASHLESS'], windowMissing: [], released: true });
   assert.deepEqual([...RAIL_PRODUCTION_READY], ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE']);
 });
 
@@ -73,21 +86,21 @@ test('7c: TITO postings touch TICKET_LIABILITY and CASH / CASHLESS / MACHINE, or
   assert.equal(ACCOUNT_KIND_RAIL.LEGACY_FLOOR_CLEARING, undefined);
 });
 
-test('7c rail matrix: every HANDPAY and TITO posting touches only its own rail, its implementation dependencies, CASHLESS (wallet option) and the machine side', async () => {
+test('7c rail matrix: every HANDPAY and TITO posting touches only its own rail, its (workflow) dependencies, CASHLESS (wallet option) and the machine side', async () => {
   const { postings, MONEY_TRANSACTIONS } = await import('./transactions');
-  const { RAIL_IMPLEMENTATION_REQUIRES } = await import('./cutover');
+  const { RAIL_IMPLEMENTATION_REQUIRES, CUTOVER_WORKFLOW_PREREQUISITES } = await import('./cutover');
   const variants = [{}, { payTo: 'WALLET' }, { payFrom: 'WALLET' }, { floorClearing: true }];
   for (const [type, def] of Object.entries(MONEY_TRANSACTIONS)) {
     if (def.rail !== 'HANDPAY' && def.rail !== 'TITO') continue;
     const own = def.rail;
-    const allowed = new Set<string>([own, ...RAIL_IMPLEMENTATION_REQUIRES[own], 'CASHLESS', 'MACHINE']);
+    const allowed = new Set<string>([own, ...RAIL_IMPLEMENTATION_REQUIRES[own], ...CUTOVER_WORKFLOW_PREREQUISITES[own], 'CASHLESS', 'MACHINE']);
     for (const v of variants)
       for (const p of postings(type as never, { casinoId: 'c', amountCents: 100 as never, machineId: 'm', ticketId: 't', handpayId: 'h', cashierSessionId: 's', walletId: 'w', ...v } as never)) {
         const rail = ACCOUNT_KIND_RAIL[p.account.kind];
         if (rail) assert.ok(allowed.has(rail), `${type} touches ${rail}`);
       }
   }
-  // HANDPAY never touches TITO, TITO never touches HANDPAY
+  // HANDPAY touches TITO only as a voucher payout (variant not listed above), TITO never touches HANDPAY
   for (const [type, def] of Object.entries(MONEY_TRANSACTIONS))
     for (const v of variants)
       if (def.rail === 'HANDPAY' || def.rail === 'TITO')

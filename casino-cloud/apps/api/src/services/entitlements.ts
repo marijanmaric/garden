@@ -48,7 +48,8 @@ export function invalidateEntitlements(orgId?: string) {
   else cache.clear();
 }
 
-export async function loadEntitlements(orgId: string, db: Db = pool, fresh = false): Promise<OrgEntitlements> {
+/** `store = false`: a one-off read (e.g. inside a money transaction) that never replaces the cached state. */
+export async function loadEntitlements(orgId: string, db: Db = pool, fresh = false, store = true): Promise<OrgEntitlements> {
   const hit = cache.get(orgId);
   if (!fresh && hit && Date.now() - hit.loadedAt < TTL_MS) return hit;
   const [org, sub, overrides, settings, limitOverrides] = await Promise.all([
@@ -81,7 +82,7 @@ export async function loadEntitlements(orgId: string, db: Db = pool, fresh = fal
     } : null,
     modules, effective: new Set(modules.filter((m) => m.effective).map((m) => m.module)), inUse, limits, loadedAt: Date.now(),
   };
-  cache.set(orgId, e);
+  if (store) cache.set(orgId, e);
   return e;
 }
 

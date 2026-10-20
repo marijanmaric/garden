@@ -343,6 +343,25 @@ export async function sellTicket(db: PoolClient, a: Actor, input: { amountCents:
   return { ticket: t, moneyTransaction: r.transaction, transaction: cashTx };
 }
 
+/**
+ * F3: a TITO voucher for a handpay payout (no cash desk needed). Creates the VALID ticket; the caller books
+ * HANDPAY_PAY (payable -> ticket liability) with this ticket id in the same transaction, then calls
+ * handpayVoucherIssued. The voucher follows every TITO rule from then on (redeem, expiry, cancel).
+ */
+export async function createHandpayVoucher(db: Db, a: Actor, casinoId: string, amountCents: number) {
+  await requireTitoLedger(db, a.orgId, casinoId);
+  return (await db.query(
+    `INSERT INTO tickets (org_id, casino_id, barcode, amount, issued_by_employee, expires_at)
+     SELECT $1, $2, $3, $4::bigint / 100.0, $5, now() + make_interval(days => c.ticket_expiry_days) FROM casinos c WHERE c.id = $2 RETURNING *`,
+    [a.orgId, casinoId, newBarcode(), amountCents, a.employeeId],
+  )).rows[0] as TicketRow;
+}
+
+export async function handpayVoucherIssued(db: Db, a: Actor, t: TicketRow, handpayId: string, transactionId: string) {
+  await ticketEvent(db, t, 'ISSUED', { employeeId: a.employeeId, details: { handpayId, transactionId, source: 'handpay' } });
+  await auditTicket(db, a, t.casino_id, 'ticket.issued', t.id, { barcode: t.barcode, amountCents: t.amount_cents, handpayId, transactionId, source: 'handpay' });
+}
+
 async function payoutLimit(db: Db, casinoId: string): Promise<number | null> {
   const v = (await db.query('SELECT ticket_payout_approval_cents FROM casino_money_settings WHERE casino_id = $1', [casinoId])).rows[0]?.ticket_payout_approval_cents;
   return v === null || v === undefined ? null : Number(v);

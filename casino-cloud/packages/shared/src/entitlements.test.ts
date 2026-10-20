@@ -49,12 +49,13 @@ test('overrides win over the plan in both directions; CORE cannot be removed', (
   assert.equal(s.find((x) => x.module === 'CASHLESS')!.state, 'NOT_PURCHASED');
 });
 
-test('features: cage actions need the cash module, handpay payment needs cash or cashless', () => {
+test('features: cage actions need the cash module, handpay payment needs a payout medium: cash, cashless or a TITO voucher (F3)', () => {
   const tito = new Set<ProductModule>(['CORE', 'TITO']);
   assert.equal(featureAvailable('tito', tito), true);
   assert.equal(featureAvailable('tito.cashier', tito), false);
   assert.equal(featureAvailable('handpay.pay', new Set<ProductModule>(['CORE', 'HANDPAY'])), false);
   assert.equal(featureAvailable('handpay.pay', new Set<ProductModule>(['CORE', 'HANDPAY', 'CASHLESS'])), true);
+  assert.equal(featureAvailable('handpay.pay', new Set<ProductModule>(['CORE', 'HANDPAY', 'TITO'])), true);
   assert.equal(featureAvailable('reconciliation', new Set<ProductModule>(['CORE'])), false);
   assert.equal(featureAvailable('reconciliation', tito), true);
   assert.equal(featureAvailable('core', new Set<ProductModule>(['CORE'])), true);
@@ -70,11 +71,13 @@ test('subscription lifecycle: only TRIAL / ACTIVE before ends_at are usable', ()
   assert.equal(subscriptionUsable(null, null, now), false);
 });
 
-test('ledger readiness follows the existing money design: TITO / HANDPAY need CASH (and VAULT), vault operations need CASH, MACHINE needs TITO and HANDPAY', async () => {
+test('F3 ledger readiness: only unconditional prerequisites (CASH needs VAULT, MACHINE needs VAULT and CASHLESS) count', async () => {
   const { ledgerGaps } = await import('./entitlements');
-  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'REPORTING']), [{ rail: 'TITO', needs: ['VAULT', 'CASH'] }]);
-  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'HANDPAY']), [{ rail: 'HANDPAY', needs: ['VAULT', 'CASH'] }, { rail: 'TITO', needs: ['VAULT', 'CASH'] }]);
-  assert.deepEqual(ledgerGaps(['CORE', 'CASHLESS', 'MACHINE', 'VAULT']), [{ rail: 'VAULT', needs: ['CASH'] }, { rail: 'MACHINE', needs: ['CASH', 'HANDPAY', 'TITO'] }]);
+  // F3: no plan lacks a ledger dependency any more (workflow prerequisites only apply to rails in use)
+  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'REPORTING']), []);
+  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'HANDPAY']), []);
+  assert.deepEqual(ledgerGaps(['CORE', 'CASHLESS', 'MACHINE', 'VAULT']), []);
+  assert.deepEqual(ledgerGaps(['CORE', 'CASH']), [{ rail: 'CASH', needs: ['VAULT'] }], 'only a module set violating the module dependencies');
   assert.deepEqual(ledgerGaps(['CORE', 'CASH', 'VAULT', 'TITO', 'HANDPAY']), []);
   assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'HANDPAY', 'CASH', 'VAULT', 'CASHLESS', 'MACHINE']), []);
 });

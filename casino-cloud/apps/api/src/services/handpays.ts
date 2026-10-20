@@ -1,12 +1,13 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { HANDPAY_TRANSITIONS, WALLET_STATUS_OPERATIONS, cents, playerCan, type HandpayStatus } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { addCashTx, requireOpenSession } from './cashier';
 import { entityDedupeKey, eventDedupeKey, executeMoneyTransaction, reverseMoneyTransaction, type LatePosting, type MoneyActor } from './ledger';
 import { projectHandpayCash } from './legacy-projection';
 import type { Actor } from './players';
 import { railOnLedger } from './rails';
+import { createHandpayVoucher, handpayVoucherIssued } from './tito';
 
 /**
  * Handpay entity: one per jackpot event (unique source_event_id).
@@ -40,7 +41,8 @@ export interface HandpayRow {
   reset_confirmed_at: string | null;
 }
 
-export type HandpayPayTo = 'CASH' | 'WALLET';
+/** F3: TICKET = a TITO voucher (casinos without a cash desk). */
+export type HandpayPayTo = 'CASH' | 'WALLET' | 'TICKET';
 
 async function event(db: Db, h: { id: string; org_id: string }, action: string, from: string | null, to: string | null, employeeId?: string | null, details: Record<string, unknown> = {}) {
   await db.query('INSERT INTO handpay_events (org_id, handpay_id, action, from_status, to_status, employee_id, details) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
@@ -234,7 +236,7 @@ export async function payHandpay(db: Db, a: Actor, handpayId: string, opts: { pl
   const peek = await db.query('SELECT org_id, casino_id FROM handpays WHERE id = $1 AND org_id = $2', [handpayId, a.orgId]);
   if (!peek.rowCount) throw new HttpError(404, 'Handpay not found');
   if (await handpayOnLedger(db, peek.rows[0])) return payHandpayLedger(db, a, handpayId, opts);
-  if ((opts.payTo ?? 'CASH') !== 'CASH') throw new HttpError(409, 'Wallet handpays need the HANDPAY rail on the ledger');
+  if ((opts.payTo ?? 'CASH') !== 'CASH') throw stateError(409, 'RAIL_LEGACY', 'Wallet and voucher handpays need the HANDPAY rail on the ledger');
   if (await railOnLedger(db, a.orgId, 'CASH', peek.rows[0].casino_id))
     throw new HttpError(409, 'Cash is on the ledger but HANDPAY is not: cut over the HANDPAY rail first (no mixed legacy / ledger booking)');
   return payHandpayLegacy(db, a, handpayId, opts);
@@ -310,7 +312,12 @@ async function payHandpayLedger(db: Db, a: Actor, handpayId: string, opts: { pla
   let r;
   let session: Awaited<ReturnType<typeof requireOpenSession>> | null = null;
   let walletId: string | null = null;
-  if (payTo === 'CASH') {
+  let voucher: Awaited<ReturnType<typeof createHandpayVoucher>> | null = null;
+  if (payTo === 'TICKET') {
+    // HANDPAY_PAY: HANDPAY_PAYABLE -> TICKET_LIABILITY; the voucher is the ticket of this booking
+    voucher = await createHandpayVoucher(db, a, h.casino_id, h.amount_cents);
+    r = await executeMoneyTransaction(db, { ...common, ctx: { ...base, ticketId: voucher.id } });
+  } else if (payTo === 'CASH') {
     session = await requireOpenSession(db as PoolClient, a.orgId, a.employeeId!);
     if (h.casino_id !== session.casino_id) throw new HttpError(409, 'Handpay belongs to another casino');
     r = await executeMoneyTransaction(db, { ...common, ctx: { ...base, cashierSessionId: session.id } });
@@ -333,15 +340,17 @@ async function payHandpayLedger(db: Db, a: Actor, handpayId: string, opts: { pla
       amountCents: h.amount_cents, moneyTransactionId: r.transaction.id, sourceEventId: h.source_event_id, machineId: h.machine_id, playerId: opts.playerId, reference: `Jackpot ${machine.asset_no}`,
     });
   let paid = (await db.query(
-    `UPDATE handpays SET status = 'PAID', paid_by = $2, paid_at = now(), pay_method = $3, cashier_session_id = $4, legacy_cash_transaction_id = $5, player_id = COALESCE($6, player_id), card_id = COALESCE($7, card_id)
+    `UPDATE handpays SET status = 'PAID', paid_by = $2, paid_at = now(), pay_method = $3, cashier_session_id = $4, legacy_cash_transaction_id = $5, player_id = COALESCE($6, player_id), card_id = COALESCE($7, card_id),
+       payout_ticket_id = $8
      WHERE id = $1 RETURNING *`,
-    [h.id, a.employeeId, payTo, session?.id ?? null, cashTx?.id ?? null, opts.playerId ?? null, opts.cardId ?? null],
+    [h.id, a.employeeId, payTo, session?.id ?? null, cashTx?.id ?? null, opts.playerId ?? null, opts.cardId ?? null, voucher?.id ?? null],
   )).rows[0] as HandpayRow;
+  if (voucher) await handpayVoucherIssued(db, a, voucher, h.id, r.transaction.id);
   if (approvalId) await consumeApproval(db, a, approvalId, { action: 'HANDPAY_PAY', entityId: h.id, moneyTransactionId: r.transaction.id });
-  await event(db, h, 'PAID', 'APPROVED', 'PAID', a.employeeId, { transactionId: r.transaction.id, payTo, walletId, cashTransactionId: cashTx?.id ?? null });
+  await event(db, h, 'PAID', 'APPROVED', 'PAID', a.employeeId, { transactionId: r.transaction.id, payTo, walletId, cashTransactionId: cashTx?.id ?? null, ticketId: voucher?.id ?? null });
   paid = await afterPayment(db, paid, machine.gateway_id, a.employeeId!);
-  await audit(db, a, 'handpay.paid', paid, { transactionId: r.transaction.id, payTo, approvalId });
-  return { handpay: paid, transaction: cashTx, moneyTransaction: r.transaction };
+  await audit(db, a, 'handpay.paid', paid, { transactionId: r.transaction.id, payTo, approvalId, ticketId: voucher?.id ?? null });
+  return { handpay: paid, transaction: cashTx, moneyTransaction: r.transaction, voucher };
 }
 
 /** After a payment: MACHINE_RESET if the machine was already reset, otherwise request the reset. */

@@ -289,7 +289,10 @@ async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, st
         `SELECT e.event_id AS id, e.machine_id FROM machine_events e ${onLedger}
          WHERE e.casino_id = $1 AND e.received_at > mc.as_of
            AND (e.type IN ('CASH_IN', 'CASH_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
-                OR (e.type = 'CREDIT_METER' AND EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id)))
+                OR (e.type = 'CREDIT_METER' AND EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
+                -- F3: ticket / jackpot events of a ledger machine whose rail is not on the ledger (never gaming)
+                OR (e.type IN ('TITO_IN', 'TITO_OUT', 'JACKPOT') AND EXISTS (SELECT 1 FROM machine_event_exceptions x
+                      WHERE x.event_id = e.event_id AND x.code IN ('TITO_NOT_ON_LEDGER', 'HANDPAY_NOT_ON_LEDGER'))))
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
            AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
                 OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))

@@ -195,12 +195,18 @@ export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; cas
        ($2::timestamptz AT TIME ZONE c.timezone)::date = (now() AT TIME ZONE c.timezone)::date AS today,
        EXISTS (SELECT 1 FROM money_transactions t JOIN machine_events e ON e.event_id = t.source_event_id
                WHERE t.machine_id = m.id AND e.occurred_at > $2::timestamptz) AS later_booked,
-       EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.machine_id = m.id AND d.status = 'PENDING') AS pending
+       EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.machine_id = m.id AND d.status = 'PENDING') AS pending,
+       -- F3: an unbooked credit-changing event (exception) must never be absorbed into the gaming result
+       EXISTS (SELECT 1 FROM machine_event_exceptions x JOIN money_rail_cutovers mc ON mc.rail = 'MACHINE' AND mc.machine_id = x.machine_id
+               WHERE x.machine_id = m.id AND x.created_at > mc.as_of
+                 AND x.event_type IN ('CASH_IN', 'CASH_OUT', 'TITO_IN', 'TITO_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
+                 AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('machine_event:' || x.event_id, 'ticket_event:' || x.event_id))) AS open_exceptions
      FROM machines m JOIN casinos c ON c.id = m.casino_id WHERE m.id = $1`, [ev.machineId, ev.occurredAt])).rows[0];
   if (!m.credit_meter_reliable && ev.creditCents !== 0) return skip('credit meter not reliable and not a zero-credit state');
   if (m.frozen) return skip('machine frozen');
   if (!m.today) return skip('meter report of another business date');
   if (m.later_booked || m.pending) return skip('later or pending money events of the machine');
+  if (m.open_exceptions) return skip('unexplained money event exceptions of the machine');
   const ledgerCredit = await getBalance(db, ev.orgId, { kind: 'MACHINE_CREDIT', casinoId: ev.casinoId, machineId: ev.machineId });
   const result = ledgerCredit - ev.creditCents; // positive: players lost it, negative: players won it
   if (result === 0) return { outcome: 'SETTLED_ZERO', reason: null, moneyTransactionId: null };

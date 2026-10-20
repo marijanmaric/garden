@@ -5,7 +5,7 @@ import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { type SessionRow } from './cashier';
 import { entityDedupeKey, executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
 import { projectDrawerMovement, projectShiftClosed, projectShiftCounted, projectShiftCounting } from './legacy-projection';
-import { railOnLedger } from './rails';
+import { railOnLedger, requireRailOnLedger } from './rails';
 import { countTotal, recordCashCount, type CountInput } from './vault';
 
 /**
@@ -101,7 +101,8 @@ export async function verifyVaultCount(db: Db, a: CashActor, countId: string, in
   const c = await one(db, 'SELECT * FROM cash_counts WHERE id = $1 AND org_id = $2 FOR UPDATE', [countId, a.orgId]);
   if (!c || !a.casinoIds.includes(c.casino_id)) throw new HttpError(404, 'Count not found');
   if (c.context !== 'VAULT_OPEN' && c.context !== 'VAULT_CLOSE') throw new HttpError(409, 'Not a vault session count');
-  await requireCashOnLedger(db, a.orgId, c.casino_id);
+  // F3: a vault count touches only VAULT and VAULT_SHORT_OVER; the cash (drawer) rail is not involved
+  await requireRailOnLedger(db, a.orgId, 'VAULT', c.casino_id);
   if (await one(db, 'SELECT 1 FROM count_settlements WHERE count_id = $1', [countId])) throw new HttpError(409, 'Count already settled');
   const latest = await one(db, `SELECT id FROM cash_counts WHERE vault_session_id = $1 AND context = $2 ORDER BY created_at DESC, id DESC LIMIT 1`, [c.vault_session_id, c.context]);
   if (latest.id !== countId) throw new HttpError(409, 'A newer count exists for this vault session');

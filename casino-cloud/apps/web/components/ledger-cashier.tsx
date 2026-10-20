@@ -277,8 +277,9 @@ function ScanDesk({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null; reloa
 
 // ---- handpays, ticket sale, own approvals -------------------------------------------------------------
 
-function LedgerHandpays({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null; reload: () => void }) {
-  const { casino } = useSession();
+export function LedgerHandpays({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null; reload: () => void }) {
+  const { casino, sees } = useSession();
+  const voucher = sees('tito');
   const list = useApi<any[]>(`/cashier/handpays?casinoId=${casino.id}`, { refreshMs: 4000 });
   const [card, setCard] = useState<Record<string, string>>({});
   const confirm = useConfirm(() => { reload(); void list.reload(); });
@@ -291,12 +292,19 @@ function LedgerHandpays({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null;
         const needs = requiresApproval(amount, ctx?.limits.handpay);
         const ap = approvalFor(shift, 'HANDPAY_PAY', h.handpay_id);
         const approved = h.handpay_status === 'APPROVED' || (ap?.status === 'APPROVED' && new Date(ap.expires_at) > new Date());
-        const pay = (payTo: 'CASH' | 'WALLET') => confirm.ask({
-          title: 'Pay HANDPAY', summary: payTo === 'CASH' ? 'Pay this jackpot in CASH from your drawer. The machine reset is requested separately.' : 'Pay this jackpot into the player\'s CASHLESS wallet.',
-          amountCents: amount, details: [['Machine', `${h.asset_no} (${h.manufacturer ?? ''} ${h.floor ?? ''})`], ['Hit', formatDateTime(h.hit_at)], ['Pay to', payTo === 'CASH' ? 'CASH (drawer)' : `CASHLESS wallet of card ${card[h.handpay_id]}`]],
-          path: `/cashier/handpays/${h.id}`, body: { jackpotEventId: h.jackpot_event_id, payTo, playerCard: payTo === 'WALLET' ? card[h.handpay_id]?.trim() : undefined },
-          describe: (d) => `HANDPAY ${formatCents(d.amountCents)} on ${d.assetNo} paid (${d.status}).`,
+        const pay = (payTo: 'CASH' | 'WALLET' | 'TICKET') => confirm.ask({
+          title: 'Pay HANDPAY',
+          summary: payTo === 'CASH' ? 'Pay this jackpot in CASH from your drawer. The machine reset is requested separately.'
+            : payTo === 'WALLET' ? 'Pay this jackpot into the player\'s CASHLESS wallet.'
+            : 'Pay this jackpot as a TITO voucher: the player redeems it like any ticket. The machine reset is requested separately.',
+          amountCents: amount, details: [['Machine', `${h.asset_no} (${h.manufacturer ?? ''} ${h.floor ?? ''})`], ['Hit', formatDateTime(h.hit_at)],
+            ['Pay to', payTo === 'CASH' ? 'CASH (drawer)' : payTo === 'WALLET' ? `CASHLESS wallet of card ${card[h.handpay_id]}` : 'TITO voucher']],
+          path: `/cashier/handpays/${h.id}`, body: { jackpotEventId: h.jackpot_event_id, payTo, playerCard: card[h.handpay_id]?.trim() || undefined },
+          describe: (d) => d.voucher
+            ? <>HANDPAY {formatCents(d.amountCents)} on {d.assetNo} paid as voucher <span className="font-mono">{d.voucher.barcode}</span> ({d.status}).</>
+            : `HANDPAY ${formatCents(d.amountCents)} on ${d.assetNo} paid (${d.status}).`,
         });
+        const noShift = !shift?.session || shift.session.status !== 'OPEN';
         return (
           <div key={h.handpay_id} className="space-y-2 rounded-xl border border-yellow-500/40 bg-yellow-500/5 p-3" data-testid="handpay">
             <div className="flex items-center justify-between">
@@ -310,10 +318,11 @@ function LedgerHandpays({ ctx, shift, reload }: { ctx: Ctx; shift: Shift | null;
               title: 'Request approval: HANDPAY', summary: 'A supervisor must approve this handpay before it can be paid.', amountCents: amount,
               details: [['Machine', h.asset_no]], path: `/handpays/${h.handpay_id}/approval-request`, body: {}, describe: () => 'Approval requested.',
             })} />}
-            <input className="input font-mono text-xs" placeholder="Player card (only for wallet payment)" value={card[h.handpay_id] ?? ''} onChange={(e) => setCard({ ...card, [h.handpay_id]: e.target.value })} />
+            <input className="input font-mono text-xs" placeholder={sees('cashless') ? 'Player card (wallet payment, or verification)' : 'Player card (verification)'} value={card[h.handpay_id] ?? ''} onChange={(e) => setCard({ ...card, [h.handpay_id]: e.target.value })} />
             <div className="grid grid-cols-2 gap-2">
-              <button className="btn-primary" disabled={!shift?.session || shift.session.status !== 'OPEN' || (needs && !approved) || frozen} onClick={() => pay('CASH')} data-testid="pay-handpay">PAY CASH</button>
-              <button className="btn" disabled={!shift?.session || shift.session.status !== 'OPEN' || (needs && !approved) || frozen || !card[h.handpay_id]?.trim()} onClick={() => pay('WALLET')}>To wallet</button>
+              {sees('cash') && <button className="btn-primary" disabled={noShift || (needs && !approved) || frozen} onClick={() => pay('CASH')} data-testid="pay-handpay">PAY CASH</button>}
+              {sees('cashless') && <button className="btn" disabled={noShift || (needs && !approved) || frozen || !card[h.handpay_id]?.trim()} onClick={() => pay('WALLET')}>To wallet</button>}
+              {voucher && <button className={sees('cash') ? 'btn' : 'btn-primary'} disabled={(needs && !approved) || frozen} onClick={() => pay('TICKET')} data-testid="pay-handpay-voucher">As TITO voucher</button>}
             </div>
           </div>
         );

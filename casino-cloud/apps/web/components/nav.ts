@@ -40,6 +40,7 @@ export const NAV: Array<{ title: string; items: NavItem[] }> = [
       { href: '/cashier', label: 'Cashier', icon: CreditCard, feature: 'cash', anyPermission: ['cash.transact', 'cashier.supervise'] },
       { href: '/mobile', label: 'Mobile Cashier', icon: Smartphone, feature: 'cash', permission: 'cash.transact' },
       { href: '/tickets', label: 'Tickets', icon: Ticket, feature: 'tito', permission: 'ticket.view' },
+      { href: '/handpays', label: 'Handpays', icon: Trophy, feature: 'handpay.pay', permission: 'cash.transact' },
       { href: '/vault', label: 'Vault', icon: Vault, feature: 'vault', permission: 'cash.manage' },
       { href: '/approvals', label: 'Approvals', icon: ShieldCheck, feature: 'reconciliation', permission: 'cashier.supervise' },
       { href: '/reconciliation', label: 'Reconciliation', icon: Scale, feature: 'reconciliation', permission: 'cashier.supervise' },

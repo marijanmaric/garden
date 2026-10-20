@@ -26,6 +26,10 @@ test('sidebar per plan: TITO only shows no cash, vault or cashier pages; Enterpr
   const tito = visible(['CORE', 'TITO', 'REPORTING']);
   for (const h of ['/tickets', '/reports', '/reconciliation', '/']) assert.ok(tito.includes(h), h);
   for (const h of ['/cashier', '/mobile', '/vault', '/cash']) assert.ok(!tito.includes(h), h);
+  assert.ok(!tito.includes('/handpays'));
+  // F3: TITO + HANDPAY pays handpays as TITO vouchers on its own handpay page (no cashier)
+  const titoHandpay = visible(['CORE', 'TITO', 'HANDPAY']);
+  assert.ok(titoHandpay.includes('/handpays') && !titoHandpay.includes('/cashier'));
   const cashless = visible(['CORE', 'CASHLESS', 'MACHINE', 'VAULT']);
   assert.ok(cashless.includes('/vault') && !cashless.includes('/tickets') && !cashless.includes('/cashier'));
   const all = visible(['CORE', 'TITO', 'HANDPAY', 'CASH', 'VAULT', 'CASHLESS', 'MACHINE', 'REPORTING', 'ADVANCED_RECONCILIATION']);

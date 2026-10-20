@@ -8,6 +8,7 @@ import { confirmHandpayReset, handleJackpotEvent } from './handpays';
 import { handleTitoMachineEvent, titoOnLedger } from './tito';
 import { recordEventException, withEventException } from './event-exceptions';
 import { handleCreditMeter, handleMachineMoneyEvent, machineOnLedger } from './machine-money';
+import { railOnLedger } from './rails';
 
 export interface GatewayIdentity {
   id: string;
@@ -175,6 +176,13 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
         }, out));
         break;
       }
+      if ((type === 'TITO_OUT' || type === 'TITO_IN') && (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id))) {
+        // F3: a machine on the ledger whose casino does not run TITO on the ledger (TITO not in use when the
+        // machine was cut over). The ticket cannot be booked and is never folded into gaming: a recorded
+        // exception (no money moved), reported by reconciliation, blocks credit-meter settlement until explained.
+        await recordEventException(db, exEvent, 'TITO', 'TITO_NOT_ON_LEDGER', `ticket ${ev.ticketBarcode ?? '(no barcode)'}: TITO money of this casino is not on the ledger`, out);
+        break;
+      }
       if (type === 'TITO_OUT' && ev.ticketBarcode && (amount ?? 0) > 0) await issueMachineTicket(db, ctx, ev);
       if (type === 'TITO_IN' && ev.ticketBarcode) await redeemMachineTicket(db, ctx, ev, label, out);
       break;
@@ -187,7 +195,10 @@ async function processEvent(db: PoolClient, gw: GatewayIdentity, ev: MachineEven
       // One handpay entity per jackpot event. The decimal amount from the machine is converted to
       // integer cents once, here at the boundary.
       // On a frozen HANDPAY rail the event is kept as a deferred money event and replayed after the lift.
-      if ((amount ?? 0) > 0) {
+      if ((amount ?? 0) > 0 && (await machineOnLedger(db, gw.orgId, gw.casinoId, m.id)) && !(await railOnLedger(db, gw.orgId, 'HANDPAY', gw.casinoId))) {
+        // F3: same rule for a jackpot of a ledger machine while HANDPAY is not on the ledger (not in use at cutover)
+        await recordEventException(db, { ...ctx, eventId, type, label }, 'HANDPAY', 'HANDPAY_NOT_ON_LEDGER', `jackpot €${(amount ?? 0).toFixed(2)}: HANDPAY money of this casino is not on the ledger`, out);
+      } else if ((amount ?? 0) > 0) {
         const r = await withEventException(db, { ...ctx, eventId, type, label }, 'HANDPAY', out,
           () => handleJackpotEvent(db, { orgId: gw.orgId, casinoId: gw.casinoId, machineId: m.id, eventId, amountCents: Math.round((amount ?? 0) * 100) }));
         if (r?.deferred)

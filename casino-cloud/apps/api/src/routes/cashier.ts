@@ -15,6 +15,12 @@ import { loadEntitlements, requireModule } from '../services/entitlements';
 
 const money = z.number().min(0).max(1_000_000);
 
+/** F3: the TITO voucher of a TICKET handpay payout. */
+function voucherOf(paid: object) {
+  const v = (paid as { voucher?: { id: string; barcode: string; amount_cents: number; expires_at: string } | null }).voucher;
+  return v ? { ticketId: v.id, barcode: v.barcode, amountCents: v.amount_cents, expiresAt: v.expires_at } : null;
+}
+
 export async function cashierRoutes(app: FastifyInstance) {
   /** Cash desks of the casino with their current shift and expected drawer balance. */
   app.get('/api/v1/cashier/desks', { config: { feature: 'cash' }, preHandler: guard() }, async (req) => {
@@ -186,10 +192,10 @@ export async function cashierRoutes(app: FastifyInstance) {
   app.post('/api/v1/cashier/handpays/:machineId', { config: { feature: 'handpay.pay' }, preHandler: guard('cash.transact') }, async (req, reply) => {
     const { machineId } = z.object({ machineId: z.string().uuid() }).parse(req.params);
     const { playerCard, jackpotEventId, payTo } = z.object({
-      playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional(), payTo: z.enum(['CASH', 'WALLET']).default('CASH'),
+      playerCard: z.string().max(40).optional(), jackpotEventId: z.string().uuid().optional(), payTo: z.enum(['CASH', 'WALLET', 'TICKET']).default('CASH'),
     }).parse(req.body ?? {});
-    // payment target: from a drawer needs Cash, into a wallet needs Cashless
-    requireModule(await loadEntitlements(req.auth.orgId), payTo === 'WALLET' ? 'CASHLESS' : 'CASH');
+    // payment target: from a drawer needs Cash, into a wallet needs Cashless, a voucher needs TITO (F3)
+    requireModule(await loadEntitlements(req.auth.orgId), payTo === 'WALLET' ? 'CASHLESS' : payTo === 'TICKET' ? 'TITO' : 'CASH');
     const out: BusMessage[] = [];
     const result = await idempotent(req, reply, async (db) => {
       const actorRef = { orgId: req.auth.orgId, employeeId: req.auth.sub, employeeEmail: req.auth.email, ip: req.ip };
@@ -215,6 +221,7 @@ export async function cashierRoutes(app: FastifyInstance) {
       return {
         transaction: paid.transaction, amount: paid.handpay.amount_cents / 100, amountCents: paid.handpay.amount_cents, assetNo: asset, jackpotEventId: paid.handpay.source_event_id,
         handpayId: paid.handpay.id, status: paid.handpay.status, payTo, moneyTransactionId: 'moneyTransaction' in paid ? (paid.moneyTransaction as { id: string }).id : null,
+        voucher: voucherOf(paid),
       };
     });
     out.forEach((msg) => bus.publish(msg));
