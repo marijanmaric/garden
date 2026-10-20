@@ -4,7 +4,7 @@ import {
   ACCOUNT_KINDS, ACCOUNT_KIND_RAIL, CORRECTION_TYPES, MONEY_TRANSACTIONS, MoneyError, accountKey, cents, postings as buildPostings,
   type AccountKind, type AccountRef, type MoneyContext, type MoneyTransactionType, type Posting,
 } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 
 /**
  * The ledger service: the ONE execution path for money. Every money movement is a balanced,
@@ -205,7 +205,7 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   const closed = await db.query(
     `SELECT d.business_date::text AS d FROM business_day_closes d JOIN casinos c ON c.id = d.casino_id
      WHERE d.casino_id = $1 AND d.business_date = COALESCE($2::date, (now() AT TIME ZONE c.timezone)::date)`, [input.ctx.casinoId, input.businessDate ?? null]);
-  if (closed.rowCount) throw new HttpError(409, `Business date ${closed.rows[0].d} of this casino is closed`);
+  if (closed.rowCount) throw stateError(409, 'BUSINESS_DATE_CLOSED', `Business date ${closed.rows[0].d} of this casino is closed`);
 
   // 2. Exactly once per dedupe key.
   // Same order as the reference columns in the INSERT below.
@@ -227,7 +227,7 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   );
   if (!inserted.rowCount) {
     const prev = (await db.query('SELECT * FROM money_transactions WHERE org_id = $1 AND dedupe_key = $2', [input.orgId, input.dedupeKey])).rows[0];
-    if (prev.request_hash !== hash) throw new HttpError(409, 'This money transaction key was already used for a different transaction');
+    if (prev.request_hash !== hash) throw stateError(409, 'IDEMPOTENCY_CONFLICT', 'This money transaction key was already used for a different transaction');
     return { transaction: prev, entries: await loadEntries(db, prev.id), replayed: true };
   }
   const tx: MoneyTransactionRow = inserted.rows[0];
@@ -253,7 +253,7 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
   for (const p of withIds) {
     const b = balances.get(p.accountId);
     const after = b.balance_cents + delta.get(p.accountId)!;
-    if (!b.allow_negative && after * b.normal_sign < 0) throw new HttpError(409, `Insufficient balance on ${p.account.kind}`);
+    if (!b.allow_negative && after * b.normal_sign < 0) throw stateError(409, 'INSUFFICIENT_BALANCE', `Insufficient balance on ${p.account.kind}`);
   }
 
   // 6. Entries (the posting trigger updates the balances).
@@ -261,7 +261,7 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
     try {
       await db.query('INSERT INTO ledger_entries (transaction_id, account_id, amount_cents, org_id) VALUES ($1,$2,$3,$4)', [tx.id, p.accountId, p.amountCents, input.orgId]);
     } catch (err) {
-      if ((err as { constraint?: string }).constraint === 'ledger_balances_sufficient') throw new HttpError(409, `Insufficient balance on ${p.account.kind}`);
+      if ((err as { constraint?: string }).constraint === 'ledger_balances_sufficient') throw stateError(409, 'INSUFFICIENT_BALANCE', `Insufficient balance on ${p.account.kind}`);
       throw err;
     }
   }
@@ -307,8 +307,8 @@ async function assertRails(db: Db, orgId: string, type: MoneyTransactionType, ca
       'SELECT CASE WHEN $3::text IS NULL THEN true ELSE money_rail_ledger($1, $2, $3, $4) END AS ledger, money_rail_frozen($1, $2, $3, $4) AS frozen',
       [orgId, t.casinoId, t.rail, t.machineId],
     )).rows[0];
-    if (!correction && r.frozen) throw new HttpError(409, `${t.rail ?? 'Money'} is frozen after a reconciliation mismatch: only corrections are allowed`);
-    if (type !== 'OPENING_BALANCE' && !r.ledger) throw new HttpError(409, `${t.rail} money is not on the ledger for this ${t.rail === 'MACHINE' ? 'machine' : t.rail === 'CASHLESS' ? 'organisation' : 'casino'} (cutover pending)`);
+    if (!correction && r.frozen) throw stateError(409, 'RAIL_FROZEN', `${t.rail ?? 'Money'} is frozen after a reconciliation mismatch: only corrections are allowed`);
+    if (type !== 'OPENING_BALANCE' && !r.ledger) throw stateError(409, 'RAIL_LEGACY', `${t.rail} money is not on the ledger for this ${t.rail === 'MACHINE' ? 'machine' : t.rail === 'CASHLESS' ? 'organisation' : 'casino'} (cutover pending)`);
   }
 }
 

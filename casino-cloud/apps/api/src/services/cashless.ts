@@ -1,6 +1,6 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { TRANSFER_TRANSITIONS, cents, type TransferDirection, type TransferStatus } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import { entityDedupeKey, executeMoneyTransaction, type LatePosting, type MoneyActor } from './ledger';
 import { requireUsableCard, type Actor } from './players';
 import { assertWalletOperation, lockWallet, walletOfPlayer } from './wallets';
@@ -120,9 +120,9 @@ export async function requestTransfer(db: Db, a: Actor, input: { sessionId: stri
   if (!s) throw new HttpError(404, 'Cashless session not found');
   if (s.status !== 'OPEN') throw new HttpError(409, 'Cashless session is closed');
   // 7d: the machine side of a transfer is MACHINE_CREDIT, so the machine must be on the ledger (no reservation otherwise)
-  if (!(await railOnLedger(db, a.orgId, 'MACHINE', s.casino_id, s.machine_id))) throw new HttpError(409, 'MACHINE money is not on the ledger for this machine (cutover pending)');
+  if (!(await railOnLedger(db, a.orgId, 'MACHINE', s.casino_id, s.machine_id))) throw stateError(409, 'RAIL_LEGACY', 'MACHINE money is not on the ledger for this machine (cutover pending)');
   if ((await db.query(`SELECT money_rail_frozen($1, $2, 'MACHINE', $3) AS f`, [a.orgId, s.casino_id, s.machine_id])).rows[0].f)
-    throw new HttpError(409, 'MACHINE is frozen after a reconciliation mismatch: no new transfers');
+    throw stateError(409, 'RAIL_FROZEN', 'MACHINE is frozen after a reconciliation mismatch: no new transfers');
   const wallet = await lockWallet(db, a.orgId, s.wallet_id);
   assertWalletOperation(wallet, input.direction === 'TO_MACHINE' ? 'TO_MACHINE' : 'FROM_MACHINE');
   const timeout = (await db.query('SELECT transfer_timeout_seconds FROM casino_money_settings WHERE casino_id = $1', [s.casino_id])).rows[0]?.transfer_timeout_seconds ?? 60;

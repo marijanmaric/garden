@@ -1,6 +1,6 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { cents } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import { consumeApproval, requestApproval } from './approvals';
 import { addCashTx, requireOpenSession } from './cashier';
 import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
@@ -51,7 +51,7 @@ export async function walletCash(db: PoolClient, a: Actor, input: { kind: Wallet
   const amount = cents(input.amountCents);
   if (amount <= 0) throw new HttpError(400, 'Amount must be positive');
   const session = await requireOpenSession(db, a.orgId, a.employeeId);
-  if (!(await railOnLedger(db, a.orgId, 'CASH', session.casino_id))) throw new HttpError(409, 'CASH is not on the ledger for this casino');
+  if (!(await railOnLedger(db, a.orgId, 'CASH', session.casino_id))) throw stateError(409, 'RAIL_LEGACY', 'CASH is not on the ledger for this casino');
   const w = await walletOfPlayer(db, a.orgId, input.playerId);
   assertWalletOperation(w, input.kind === 'CASH_DEPOSIT' ? 'DEPOSIT' : 'WITHDRAW');
   await assertVerified(db, a.orgId, input.playerId, amount);

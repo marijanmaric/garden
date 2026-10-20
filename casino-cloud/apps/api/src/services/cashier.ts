@@ -1,7 +1,7 @@
 import { randomInt } from 'node:crypto';
 import type { PoolClient } from '@m1/database';
 import { LEGACY_CASH_TX_RAILS, signedCashAmount, type CashTxType } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 
 export interface SessionRow {
   id: string;
@@ -34,7 +34,7 @@ export async function addCashTx(
   if (!extra.moneyTransactionId) {
     const rails = LEGACY_CASH_TX_RAILS[type] ?? ['CASH'];
     const r = await db.query(`SELECT rail FROM unnest($1::text[]) rail WHERE money_rail_ledger($2, $3, rail, NULL)`, [rails, s.org_id, s.casino_id]);
-    if (r.rowCount) throw new HttpError(409, `${r.rows[0].rail} money is on the ledger: this legacy cash operation is disabled`);
+    if (r.rowCount) throw stateError(409, 'RAIL_ON_LEDGER', `${r.rows[0].rail} money is on the ledger: this legacy cash operation is disabled`);
   }
   const signed = signedCashAmount(type, amount);
   const r = await db.query(

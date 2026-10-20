@@ -1,6 +1,6 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { cents } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import type { BusMessage } from '../bus';
 import { openAlert } from './alerts';
 import { recordEventException } from './event-exceptions';
@@ -308,7 +308,7 @@ function assertPayable(t: TicketRow) {
 }
 
 async function requireTitoLedger(db: Db, orgId: string, casinoId: string) {
-  if (!(await titoOnLedger(db, orgId, casinoId))) throw new HttpError(409, 'TITO is not on the ledger for this casino');
+  if (!(await titoOnLedger(db, orgId, casinoId))) throw stateError(409, 'RAIL_LEGACY', 'TITO is not on the ledger for this casino');
 }
 
 async function walletFor(db: Db, orgId: string, playerId: string | null | undefined, op: 'DEPOSIT' | 'WITHDRAW') {

@@ -1,6 +1,6 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { cents, type CashMovementKind } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
 import { type SessionRow } from './cashier';
 import { entityDedupeKey, executeMoneyTransaction, getBalance, type MoneyActor } from './ledger';
@@ -49,7 +49,7 @@ export async function cashOnLedger(db: Db, orgId: string, casinoId: string) {
 }
 
 async function requireCashOnLedger(db: Db, orgId: string, casinoId: string) {
-  if (!(await cashOnLedger(db, orgId, casinoId))) throw new HttpError(409, 'Cash and vault of this casino are not on the ledger yet');
+  if (!(await cashOnLedger(db, orgId, casinoId))) throw stateError(409, 'RAIL_LEGACY', 'Cash and vault of this casino are not on the ledger yet');
 }
 
 const drawerBalance = (db: Db, orgId: string, casinoId: string, sessionId: string) => getBalance(db, orgId, { kind: 'DRAWER', casinoId, cashierSessionId: sessionId });

@@ -1,7 +1,7 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { cents } from '@m1/shared';
 import { expectedCollection } from './collections';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import type { CashActor } from './cash-ops';
 import { mainVaultOf, readyVaultSession } from './cash-ops';
 import { entityDedupeKey, executeMoneyTransaction, type MoneyActor } from './ledger';
@@ -31,7 +31,7 @@ function audit(db: Db, a: CashActor, casinoId: string, action: string, entityTyp
 async function ledgerMachine(db: Db, a: CashActor, machineId: string) {
   const m = await one<{ id: string; casino_id: string; asset_no: string }>(db, 'SELECT id, casino_id, asset_no FROM machines WHERE id = $1 AND org_id = $2 FOR NO KEY UPDATE', [machineId, a.orgId]);
   if (!m || !a.casinoIds.includes(m.casino_id)) throw new HttpError(404, 'Machine not found');
-  if (!(await railOnLedger(db, a.orgId, 'MACHINE', m.casino_id, m.id))) throw new HttpError(409, 'MACHINE money is not on the ledger for this machine (cutover pending)');
+  if (!(await railOnLedger(db, a.orgId, 'MACHINE', m.casino_id, m.id))) throw stateError(409, 'RAIL_LEGACY', 'MACHINE money is not on the ledger for this machine (cutover pending)');
   return m;
 }
 
