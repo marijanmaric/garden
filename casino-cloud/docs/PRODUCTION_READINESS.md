@@ -211,17 +211,17 @@ administrator with `npm run platform-admin -w @m1/database -- <email> <password 
 |---|---|---|---|---|
 | F1 | CRITICAL | `AUTO_SEED` defaulted to true in production: an empty production database received the demo accounts with the password `demo`, including a platform administrator | security, configuration | fixed: production never seeds; `AUTO_SEED=true` refuses the start unless `DEMO_MODE=true` |
 | F2 | CRITICAL | Legacy TITO (rail not cut over): a machine acceptance (`TITO_IN` with `holdId`) of a ticket the same machine had held was rejected; the ticket stayed HELD, returned to VALID after the hold expired and could be paid a second time | money | fixed: the acceptance commits its own hold, as on the ledger (Step 7c rule) |
-| F3 | CRITICAL (commercial) | The plans TITO_STARTER, TITO_HANDPAY and CASHLESS_MACHINE cannot run their money on the ledger: the existing cutover order needs CASH for TITO and HANDPAY, MACHINE needs TITO and HANDPAY, ledger vault operations need CASH. Customer B cannot pay a handpay at all, customer D cannot move wallet money at all | product definition | not changed (money architecture); made visible: `ledgerGaps` in plans, onboarding and module cards. First pilot on CASH_OPERATIONS or ENTERPRISE, or a business decision before A / B / D are sold |
+| F3 | CRITICAL (commercial) | The plans TITO_STARTER, TITO_HANDPAY and CASHLESS_MACHINE cannot run their money on the ledger: the existing cutover order needs CASH for TITO and HANDPAY, MACHINE needs TITO and HANDPAY, ledger vault operations need CASH. Customer B cannot pay a handpay at all, customer D cannot move wallet money at all | product definition | fixed in Part 5: accidental dependencies removed, workflow dependencies conditional, handpay payout as TITO voucher (migration 013) |
 | F4 | HIGH | Production accepted an open CORS configuration (warning only) | security | fixed: explicit `CORS_ORIGIN` required, `*` and paths refused |
 | F5 | HIGH | No API or UI to register players, issue / block / replace cards, record the identity verification | operations | fixed: `/api/v1/players*` (permission `player.manage`), players page |
 | F6 | HIGH | A new customer's gateway could not be registered, nor machines assigned, without SQL | operations | fixed: `npm run gateway -w @m1/database -- <org-slug> <casino-code> <device-id>`; new machines join the casino's only gateway |
 | F7 | HIGH | A dropped database connection crashed the API process | reliability | fixed: idle and checked-out connection errors handled; 503 `TEMPORARILY_UNAVAILABLE` |
-| F8 | HIGH | A ledger vault session could be opened where CASH is not on the ledger and could never be verified | money (stuck state) | fixed: refused before anything is created (`RAIL_LEGACY`) |
+| F8 | HIGH | A ledger vault session could be opened where CASH is not on the ledger and could never be verified | money (stuck state) | fixed in Part 5 at the root: vault count verification needs only VAULT on the ledger (the interim refusal is removed) |
 | F9 | MEDIUM | The SSE stream reflected any Origin | security | fixed: same allow-list as the API |
 | F10 | MEDIUM | The SSE token (JWT in the query string) was written to the request log | security | fixed: redacted |
 | F11 | MEDIUM | Platform administrator bootstrap left no audit trail and needed a migrated database | audit | fixed: migrates, audits (`SYSTEM` / `cli`), email validated |
 | F12 | MEDIUM | Operational states only as text | UX / API | fixed: codes `RAIL_LEGACY`, `RAIL_ON_LEDGER`, `RAIL_FROZEN`, `BUSINESS_DATE_CLOSED`, `INSUFFICIENT_BALANCE`, `IDEMPOTENCY_CONFLICT`, `OPERATIONAL_ERROR`, `TEMPORARILY_UNAVAILABLE` next to the entitlement codes |
-| F13 | MEDIUM | On a legacy TITO rail a ticket void needs no second person (four eyes exist on the ledger only) | money control | open: run TITO on the ledger (F3) |
+| F13 | MEDIUM | On a legacy TITO rail a ticket void needs no second person (four eyes exist on the ledger only) | money control | resolved for every plan by Part 5: TITO can run on the ledger without Cash (cancel and void are four-eyes requests there) |
 | F14 | MEDIUM | A casino admin can reset the password of / deactivate another casino admin (same role) | security | open |
 | F15 | LOW | A JWT stays valid for 12 h after a password change (deactivation, role and organisation status act at once) | security | open |
 | F16 | LOW | With an inactive subscription an open shift cannot be closed until reactivation (money stays on the ledger) | operations | open |
@@ -255,3 +255,72 @@ Closed dates take no booking (database guard); a late economic event is deferred
 | Gateway offline (API stopped 25 s) and database outage | 53 events buffered and delivered once, 0 duplicates, economic time kept; API stays up, 503 during the outage |
 
 Upgrades from 005 and 7a are covered at database level by the API upgrade suites (`step5-upgrade`, `step7a-upgrade`).
+
+## Part 5: F3, commercial modules without unnecessary cash dependencies (October 2026)
+
+### Dependencies
+
+| Dependency | Before | Kind | After |
+|---|---|---|---|
+| CASH -> VAULT | prerequisite | true (floats and drops go through the vault) | unchanged |
+| TITO -> CASH | prerequisite | workflow (cashier sale / cash redemption only) | only where CASH is in use |
+| HANDPAY -> CASH | prerequisite | workflow (cash payout from a drawer) | only where CASH is in use; payout as TITO voucher or into the wallet otherwise |
+| MACHINE -> VAULT | prerequisite | true (machine cash is collected into the vault / count room) | unchanged |
+| MACHINE -> CASHLESS | prerequisite | true (wallet transfers; rail cut over at zero at onboarding) | unchanged |
+| MACHINE -> TITO | prerequisite | true where tickets are used (ticket events change the machine credit) | only where TITO is in use |
+| MACHINE -> HANDPAY | prerequisite | accidental (no machine posting touches a handpay) | only where HANDPAY is in use (jackpot events of the machine) |
+| VAULT operations -> CASH | service check | accidental (a vault count touches only VAULT / VAULT_SHORT_OVER) | removed |
+
+"In use" = the module is contracted (purchased and enabled, independent of the subscription state) or legacy records
+of the rail exist in the casino (cashier sessions, tickets, handpays). It is checked inside the cutover transaction and
+reported in the cutover checks (`prerequisite:<rail>` or `not_in_use:<rail>`). It never grants anything.
+
+### Changes
+
+- Shared: `CUTOVER_PREREQUISITES` (unconditional) and `CUTOVER_WORKFLOW_PREREQUISITES` (conditional);
+  `HANDPAY_PAY` with `payTo: 'TICKET'` posts HANDPAY_PAYABLE -> TICKET_LIABILITY; feature `handpay.pay` = HANDPAY plus
+  Cash, Cashless or TITO; `ledgerGaps` counts only unconditional prerequisites (all plans ledger-ready).
+- Migration 013 (only schema change): `handpays.pay_method` allows TICKET, `handpays.payout_ticket_id` (unique, required
+  exactly for TICKET), one liability origin per ticket (machine print, cashier sale or handpay voucher). No data change.
+- Cutover: workflow prerequisites only where the rail is in use. Vault count verification needs only VAULT.
+- Ingest: a ticket or jackpot event of a ledger machine whose TITO / HANDPAY rail is not on the ledger is a recorded
+  exception (`TITO_NOT_ON_LEDGER`, `HANDPAY_NOT_ON_LEDGER`): event kept, no money, audited, alerted.
+- Machine settlement (D3): skipped while the machine has an unexplained exception of a credit-changing event, so an
+  unbooked ticket or transfer is never absorbed into GAMING_RESULT.
+- Reconciliation: `machine.events_accounted` includes those exceptions (MACHINE is mandatory where it is used).
+- Payout of a handpay as TITO voucher: same approval limit, four eyes, verification threshold, one payment per handpay
+  (unique index), machine reset requested separately; the voucher is an ordinary ticket afterwards. UI: Handpays page
+  (`/handpays`) for casinos without a cash desk; the cashier workstation offers the voucher where TITO is purchased.
+- Clearing accounts: none added. D1 `LEGACY_FLOOR_CLEARING` stays the only clearing account: per machine, only that
+  machine's own ticket events, database-guarded, reconciled (`tito.floor_clearing_attributable`), closed to zero by
+  the machine's MACHINE cutover.
+
+### Remaining true business dependencies (isolated to the smallest workflow)
+
+- Cash redemption of a ticket and ticket sale at a desk need Cash (feature `tito.cashier`).
+- A cash handpay needs Cash; a wallet handpay needs Cashless.
+- Wallets are funded only through machines (bill acceptor -> cashbox -> vault) without Cash: Cashless + Machine needs
+  the vault as count room (plan CASHLESS_MACHINE contains it).
+- A ticket or jackpot on a machine of a casino without TITO / HANDPAY is a physical fact the system cannot book: it is
+  reported until explained by two people (and corrected with a four-eyes adjustment where money moved).
+
+### Five customers after F3
+
+| Customer | Plan | Rails on the ledger | Money proven (exact postings, balanced, reconciliation, day close) |
+|---|---|---|---|
+| A | TITO_STARTER | TITO | print, 15-way hold race (1 winner), accept, expiry (income), four-eyes cancel; liability = outstanding ticket; floor clearing per machine = own ticket events |
+| B | TITO_HANDPAY | TITO, HANDPAY | jackpot payable, four-eyes approval (approver cannot pay), 15 parallel voucher payouts -> 1, reset, voucher accepted by a machine; payable 0, liability 0 |
+| C | CASH_OPERATIONS | VAULT, CASH, HANDPAY, TITO | unchanged |
+| D | CASHLESS_MACHINE | VAULT, MACHINE (+ CASHLESS) | vault blind count without Cash, cash in, machine <-> wallet, reliable-meter settlement, collection, hopper fill; ticket / jackpot exceptions never gaming, explained by four eyes |
+| E | ENTERPRISE | all | unchanged |
+
+### Evidence
+
+| Suite | Result |
+|---|---|
+| API (PostgreSQL 16) | 361 / 361 (A, B, D rewritten for the ledger; workflow prerequisites still enforced where in use: step 5, 7b, 7c) |
+| Shared / adapters / gateway / web unit tests | 39 / 4 / 1 / 11 |
+| Typecheck, Next.js production build | clean (new page `/handpays`) |
+| Docker upgrades 006, 7b, 7c, 7d, 7e and c836ea1 (012) to 013 | money fingerprint identical for each |
+| Browser: SaaS matrix incl. B voucher payout | 17 / 17, 0 browser errors, only the intended 409 (Cash without Vault refused) |
+| Browser: Enterprise operator flows | 16 / 16 |

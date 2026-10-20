@@ -246,15 +246,24 @@ organisation, MACHINE per machine. The migration itself moves nothing; every rai
   reconciled; an unexplained balance blocks further TITO cutovers until explained by four eyes; target 0 in 7d).
 - Frozen TITO / off-day events: deferred and replayed exactly once on the date of `occurred_at` (as jackpots).
 
-**Rail dependency matrix** (A = technical, B = cutover prerequisite, C = maintenance window):
+**Rail dependencies (F3).** Unconditional cutover prerequisites: CASH needs VAULT (floats and drops go through the
+vault), MACHINE needs VAULT (machine cash is collected into the vault / count room) and CASHLESS (wallets; cut over at
+zero for every organisation). Workflow prerequisites apply only where the other rail is in use in the casino (its
+module is contracted or legacy records of it exist): HANDPAY and TITO need CASH (drawer payout, cashier sale /
+redemption), MACHINE needs TITO and HANDPAY (ticket and jackpot events of the machine). The cutover report records
+`prerequisite:<rail>` or `not_in_use:<rail>` for each.
 
-| State | Technically allowed | Protection | Unbalanced money possible | Cutover operationally |
-|---|---|---|---|---|
-| HANDPAY LEDGER + TITO LEGACY | yes | handpay postings never touch TITO; legacy ticket cash rows refused (CASH on ledger); TITO bookings refused (rail guard, service + DB) | no | window C: legacy ticket sale / payout stops until TITO follows |
-| TITO LEDGER + HANDPAY LEGACY | yes | ticket postings never touch HANDPAY; legacy handpay cash payment refused (CASH on ledger); HANDPAY bookings refused | no | window C: legacy handpay payment stops until HANDPAY follows |
-| HANDPAY LEDGER + CASH LEGACY | no (B: HANDPAY needs CASH) | cutover prerequisite; if forced: handpay rows need their booking, drawer bookings refused by the rail guard, all roll back | no | not reachable |
-| TITO LEDGER + CASH LEGACY | no (B: TITO needs CASH) | cutover prerequisite; if forced: tickets need their booking, drawer bookings refused | no | not reachable |
-| MACHINE LEDGER + TITO LEGACY | no (B: MACHINE needs TITO) | cutover prerequisite; if forced: machine money events need a booking, TICKET_LIABILITY bookings refused | no | not reachable |
+| State | Reachable | Protection | Unbalanced money possible |
+|---|---|---|---|
+| HANDPAY / TITO LEDGER, CASH in use but LEGACY | no (workflow prerequisite) | if forced: drawer bookings refused by the rail guard (service + DB), all roll back | no |
+| HANDPAY / TITO LEDGER, CASH not in use | yes | handpay payout as TITO voucher or into the wallet; machine tickets against the D1 floor clearing | no |
+| MACHINE LEDGER, TITO / HANDPAY in use but LEGACY | no (workflow prerequisite) | if forced: machine money events need a booking (DB guard) | no |
+| MACHINE LEDGER, TITO / HANDPAY not in use | yes | a ticket / jackpot event is a recorded exception (`TITO_NOT_ON_LEDGER`, `HANDPAY_NOT_ON_LEDGER`), never gaming: credit-meter settlement waits until it is explained, reconciliation (`machine.events_accounted`) reports it | no |
+| VAULT LEDGER, CASH not purchased | yes | vault counts touch only VAULT / VAULT_SHORT_OVER; drawer movements still need CASH | no |
+
+Handpay payout media: CASH (drawer, needs Cash), WALLET (needs Cashless), TICKET (a TITO voucher, needs TITO; posts
+HANDPAY_PAYABLE -> TICKET_LIABILITY, migration 013 `handpays.payout_ticket_id`). Same approval, verification and
+four-eyes rules for each; the voucher then follows every TITO rule (redeem, expiry, cancel).
 
 Every booking is balanced (shared postings + database zero-sum check) and every account it touches must be on a
 LEDGER, unfrozen rail (service guard + `ledger_entries` trigger), so a mixed state can stop legacy operations but
@@ -347,8 +356,8 @@ demo compose stack (`DEMO_MODE=true`) skips these checks. See [docs/production.e
 
 1. Start with the production environment: the API migrates an empty database and creates nothing else.
 2. First platform administrator: `npm run platform-admin -w @m1/database -- <email> <password 12+> [name]` (audited).
-3. Onboard the customer in `/admin/onboarding` (plan, modules, casino, admin, machines). Prefer a ledger-ready plan
-   (Cash Operations or Enterprise): the plan list shows which rails of a plan cannot run on the ledger.
+3. Onboard the customer in `/admin/onboarding` (plan, modules, casino, admin, machines). Every plan is ledger-ready
+   (F3); the module cards show what a plan cannot do (e.g. cage redemption without Cash).
 4. Register each casino gateway: `npm run gateway -w @m1/database -- <org-slug> <casino-code> <device-id> [name]`
    prints `GATEWAY_ID` / `GATEWAY_KEY` once (only a hash is stored) and assigns the casino's machines.
 5. The customer performs the rail cutover with verified counts in Money control, then operates.
