@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth';
 import { bus } from '../bus';
+import { corsOrigins } from '../config';
 
 /**
  * Server-Sent Events stream. EventSource cannot send headers, so the JWT is passed as a
@@ -15,12 +16,16 @@ export async function streamRoutes(app: FastifyInstance) {
 
     reply.hijack();
     const res = reply.raw;
+    // the hijacked response bypasses the CORS plugin: apply the same origin allow-list here
+    const allowedOrigins = corsOrigins();
+    const origin = req.headers.origin as string | undefined;
+    const allowOrigin = allowedOrigins === true ? (origin ?? '*') : origin && allowedOrigins.includes(origin) ? origin : null;
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-      'Access-Control-Allow-Origin': (req.headers.origin as string) ?? '*',
+      ...(allowOrigin ? { 'Access-Control-Allow-Origin': allowOrigin, Vary: 'Origin' } : {}),
     });
     res.write(`event: ready\ndata: {}\n\n`);
 

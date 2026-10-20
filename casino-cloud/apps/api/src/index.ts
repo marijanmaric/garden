@@ -1,6 +1,6 @@
 import { migrate, seed, syncMoneyModel, syncRbac } from '@m1/database';
 import { buildApp } from './app';
-import { checkProductionSecrets, config } from './config';
+import { checkProductionConfig, config } from './config';
 import { pool } from './db';
 import { startGatewayWatchdog } from './services/gateway';
 import { startMaintenance } from './services/maintenance';
@@ -19,7 +19,7 @@ async function waitForDatabase(retries = 30) {
   }
 }
 
-checkProductionSecrets();
+checkProductionConfig();
 await waitForDatabase();
 await migrate(pool);
 await syncRbac(pool);

@@ -30,9 +30,12 @@ services:
     environment:
       DATABASE_URL: postgres://casino:casino@db:5432/casino
       JWT_SECRET: ${JWT_SECRET:-local-demo-secret-change-me}
+      PII_HASH_SECRET: ${PII_HASH_SECRET:-}
+      CORS_ORIGIN: ${CORS_ORIGIN:-}
       GATEWAY_KEY: ${GATEWAY_KEY:-demo-gateway-key}
-      AUTO_SEED: "true"
-      # Demo stack only: accepts the default secrets above (refused when DEMO_MODE is not true and NODE_ENV=production)
+      AUTO_SEED: ${AUTO_SEED:-true}
+      # Demo stack only: accepts default secrets, open CORS and the demo seed. Production (DEMO_MODE=false) refuses
+      # to start without strong JWT_SECRET / PII_HASH_SECRET, an explicit CORS_ORIGIN and AUTO_SEED=false.
       DEMO_MODE: ${DEMO_MODE:-true}
     ports:
       - "4000:4000"

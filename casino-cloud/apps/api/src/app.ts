@@ -3,6 +3,7 @@ import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { ZodError } from 'zod';
 import { HttpError } from './auth';
+import { corsOrigins } from './config';
 import { pool } from './db';
 import { authRoutes } from './routes/auth';
 import { dashboardRoutes } from './routes/dashboard';
@@ -28,11 +29,20 @@ import { operatorRoutes } from './routes/operator';
 import { orgRoutes } from './routes/org';
 import { platformRoutes } from './routes/platform';
 
+export const redactUrl = (url: string) => url.replace(/([?&]token=)[^&]*/gi, '$1[redacted]');
+
 export async function buildApp() {
-  const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, trustProxy: true });
+  const app = Fastify({
+    logger: {
+      level: process.env.LOG_LEVEL ?? 'info',
+      // the SSE stream carries its JWT in the query string: never write it to the logs
+      serializers: { req: (r) => ({ method: r.method, url: redactUrl(r.url), host: r.host, remoteAddress: r.ip }) },
+    },
+    trustProxy: true,
+  });
 
   // Bearer tokens (no cookies), so reflecting the origin is safe and lets LAN tablets connect.
-  await app.register(cors, { origin: process.env.CORS_ORIGIN?.split(',') ?? true, exposedHeaders: ['Content-Disposition', 'Idempotent-Replayed'] });
+  await app.register(cors, { origin: corsOrigins(), exposedHeaders: ['Content-Disposition', 'Idempotent-Replayed'] });
   await app.register(rateLimit, { max: 1200, timeWindow: '1 minute' });
 
   app.setErrorHandler((err: Error, _req, reply) => {
@@ -41,7 +51,11 @@ export async function buildApp() {
     const status = (err as { statusCode?: number }).statusCode;
     if (status && status < 500) return reply.status(status).send({ error: err.message });
     app.log.error(err);
-    return reply.status(500).send({ error: 'Internal server error' });
+    // database not reachable: a temporary condition the client may retry (money calls keep their Idempotency-Key)
+    const pg = err as { code?: string };
+    if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', '57P01', '57P03', '08006', '08001', '53300'].includes(pg.code ?? '') || /Connection terminated|timeout exceeded when trying to connect/i.test(err.message))
+      return reply.status(503).send({ error: 'Temporarily unavailable, please retry', code: 'TEMPORARILY_UNAVAILABLE' });
+    return reply.status(500).send({ error: 'Internal server error', code: 'OPERATIONAL_ERROR' });
   });
 
   // Production readiness: every API route must declare its commercial feature (enforced by the guard).
