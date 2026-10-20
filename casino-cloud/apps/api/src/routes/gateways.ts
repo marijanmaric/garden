@@ -11,7 +11,7 @@ import { confirmHandpayReset } from '../services/handpays';
 import { holdTicket, releaseTicketHold } from '../services/ticket-holds';
 import { assertHoldAllowed } from '../services/tito';
 import { closeCashlessSession, endTransfer, markTransferSent, openCashlessSession, requestTransfer } from '../services/cashless';
-import { can, loadEntitlements, requireFeature } from '../services/entitlements';
+import { EntitlementError, loadEntitlements, requireFeature } from '../services/entitlements';
 
 /**
  * Entitlements at the device API: physical facts (machine events, acks, the end of something already started,
@@ -67,7 +67,13 @@ export async function gatewayRoutes(app: FastifyInstance) {
     return withTransaction(pool, async (db) => {
       const m = (await db.query('SELECT id FROM machines WHERE org_id = $1 AND casino_id = $2 AND machine_code = $3', [gw.orgId, gw.casinoId, body.machineId])).rows[0];
       if (!m) return { ok: false, reason: 'UNKNOWN_MACHINE' };
-      if (!can(await loadEntitlements(gw.orgId), 'tito.machine')) return { ok: false, reason: 'MODULE_NOT_ENTITLED' };
+      // no new ticket business without the module; the reason tells the machine why (not purchased / off / lapsed)
+      try {
+        requireFeature(await loadEntitlements(gw.orgId), 'tito.machine');
+      } catch (err) {
+        if (err instanceof EntitlementError) return { ok: false, reason: err.code };
+        throw err;
+      }
       const blocked = await assertHoldAllowed(db, gw.orgId, gw.casinoId);
       if (blocked) return { ok: false, reason: blocked };
       return holdTicket(db, { orgId: gw.orgId, barcode: body.barcode, machineId: m.id });

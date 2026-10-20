@@ -1,6 +1,6 @@
 import { writeAudit, type PoolClient } from '@m1/database';
 import { VAULT_SESSION_TRANSITIONS, denominationTotal, type CashCountContext, type VaultSessionStatus } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import type { Actor } from './players';
 import { railOnLedger } from './rails';
 
@@ -58,6 +58,10 @@ export async function openVaultSession(db: Db, a: ScopedActor, input: { vaultId:
   const v = await db.query('SELECT id, casino_id FROM vaults WHERE id = $1 AND org_id = $2 AND active', [input.vaultId, a.orgId]);
   if (!v.rowCount || !a.casinoIds.includes(v.rows[0].casino_id)) throw new HttpError(404, 'Vault not found');
   const casinoId = v.rows[0].casino_id;
+  // a vault on the ledger is operated together with the cash rail (its counts are verified by the cash services):
+  // refuse before anything is created instead of leaving a session that can never be verified
+  if ((await railOnLedger(db, a.orgId, 'VAULT', casinoId)) && !(await railOnLedger(db, a.orgId, 'CASH', casinoId)))
+    throw stateError(409, 'RAIL_LEGACY', 'The vault is on the ledger but Cash is not: ledger vault operations need the CASH rail on the ledger');
   let s;
   try {
     s = (await db.query(

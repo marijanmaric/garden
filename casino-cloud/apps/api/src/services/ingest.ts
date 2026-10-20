@@ -339,10 +339,14 @@ async function issueMachineTicket(db: PoolClient, ctx: { orgId: string; casinoId
  * a ticket that is not VALID here therefore indicates fraud or a sync problem and raises an alert.
  */
 async function redeemMachineTicket(db: PoolClient, ctx: { orgId: string; casinoId: string; machineId: string }, ev: MachineEvent, label: string, out: BusMessage[]) {
+  // A ticket this machine validated (hold) is committed by its acceptance, exactly like on the ledger (Step 7c):
+  // otherwise it stayed HELD, went back to VALID after the hold expired and could be paid a second time.
   const r = await db.query(
-    `UPDATE tickets SET status = 'REDEEMED', redeemed_at = $3, redeemed_machine_id = $4
-     WHERE org_id = $1 AND barcode = $2 AND status = 'VALID' RETURNING id`,
-    [ctx.orgId, ev.ticketBarcode, ev.timestamp, ctx.machineId],
+    `UPDATE tickets SET status = 'REDEEMED', redeemed_at = $3, redeemed_machine_id = $4, hold_id = NULL, hold_until = NULL, hold_source = NULL, hold_machine_id = NULL
+     WHERE org_id = $1 AND barcode = $2
+       AND (status = 'VALID' OR (status = 'HELD' AND hold_machine_id = $4 AND hold_id = $5::uuid))
+     RETURNING id`,
+    [ctx.orgId, ev.ticketBarcode, ev.timestamp, ctx.machineId, ev.holdId ?? null],
   );
   if (r.rowCount) {
     await db.query(`INSERT INTO ticket_events (org_id, ticket_id, action, machine_id, created_at) VALUES ($1,$2,'REDEEMED',$3,$4)`, [ctx.orgId, r.rows[0].id, ctx.machineId, ev.timestamp]);
