@@ -58,7 +58,7 @@ export async function writeAudit(db: pg.Pool | pg.PoolClient, e: AuditEntry): Pr
     );
     if (own) await client.query('COMMIT');
   } catch (err) {
-    if (own) await client.query('ROLLBACK');
+    if (own) await client.query('ROLLBACK').catch(() => undefined);
     throw err;
   } finally {
     if (own) (client as pg.PoolClient).release();

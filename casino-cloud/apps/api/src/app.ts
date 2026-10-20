@@ -54,7 +54,7 @@ export async function buildApp() {
     app.log.error(err);
     // database not reachable: a temporary condition the client may retry (money calls keep their Idempotency-Key)
     const pg = err as { code?: string };
-    if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', '57P01', '57P03', '08006', '08001', '53300'].includes(pg.code ?? '') || /Connection terminated|timeout exceeded when trying to connect/i.test(err.message))
+    if (['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', '57P01', '57P03', '08006', '08001', '53300'].includes(pg.code ?? '') || /Connection terminated|timeout exceeded when trying to connect/i.test(err.message))
       return reply.status(503).send({ error: 'Temporarily unavailable, please retry', code: 'TEMPORARILY_UNAVAILABLE' });
     return reply.status(500).send({ error: 'Internal server error', code: 'OPERATIONAL_ERROR' });
   });
