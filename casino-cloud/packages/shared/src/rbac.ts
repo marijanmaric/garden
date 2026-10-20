@@ -28,6 +28,8 @@ export const PERMISSIONS = [
   'simulation.control',
   'settings.manage',
   'player.view',
+  /** Register players, issue / replace / block cards, record the identity verification (cage onboarding). */
+  'player.manage',
   'ticket.payout',
   'cash.transact',
   'jackpot.view',
@@ -59,7 +61,7 @@ export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'alert.view', 'alert.manage', 'player.view', 'jackpot.view', 'gateway.view', 'ticket.view', 'cashier.supervise',
     'report.view',
   ],
-  CASHIER: ['dashboard.view', 'casino.view', 'ticket.view', 'ticket.payout', 'cash.transact', 'player.view', 'alert.view'],
+  CASHIER: ['dashboard.view', 'casino.view', 'ticket.view', 'ticket.payout', 'cash.transact', 'player.view', 'player.manage', 'alert.view'],
   ATTENDANT: [
     'dashboard.view', 'casino.view', 'machine.view', 'machine.command', 'floor.view', 'alert.view', 'alert.manage',
     'player.view', 'ticket.view', 'ticket.payout', 'cash.transact',

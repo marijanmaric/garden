@@ -11,6 +11,7 @@
     "reset": "tsx src/cli.ts reset",
     "setup": "tsx src/cli.ts setup",
     "platform-admin": "tsx src/cli.ts platform-admin",
+    "gateway": "tsx src/cli.ts gateway",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {

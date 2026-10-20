@@ -28,6 +28,7 @@ import { machineMoneyRoutes } from './routes/machine-money';
 import { operatorRoutes } from './routes/operator';
 import { orgRoutes } from './routes/org';
 import { platformRoutes } from './routes/platform';
+import { playerRoutes } from './routes/players';
 
 export const redactUrl = (url: string) => url.replace(/([?&]token=)[^&]*/gi, '$1[redacted]');
 
@@ -72,7 +73,7 @@ export async function buildApp() {
 
   for (const routes of [authRoutes, dashboardRoutes, machineRoutes, floorRoutes, accountingRoutes, alertRoutes, auditRoutes, gatewayRoutes, casinoRoutes, streamRoutes,
     ticketRoutes, cashierRoutes, cashRoutes, employeeRoutes, reportRoutes, ledgerRoutes, moneyRoutes, cashOpsRoutes, handpayRoutes, machineMoneyRoutes, operatorRoutes,
-    orgRoutes, platformRoutes])
+    orgRoutes, platformRoutes, playerRoutes])
     await app.register(routes);
 
   return app;
