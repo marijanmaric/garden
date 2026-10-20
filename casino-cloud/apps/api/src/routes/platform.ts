@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { withTransaction, type PoolClient } from '@m1/database';
 import {
-  LIMIT_DEFS, LIMIT_KEYS, PRODUCT_MODULES, PRODUCT_MODULE_DEFS, SUBSCRIPTION_STATUSES, evaluateModules,
+  LIMIT_DEFS, LIMIT_KEYS, PRODUCT_MODULES, PRODUCT_MODULE_DEFS, SUBSCRIPTION_STATUSES, evaluateModules, ledgerGaps,
   type LimitKey, type ProductModule,
 } from '@m1/shared';
 import { HttpError, guard } from '../auth';
@@ -323,7 +323,7 @@ export async function platformRoutes(app: FastifyInstance) {
     const r = await pool.query(
       `SELECT p.*, (SELECT count(*)::int FROM subscriptions s WHERE s.plan_id = p.id) AS subscriptions
        FROM plans p ORDER BY p.code, p.version DESC`);
-    return { plans: r.rows };
+    return { plans: r.rows.map((p) => ({ ...p, ledgerGaps: ledgerGaps(p.modules) })) };
   });
 
   const planBody = z.object({
@@ -350,7 +350,8 @@ export async function platformRoutes(app: FastifyInstance) {
       )).rows[0].id;
       const a: AdminActor = adminActor(req);
       await auditChange(db, a, a.orgId, { action: 'plan.created', entityType: 'plan', entityId: id, old: null, new: { code: body.code, version, modules, limits: body.limits, priceCents: body.priceCents ?? null }, reason: body.reason });
-      return { id, code: body.code, version };
+      // not refused (legacy operation is supported), but never silent: rails of this plan that cannot reach the ledger
+      return { id, code: body.code, version, ledgerGaps: ledgerGaps(modules) };
     });
   });
 

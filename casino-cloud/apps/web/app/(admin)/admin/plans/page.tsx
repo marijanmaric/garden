@@ -7,7 +7,7 @@ import { api, useApi } from '@/lib/api';
 import { Card, ErrorNote, Field, Modal, PageHeader } from '@/components/ui';
 import { ReasonDialog } from '@/components/admin-ui';
 
-type Plan = { id: string; code: string; version: number; name: string; description: string | null; active: boolean; modules: string[]; limits: Record<string, number>; price_cents: number | null; currency: string; billing_interval: string; subscriptions: number };
+type Plan = { ledgerGaps: Array<{ rail: string; needs: string[] }>; id: string; code: string; version: number; name: string; description: string | null; active: boolean; modules: string[]; limits: Record<string, number>; price_cents: number | null; currency: string; billing_interval: string; subscriptions: number };
 
 function PlanEditor({ base, onClose, onDone }: { base: Plan | null; onClose: () => void; onDone: () => void }) {
   const [f, setF] = useState({
@@ -75,7 +75,7 @@ export default function PlansPage() {
       <ErrorNote error={error} />
       <Card bodyClass="overflow-x-auto">
         <table className="table">
-          <thead><tr><th>Plan</th><th>Version</th><th>Modules</th><th>Limits</th><th>Price</th><th className="text-right">Subscriptions</th><th>Offered</th><th /></tr></thead>
+          <thead><tr><th>Plan</th><th>Version</th><th>Modules</th><th>Limits</th><th>Ledger</th><th>Price</th><th className="text-right">Subscriptions</th><th>Offered</th><th /></tr></thead>
           <tbody>
             {data?.plans.map((p) => (
               <tr key={p.id}>
@@ -83,6 +83,7 @@ export default function PlansPage() {
                 <td>v{p.version}</td>
                 <td className="max-w-xs text-xs">{p.modules.join(', ')}</td>
                 <td className="text-xs">{Object.entries(p.limits).map(([k, v]) => `${k.replace('MAX_', '').toLowerCase()} ${v}`).join(' · ') || 'none'}</td>
+                <td className="text-xs" data-testid={`ledger-${p.code}`}>{p.ledgerGaps.length ? <span className="text-amber-700 dark:text-amber-400">{p.ledgerGaps.map((g) => `${g.rail} needs ${g.needs.join('+')}`).join('; ')}: stays legacy</span> : <span className="text-emerald-600">ledger-ready</span>}</td>
                 <td className="whitespace-nowrap text-xs">{p.price_cents != null ? `${formatEuro(p.price_cents / 100)} / ${p.billing_interval.toLowerCase()}` : '-'}</td>
                 <td className="text-right tabular-nums">{p.subscriptions}</td>
                 <td>{p.active ? 'yes' : 'no'}</td>

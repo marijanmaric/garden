@@ -14,6 +14,7 @@ export interface ModuleCardData {
   operational: 'OPERATIONAL' | 'LEGACY' | 'FROZEN' | 'NOT_AVAILABLE';
   rails: Array<{ rail: string; onLedger: number; of: number; mode: string; frozen: number }>;
   reason: string;
+  limitations: string[];
   canEnable: boolean; enableBlockers: string[]; canDisable: boolean; disableBlockers: string[];
   limits: UsageRow[];
 }
@@ -86,6 +87,7 @@ export function ModuleCard({ m, actions }: { m: ModuleCardData; actions?: React.
         ))}
       </dl>
       <p className="mt-3 text-sm" data-testid="module-reason">{m.reason}</p>
+      {m.limitations?.map((l) => <p key={l} className="mt-1 text-xs text-amber-700 dark:text-amber-400" data-testid="module-limitation">{l}</p>)}
       {m.requiresWhy && m.state === 'DEPENDENCY_MISSING' && <p className="mt-1 text-xs text-sub">{m.requiresWhy}</p>}
       {m.limits.length > 0 && <div className="mt-2 border-t border-line pt-2">{m.limits.map((l) => <UsageBar key={l.key} row={l} />)}</div>}
       {!m.canDisable && m.disableBlockers.length > 0 && m.enabled && (

@@ -1,7 +1,7 @@
 import type { PoolClient } from '@m1/database';
 import { writeAudit } from '@m1/database';
 import {
-  PRODUCT_MODULE_DEFS, dependentsOf,
+  PRODUCT_MODULE_DEFS, RAIL_MODULE, dependentsOf, ledgerGaps,
   type LimitKey, type ProductModule,
 } from '@m1/shared';
 import { HttpError } from '../auth';
@@ -169,12 +169,22 @@ export async function moduleCards(db: Db, e: OrgEntitlements) {
     else if (frozen) reason = 'Temporarily frozen by reconciliation until the difference is explained.';
     else if (operational === 'LEGACY') reason = 'Enabled; the money rail still runs in legacy mode until the cutover.';
     else reason = 'Enabled and operational.';
+    // what the purchased module set cannot do (a payout path needs Cash or Cashless): shown, never silently granted
+    const has = (x: ProductModule) => e.inUse.has(x);
+    const limitations: string[] = [];
+    if (m.module === 'TITO' && m.purchased && !has('CASH')) limitations.push('Tickets are accepted and redeemed at machines only: cage redemption and ticket sale need Cash.');
+    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && !has('CASHLESS')) limitations.push('Handpays can be created and approved but not paid: payment needs Cash (drawer) or Cashless (wallet).');
+    if (m.module === 'HANDPAY' && m.purchased && !has('CASH') && has('CASHLESS')) limitations.push('Handpays are paid into player wallets only: cash payment needs Cash.');
+    if (m.module === 'CASHLESS' && m.purchased && !has('CASH')) limitations.push('Wallets are funded and emptied through machines only: cage deposit and withdrawal need Cash.');
+    // ledger readiness (the existing cutover order, not a new rule): see ledgerGaps in @m1/shared
+    for (const g of ledgerGaps(e.inUse).filter((x) => def.rails.includes(x.rail)))
+      if (m.purchased) limitations.push(`${g.rail} money cannot run on the ledger without ${g.needs.join(', ')} (${g.needs.map((b) => PRODUCT_MODULE_DEFS[RAIL_MODULE[b]].name).join(', ')} not purchased): it stays in legacy mode without ledger reconciliation.`);
     const disableBlock = m.enabled && m.purchased && m.module !== 'CORE' ? await disableBlockers(db, e, m.module) : [];
     const enableBlock = !m.enabled && m.purchased ? await enableBlockers(db, e, m.module) : [];
     return {
       module: m.module, name: def.name, description: def.description, capabilities: def.capabilities,
       requires: def.requires.filter((d) => d !== 'CORE'), requiresWhy: def.requiresWhy ?? null, dependents: dependentsOf(m.module),
-      purchased: m.purchased, source: m.source, enabled: m.enabled, missing: m.missing, effective: m.effective, state, operational, rails, reason,
+      purchased: m.purchased, source: m.source, enabled: m.enabled, missing: m.missing, effective: m.effective, state, operational, rails, reason, limitations,
       canEnable: !m.enabled && m.purchased && enableBlock.length === 0, enableBlockers: enableBlock,
       canDisable: m.enabled && m.purchased && m.module !== 'CORE' && disableBlock.length === 0, disableBlockers: disableBlock,
       limits: (MODULE_LIMITS[m.module] ?? []).map((k) => usage.find((u) => u.key === k)!),
@@ -267,8 +277,9 @@ export async function createMachine(
   let id: string;
   try {
     id = (await db.query(
-      `INSERT INTO machines (org_id, casino_id, floor_id, machine_code, asset_no, serial_number, game, denomination)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+      // a casino with exactly one gateway: the new machine is served by it (several gateways: assigned on site)
+      `INSERT INTO machines (org_id, casino_id, floor_id, machine_code, asset_no, serial_number, game, denomination, gateway_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,(SELECT min(g.id::text)::uuid FROM gateways g WHERE g.casino_id = $2 AND g.org_id = $1 HAVING count(*) = 1)) RETURNING id`,
       [orgId, input.casinoId, input.floorId ?? null, input.machineCode, input.assetNo, input.serialNumber ?? null, input.game ?? null, input.denomination ?? 0.01],
     )).rows[0].id;
   } catch (err) {

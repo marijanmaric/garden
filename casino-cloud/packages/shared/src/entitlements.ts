@@ -1,3 +1,4 @@
+import { CUTOVER_PREREQUISITES } from './money/cutover';
 /**
  * Commercial entitlements: which product modules an organisation (the SaaS customer) has bought.
  *
@@ -127,6 +128,28 @@ export function featureAvailable(feature: Feature, effective: ReadonlySet<Produc
 export const RAIL_MODULE: Record<ModuleRail, ProductModule> = {
   CASH: 'CASH', VAULT: 'VAULT', HANDPAY: 'HANDPAY', TITO: 'TITO', CASHLESS: 'CASHLESS', MACHINE: 'MACHINE',
 };
+
+/**
+ * Ledger readiness of a module set, derived from the existing money design (no new rule): the cutover order
+ * (CUTOVER_PREREQUISITES: TITO and HANDPAY need CASH, CASH needs VAULT, MACHINE needs VAULT, TITO, HANDPAY and
+ * CASHLESS), applied transitively, plus the one operational coupling the cash services enforce: ledger vault
+ * operations need CASH on the ledger as well (cash-ops cashOnLedger checks VAULT and CASH). A purchased rail
+ * whose needs are not purchased cannot operate on the ledger: its money stays in legacy mode. Reported (plans,
+ * onboarding, module cards), never silently granted. The CASHLESS rail is cut over for every organisation at
+ * onboarding (it holds no money until wallets exist), so it never counts as missing.
+ */
+const LEDGER_NEEDS: Record<ModuleRail, readonly ModuleRail[]> = { ...CUTOVER_PREREQUISITES, VAULT: ['CASH'] };
+const RAIL_ORDER: readonly ModuleRail[] = ['VAULT', 'CASH', 'HANDPAY', 'TITO', 'CASHLESS', 'MACHINE'];
+export function ledgerGaps(modules: Iterable<ProductModule>): Array<{ rail: ModuleRail; needs: ModuleRail[] }> {
+  const has = new Set(modules);
+  const needsOf = (rail: ModuleRail) => {
+    const seen = new Set<ModuleRail>();
+    const visit = (r: ModuleRail) => LEDGER_NEEDS[r].forEach((x) => { if (!seen.has(x) && x !== rail) { seen.add(x); visit(x); } });
+    visit(rail);
+    return RAIL_ORDER.filter((r) => seen.has(r) && r !== 'CASHLESS' && !has.has(RAIL_MODULE[r]));
+  };
+  return RAIL_ORDER.filter((rail) => has.has(RAIL_MODULE[rail])).map((rail) => ({ rail, needs: needsOf(rail) })).filter((g) => g.needs.length > 0);
+}
 
 // ---- limits ----------------------------------------------------------------------------------------
 

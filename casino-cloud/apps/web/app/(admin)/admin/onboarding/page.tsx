@@ -9,7 +9,7 @@ import { ModuleStateBadge, type ModuleCardData } from '@/components/admin-ui';
 import { clsx } from '@/components/clsx';
 
 const STEPS = ['Organization', 'Plan', 'Modules', 'Casino', 'Admin user', 'Machines', 'Configuration'] as const;
-type Plan = { id: string; code: string; name: string; version: number; active: boolean; description: string | null; modules: string[]; limits: Record<string, number> };
+type Plan = { ledgerGaps: Array<{ rail: string; needs: string[] }>; id: string; code: string; name: string; version: number; active: boolean; description: string | null; modules: string[]; limits: Record<string, number> };
 
 /**
  * Onboarding: Organization -> Plan -> Modules -> Casino -> Admin user (the organisation is created here, in one
@@ -111,6 +111,7 @@ export default function OnboardingPage() {
                 <div className="font-semibold">{p.name} <span className="text-xs text-sub">v{p.version}</span></div>
                 <div className="text-xs text-sub">{p.description}</div>
                 <div className="mt-2 text-xs">{p.modules.map((m) => PRODUCT_MODULE_DEFS[m as ProductModule]?.name ?? m).join(' · ')}</div>
+                {p.ledgerGaps.length > 0 && <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">Not ledger-ready: {p.ledgerGaps.map((g) => `${g.rail} needs ${g.needs.join(' + ')}`).join('; ')} (money stays legacy)</div>}
                 <div className="mt-1 text-[11px] text-sub">{Object.entries(p.limits).map(([k, v]) => `${k.replace('MAX_', '').toLowerCase()} ${v}`).join(' · ') || 'no limits'}</div>
               </button>
             ))}

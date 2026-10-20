@@ -69,3 +69,12 @@ test('subscription lifecycle: only TRIAL / ACTIVE before ends_at are usable', ()
   for (const s of ['SUSPENDED', 'EXPIRED', 'CANCELLED'] as const) assert.equal(subscriptionUsable(s, null, now), false);
   assert.equal(subscriptionUsable(null, null, now), false);
 });
+
+test('ledger readiness follows the existing money design: TITO / HANDPAY need CASH (and VAULT), vault operations need CASH, MACHINE needs TITO and HANDPAY', async () => {
+  const { ledgerGaps } = await import('./entitlements');
+  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'REPORTING']), [{ rail: 'TITO', needs: ['VAULT', 'CASH'] }]);
+  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'HANDPAY']), [{ rail: 'HANDPAY', needs: ['VAULT', 'CASH'] }, { rail: 'TITO', needs: ['VAULT', 'CASH'] }]);
+  assert.deepEqual(ledgerGaps(['CORE', 'CASHLESS', 'MACHINE', 'VAULT']), [{ rail: 'VAULT', needs: ['CASH'] }, { rail: 'MACHINE', needs: ['CASH', 'HANDPAY', 'TITO'] }]);
+  assert.deepEqual(ledgerGaps(['CORE', 'CASH', 'VAULT', 'TITO', 'HANDPAY']), []);
+  assert.deepEqual(ledgerGaps(['CORE', 'TITO', 'HANDPAY', 'CASH', 'VAULT', 'CASHLESS', 'MACHINE']), []);
+});
