@@ -339,10 +339,20 @@ reports, reconciliation and the day close follow the same entitlements. Platform
 Design, dependencies, error codes, limits, lifecycle and the safe defaults for upgraded customers:
 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
-Production configuration: `NODE_ENV=production` refuses to start with the default or a short (< 32 characters)
-`JWT_SECRET` / `PII_HASH_SECRET` unless `DEMO_MODE=true` (the compose demo sets it); set `CORS_ORIGIN`. Create the
-first platform administrator of an upgraded installation with
-`npm run platform-admin -w @m1/database -- <email> <password> [name]`.
+### Production deployment
+
+The image runs with `NODE_ENV=production`. The API refuses to start with a default or short (< 32 characters)
+`JWT_SECRET` / `PII_HASH_SECRET`, without an explicit `CORS_ORIGIN` (no `*`), or with `AUTO_SEED=true`; only the
+demo compose stack (`DEMO_MODE=true`) skips these checks. See [docs/production.env.example](docs/production.env.example).
+
+1. Start with the production environment: the API migrates an empty database and creates nothing else.
+2. First platform administrator: `npm run platform-admin -w @m1/database -- <email> <password 12+> [name]` (audited).
+3. Onboard the customer in `/admin/onboarding` (plan, modules, casino, admin, machines). Prefer a ledger-ready plan
+   (Cash Operations or Enterprise): the plan list shows which rails of a plan cannot run on the ledger.
+4. Register each casino gateway: `npm run gateway -w @m1/database -- <org-slug> <casino-code> <device-id> [name]`
+   prints `GATEWAY_ID` / `GATEWAY_KEY` once (only a hash is stored) and assigns the casino's machines.
+5. The customer performs the rail cutover with verified counts in Money control, then operates.
+Run a single API instance (in-process event bus); keep `PII_HASH_SECRET` unchanged after go-live.
 
 ### Accounting definitions
 
@@ -365,7 +375,8 @@ Business day = calendar day in the casino's timezone.
 `/audit`, `/audit/verify`, `/gateways`, `/simulation`, `/players`, `/jackpots`, `/employees`, `/stream` (SSE),
 `/tickets`, `/tickets/lookup/:barcode`, `/tickets/redeem|issue`, `/tickets/:id/cancel|void|reprint|adjust`,
 `/cashier/desks|session|session/open|session/close|sessions|transactions|handpays`, `/cash/overview|collections`,
-`/reports`, `/reports/:key?format=json|csv|xlsx|pdf`, `/org`, `/org/modules/:module`, `/org/casinos`, `/org/machines`.
+`/reports`, `/reports/:key?format=json|csv|xlsx|pdf`, `/org`, `/org/modules/:module`, `/org/casinos`, `/org/machines`,
+`/players` (POST: register), `/players/:id/cards|status|verification`, `/players/cards/:id/status|replace`.
 
 Platform API (platform administrators only): `/platform/organizations[/:id[/status|subscription|entitlements/:module|modules/:module|limits/:key|users|casinos|machines|audit]]`,
 `/platform/plans[/:id]`, `/platform/registry`, `/platform/audit`.

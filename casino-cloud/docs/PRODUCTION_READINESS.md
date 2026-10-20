@@ -202,3 +202,56 @@ administrator with `npm run platform-admin -w @m1/database -- <email> <password 
 | Open shifts during an inactive subscription | LOW | Money stays on the ledger; closing the shift waits for reactivation |
 | Entitlement cache (5 s TTL per process) | LOW | Invalidated on every change in the process; other API instances see the change within 5 s |
 | Login rate limit is per address | LOW | Shared NAT addresses share the limit |
+
+## Part 4: Final acceptance before the first pilot (October 2026)
+
+### Findings and resolution
+
+| ID | Severity | Finding | Type | Resolution |
+|---|---|---|---|---|
+| F1 | CRITICAL | `AUTO_SEED` defaulted to true in production: an empty production database received the demo accounts with the password `demo`, including a platform administrator | security, configuration | fixed: production never seeds; `AUTO_SEED=true` refuses the start unless `DEMO_MODE=true` |
+| F2 | CRITICAL | Legacy TITO (rail not cut over): a machine acceptance (`TITO_IN` with `holdId`) of a ticket the same machine had held was rejected; the ticket stayed HELD, returned to VALID after the hold expired and could be paid a second time | money | fixed: the acceptance commits its own hold, as on the ledger (Step 7c rule) |
+| F3 | CRITICAL (commercial) | The plans TITO_STARTER, TITO_HANDPAY and CASHLESS_MACHINE cannot run their money on the ledger: the existing cutover order needs CASH for TITO and HANDPAY, MACHINE needs TITO and HANDPAY, ledger vault operations need CASH. Customer B cannot pay a handpay at all, customer D cannot move wallet money at all | product definition | not changed (money architecture); made visible: `ledgerGaps` in plans, onboarding and module cards. First pilot on CASH_OPERATIONS or ENTERPRISE, or a business decision before A / B / D are sold |
+| F4 | HIGH | Production accepted an open CORS configuration (warning only) | security | fixed: explicit `CORS_ORIGIN` required, `*` and paths refused |
+| F5 | HIGH | No API or UI to register players, issue / block / replace cards, record the identity verification | operations | fixed: `/api/v1/players*` (permission `player.manage`), players page |
+| F6 | HIGH | A new customer's gateway could not be registered, nor machines assigned, without SQL | operations | fixed: `npm run gateway -w @m1/database -- <org-slug> <casino-code> <device-id>`; new machines join the casino's only gateway |
+| F7 | HIGH | A dropped database connection crashed the API process | reliability | fixed: idle and checked-out connection errors handled; 503 `TEMPORARILY_UNAVAILABLE` |
+| F8 | HIGH | A ledger vault session could be opened where CASH is not on the ledger and could never be verified | money (stuck state) | fixed: refused before anything is created (`RAIL_LEGACY`) |
+| F9 | MEDIUM | The SSE stream reflected any Origin | security | fixed: same allow-list as the API |
+| F10 | MEDIUM | The SSE token (JWT in the query string) was written to the request log | security | fixed: redacted |
+| F11 | MEDIUM | Platform administrator bootstrap left no audit trail and needed a migrated database | audit | fixed: migrates, audits (`SYSTEM` / `cli`), email validated |
+| F12 | MEDIUM | Operational states only as text | UX / API | fixed: codes `RAIL_LEGACY`, `RAIL_ON_LEDGER`, `RAIL_FROZEN`, `BUSINESS_DATE_CLOSED`, `INSUFFICIENT_BALANCE`, `IDEMPOTENCY_CONFLICT`, `OPERATIONAL_ERROR`, `TEMPORARILY_UNAVAILABLE` next to the entitlement codes |
+| F13 | MEDIUM | On a legacy TITO rail a ticket void needs no second person (four eyes exist on the ledger only) | money control | open: run TITO on the ledger (F3) |
+| F14 | MEDIUM | A casino admin can reset the password of / deactivate another casino admin (same role) | security | open |
+| F15 | LOW | A JWT stays valid for 12 h after a password change (deactivation, role and organisation status act at once) | security | open |
+| F16 | LOW | With an inactive subscription an open shift cannot be closed until reactivation (money stays on the ledger) | operations | open |
+| F17 | LOW | JWT algorithm not pinned; no security headers on the web app | security | fixed: HS256 only (`alg=none` refused), X-Frame-Options, nosniff, Referrer-Policy |
+| F18 | LOW | Login timing reveals whether an e-mail exists; login rate limit per address | security | open |
+| F19 | LOW | Gateway queue written without fsync; a permanently rejected batch blocks the queue (events stay durable) | reliability | open |
+| F20 | LOW | Event bus and entitlement cache are per process: run one API instance (or add a shared bus) | operations | open, documented |
+
+### Business-day close: what blocks
+
+Blocks: a past date only, not yet closed; an active freeze of a rail in use or GLOBAL; an unexplained pending
+deferred money event of a rail in use; a reconciliation mismatch of a rail in use or of the global ledger invariants.
+Does not block (shown as information): open drawers and pending approvals (they book on the open date), pending
+handpays, outstanding tickets and pending wallet transfers (their liabilities and reservations are reconciled),
+requested vault movements (no money moved yet), checks and freezes of rails whose module is not in use or switched off.
+Closed dates take no booking (database guard); a late economic event is deferred and needs the four-eyes late-event process.
+
+### Acceptance evidence
+
+| Suite | Result |
+|---|---|
+| API (PostgreSQL 16) | 361 / 361 (new: 11 five-customer acceptance, 4 production configuration, 1 SSE isolation) |
+| Shared / adapters / gateway / web unit tests | 38 / 4 / 1 / 11 |
+| Typecheck (all workspaces), Next.js production build | clean (no lint configured) |
+| Browser: SaaS matrix, five customers, operations, responsive (tablet and phone, 26 page / viewport pairs) | 16 / 16, 0 browser errors, 0 unexpected failed API requests |
+| Browser: Enterprise operator flows (Step 7e) | 16 / 16 |
+| Browser: legacy smoke (all pages, report export) | 0 errors |
+| Docker production bootstrap (no demo): 3 refused misconfigurations, empty database, CLI platform admin, onboarding, CLI gateway | passed, 0 money transactions, no secret or token in logs |
+| Docker demo stack: db, api, gateway, web | healthy, 13 migrations |
+| Docker upgrades 006, 7b, 7c, 7d, 7e to current | money fingerprint identical for each, 0 unbalanced transactions |
+| Gateway offline (API stopped 25 s) and database outage | 53 events buffered and delivered once, 0 duplicates, economic time kept; API stays up, 503 during the outage |
+
+Upgrades from 005 and 7a are covered at database level by the API upgrade suites (`step5-upgrade`, `step7a-upgrade`).
