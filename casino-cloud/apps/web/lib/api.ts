@@ -27,7 +27,7 @@ export function newIdempotencyKey(prefix = 'k'): string {
 }
 
 /** Money / cashier actions. The API requires an Idempotency-Key on these. */
-const MONEY_ROUTE = /^\/(tickets\/(redeem|issue|[^/]+\/(cancel|void|reprint|adjust|approval-request))|cashier\/(session\/(open|close)|transactions|handpays\/[^/]+|wallet\/(deposit|withdraw|approval-request))|cash\/(collections|movements(\/[^/]+\/(confirm|cancel))?)|transactions\/adjustments|vault\/.+|approvals\/[^/]+\/decide|handpays\/.+|machines\/.+\/(hopper-fills|collections\/count|confirm|verify)|money\/(reconciliation|resolutions|freezes\/[^/]+\/lift|day-close|cutover|counts(\/[^/]+\/verify)?|deferred\/[^/]+\/late-booking))$/;
+const MONEY_ROUTE = /^\/(tickets\/(redeem|issue|[^/]+\/(cancel|void|reprint|adjust|approval-request))|cashier\/(session\/(open|close)|transactions|handpays\/[^/]+|wallet\/(deposit|withdraw|approval-request))|cash\/(collections|movements(\/[^/]+\/(confirm|cancel))?)|transactions\/adjustments|vault\/.+|approvals\/[^/]+\/decide|handpays\/.+|machines\/.+\/(hopper-fills|collections\/count|confirm|verify|disposition)|money\/(reconciliation|resolutions|freezes\/[^/]+\/lift|day-close|cutover|counts(\/[^/]+\/verify)?|deferred\/[^/]+\/late-booking))$/;
 
 async function request(path: string, init: RequestInit & { json?: unknown; idempotencyKey?: string } = {}) {
   const { json, idempotencyKey, ...rest } = init;

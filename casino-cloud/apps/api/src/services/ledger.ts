@@ -164,6 +164,9 @@ async function execute(db: Db, input: ExecuteMoneyInput, reversalOf: string | nu
     throw err;
   }
   if (!input.dedupeKey || input.dedupeKey.length > 300) throw new HttpError(400, 'Invalid dedupe key');
+  // V1: a manual correction always needs a second person (also a database check, migration 014).
+  if (input.type === 'ADJUSTMENT' && (!input.approvedBy || !input.actor.employeeId || input.approvedBy === input.actor.employeeId))
+    throw stateError(409, 'APPROVAL_REQUIRED', 'An ADJUSTMENT needs a second person (four eyes): requester and approver must be two employees');
   const hash = requestHash(input, list, reversalOf);
 
   // 1. Org lock (the same lock writeAudit takes): keeps the lock order fixed and the audit chain linear.

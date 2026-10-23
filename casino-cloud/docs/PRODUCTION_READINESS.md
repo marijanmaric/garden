@@ -348,16 +348,57 @@ service call.
 
 | ID | Severity | Finding | Status |
 |---|---|---|---|
-| V1 | HIGH | Explaining a credit-changing machine exception (four eyes) releases the settlement block; no ledger correction exists, so the unbooked amount is booked as GAMING_RESULT at the next settlement (proven: a 25.00 voucher printed in D became a 25.00 gaming win). Pre-existing since 7d for every MACHINE customer (e.g. a hopper payout exception), reachable for D through F3 | open: needs a decision (see below) |
-| V2 | MEDIUM | There is no four-eyes manual ledger correction at all. `POST /transactions/adjustments` writes only the legacy `gaming_transactions` table, by one person (audited) | open |
+| V1 | HIGH | Explaining a credit-changing machine exception (four eyes) releases the settlement block; no ledger correction exists, so the unbooked amount is booked as GAMING_RESULT at the next settlement (proven: a 25.00 voucher printed in D became a 25.00 gaming win). Pre-existing since 7d for every MACHINE customer (e.g. a hopper payout exception), reachable for D through F3 | fixed in Part 7 (migration 014) |
+| V2 | MEDIUM | There is no four-eyes manual ledger correction at all. `POST /transactions/adjustments` writes only the legacy `gaming_transactions` table, by one person (audited) | partly fixed in Part 7: event corrections of machine exceptions; every ledger ADJUSTMENT now needs two people (service and database). The legacy route is unchanged |
 | V3 | LOW | Part 5 said a four-eyes adjustment corrects such cases: that function does not exist (text corrected) | fixed (docs) |
 | V4 | LOW | A handpay voucher follows every ticket rule: it can expire (EXPIRED_TICKET_INCOME) and be cancelled with four eyes; a lost voucher cannot be reissued for the paid handpay | open, operational rule needed |
 
-### Customer D: operating procedure for machine event exceptions (until V1 is fixed)
+### Customer D: operating procedure for machine event exceptions
 
-1. Machines of a Cashless + Machine casino must have ticket printing and handpay jackpots disabled at the machine.
-2. `TITO_NOT_ON_LEDGER` / `HANDPAY_NOT_ON_LEDGER`: the event is kept, no money is booked, an alert is raised,
-   reconciliation lists it (`machine.events_accounted`), the machine is frozen and its settlement is skipped.
-3. If no money moved (test print, voucher destroyed in front of two people): explain with four eyes, lift the freeze.
-4. If money moved (a voucher left the floor, a jackpot was paid by hand): do NOT explain it; escalate. Explaining
-   would let the next settlement book the amount as gaming result (V1).
+See Part 7: every exception that changed a ledger machine's credit gets a disposition, never only an explanation.
+
+## Part 7: V1 fix, financial disposition of machine event exceptions (October 2026)
+
+**Rule.** An exception that changed the credit of a machine on the MACHINE ledger (a rejected CASH_IN / CASH_OUT,
+TITO_IN / TITO_OUT or CASHLESS_IN / CASHLESS_OUT after the machine's cutover) blocks the machine's credit-meter
+settlement until it has a *disposition*. An explanation (reconciliation resolution) books nothing and is refused for
+these items (`DISPOSITION_REQUIRED`). Resolution and posting are separate operations.
+
+| Disposition | When | Posting |
+|---|---|---|
+| CORRECTION | the machine reported a ticket with an amount (TITO_OUT / TITO_IN) | ADJUSTMENT of this event, amount = reported amount: TITO_OUT debits MACHINE_CREDIT and credits TITO_EXCEPTION (ticket value under investigation); TITO_IN the reverse |
+| NO_MONEY_MOVED | two people attest with evidence that the event moved no money (e.g. a duplicate ack, an empty hopper that paid nothing); refused for a ticket with an amount | none |
+| none possible | money moved and no rule determines the accounting (e.g. a hopper payout the ledger hopper cannot cover) | none: settlement stays blocked, escalate |
+
+**Workflow.** `POST /api/v1/machines/event-exceptions/:eventId/disposition` (kind, reason, evidence reference, for a
+correction the amount; permission `cashier.supervise`) creates a four-eyes request; a different person approves
+under `/api/v1/approvals/:id/decide`. On approval, in one transaction: the machine row is locked (serialised with the
+machine's ingest and settlement), the request is validated again, the ADJUSTMENT is posted (requester = actor,
+approver = approved_by, source event, reason with evidence), the disposition is stored and audited, the approval is
+executed. Any failure rolls all of it back: the request stays pending, the settlement stays blocked. UI: Reconciliation
+→ machine event exceptions ("Book correction" / "No money moved"), Approvals.
+
+**Database guarantees (migration 014).** One disposition per event (primary key); requester and approver differ;
+a correction references exactly one ADJUSTMENT of this event by the same two people and the approved amount
+(trigger); at most one ADJUSTMENT per source event (unique index); every new ADJUSTMENT has an actor and a different
+approver (check, `NOT VALID` so history is not rewritten); dispositions are immutable. Exceptions explained before
+014 are kept as `EXPLAINED_BEFORE_014` (no new block on history); that kind cannot be written afterwards.
+
+**Settlement.** Reads the open exceptions after taking the machine row lock, so it never acts on a state from before
+a disposition committed; it does not use reconciliation results.
+
+### Evidence
+
+| Suite | Result |
+|---|---|
+| API (PostgreSQL 16) | 373 / 373 (incl. `f3-verification` 11 and `v1-upgrade` 1) |
+| V1 negative control: settlement released by an explanation (old behaviour) | the V1 tests fail with `-2500 !== 0` |
+| Docker upgrades 013 (F3), c836ea1 and 006 -> 014 | money fingerprint identical |
+| Browser: Enterprise operator flows (hopper exception settled by a disposition in the UI) | 16 / 16 |
+| Browser: SaaS matrix | 17 / 17, only the intended 409 |
+
+### Remaining
+
+- The legacy `POST /transactions/adjustments` (gaming_transactions, one person) is unchanged (V2 rest).
+- TITO_EXCEPTION carries ticket values under investigation; it is not reconciled to zero automatically.
+- A hopper payout that really happened but that the ledger hopper cannot cover has no correction rule: escalation.

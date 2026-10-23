@@ -13,6 +13,7 @@ import { decideHandpayApproval } from '../services/handpays';
 import { decideException } from '../services/handpay-exceptions';
 import { decideTicketApproval } from '../services/tito';
 import { decideLateEventBooking } from '../services/late-events';
+import { decideDisposition } from '../services/exception-dispositions';
 import { loadEntitlements, requireFeature } from '../services/entitlements';
 
 /** The feature an approval belongs to (deciding it executes the action of that module). */
@@ -20,7 +21,7 @@ const APPROVAL_FEATURE: Record<string, Feature> = {
   DRAWER_SHORT_OVER: 'cash', HANDPAY_PAY: 'handpay', HANDPAY_EXCEPTION: 'handpay',
   TITO_REDEEM_CASHIER: 'tito.cashier', TITO_CANCEL: 'tito', TITO_VOID: 'tito',
   CASH_DEPOSIT: 'cashless.cashier', CASH_WITHDRAWAL: 'cashless.cashier',
-  RECONCILIATION_RESOLUTION: 'reconciliation', LATE_EVENT_BOOKING: 'reconciliation',
+  RECONCILIATION_RESOLUTION: 'reconciliation', LATE_EVENT_BOOKING: 'reconciliation', MACHINE_EXCEPTION_DISPOSITION: 'reconciliation',
 };
 
 /**
@@ -153,7 +154,8 @@ export async function cashOpsRoutes(app: FastifyInstance) {
        LEFT JOIN machines hm ON hm.id = h.machine_id
        LEFT JOIN deferred_money_events d ON a.action = 'LATE_EVENT_BOOKING' AND d.event_id::text = a.entity_id
        LEFT JOIN machines dm ON dm.id = d.machine_id
-       LEFT JOIN machine_event_exceptions x ON a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id
+       LEFT JOIN machine_event_exceptions x ON (a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id)
+         OR (a.action = 'MACHINE_EXCEPTION_DISPOSITION' AND a.entity_id = x.event_id::text)
        LEFT JOIN machines xm ON xm.id = x.machine_id
        LEFT JOIN handpay_legacy_exceptions hx ON a.entity_type = 'handpay_exception' AND hx.id::text = a.entity_id
        LEFT JOIN machines hxm ON hxm.id = hx.machine_id
@@ -181,6 +183,7 @@ export async function cashOpsRoutes(app: FastifyInstance) {
       if (ap.action === 'HANDPAY_EXCEPTION') return decideException(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'TITO_REDEEM_CASHIER' || ap.action === 'TITO_CANCEL' || ap.action === 'TITO_VOID') return decideTicketApproval(db, actorOf(req), id, body.decision, body.note);
       if (ap.action === 'LATE_EVENT_BOOKING') return decideLateEventBooking(db, actorOf(req), id, body.decision, body.note);
+      if (ap.action === 'MACHINE_EXCEPTION_DISPOSITION') return decideDisposition(db, actorOf(req), id, body.decision, body.note);
       return { approval: await decideApproval(db, actorOf(req), id, body.decision, body.note) };
     });
   });

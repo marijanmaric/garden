@@ -63,7 +63,7 @@ after(async () => {
 describe('migration state', () => {
   test('fresh database: 003 applied (004 ledger and 005 entities since Steps 3/4), no backfill migration (006) yet', async () => {
     const applied = (await pool.query('SELECT name FROM schema_migrations ORDER BY name')).rows.map((r) => r.name);
-    assert.deepEqual(applied, ['001_init.sql', '002_phase2_cash_tickets.sql', '002a_hotfix_handpay_idempotency.sql', '003_player_identity.sql', '004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql', '007_ledger_cash_ops.sql', '008_handpay_ledger.sql', '009_deferred_money_events.sql', '010_tito_ledger.sql', '011_machine_cashless_ledger.sql', '012_saas_entitlements.sql', '013_handpay_ticket_payout.sql']);
+    assert.deepEqual(applied, ['001_init.sql', '002_phase2_cash_tickets.sql', '002a_hotfix_handpay_idempotency.sql', '003_player_identity.sql', '004_money_ledger.sql', '005_money_entities.sql', '006_money_cutover.sql', '007_ledger_cash_ops.sql', '008_handpay_ledger.sql', '009_deferred_money_events.sql', '010_tito_ledger.sql', '011_machine_cashless_ledger.sql', '012_saas_entitlements.sql', '013_handpay_ticket_payout.sql', '014_exception_dispositions.sql']);
   });
 
   test('seed writes identity tables only, never the legacy columns', async () => {

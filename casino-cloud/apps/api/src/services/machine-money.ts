@@ -190,6 +190,8 @@ export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; cas
     await recordEventException(db, { ...ev, type: 'CREDIT_METER' }, 'MACHINE', 'CLOCK_AHEAD', `credit meter report dated ${ev.occurredAt} is in the future: not settled`, out);
     return { outcome: 'EXCEPTION', reason: 'clock ahead', moneyTransactionId: null as string | null };
   }
+  // Serialises with an exception disposition of this machine: no settlement on a state read before it committed.
+  await db.query('SELECT 1 FROM machines WHERE id = $1 FOR UPDATE', [ev.machineId]);
   const m = (await db.query(
     `SELECT m.credit_meter_reliable, money_rail_frozen(m.org_id, m.casino_id, 'MACHINE', m.id) AS frozen,
        ($2::timestamptz AT TIME ZONE c.timezone)::date = (now() AT TIME ZONE c.timezone)::date AS today,
@@ -197,10 +199,9 @@ export async function handleCreditMeter(db: PoolClient, ev: { orgId: string; cas
                WHERE t.machine_id = m.id AND e.occurred_at > $2::timestamptz) AS later_booked,
        EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.machine_id = m.id AND d.status = 'PENDING') AS pending,
        -- F3: an unbooked credit-changing event (exception) must never be absorbed into the gaming result
-       EXISTS (SELECT 1 FROM machine_event_exceptions x JOIN money_rail_cutovers mc ON mc.rail = 'MACHINE' AND mc.machine_id = x.machine_id
-               WHERE x.machine_id = m.id AND x.created_at > mc.as_of
-                 AND x.event_type IN ('CASH_IN', 'CASH_OUT', 'TITO_IN', 'TITO_OUT', 'CASHLESS_IN', 'CASHLESS_OUT')
-                 AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('machine_event:' || x.event_id, 'ticket_event:' || x.event_id))) AS open_exceptions
+       -- V1: only a disposition (four-eyes correction or attestation, migration 014) releases it, never an explanation
+       EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.machine_id = m.id AND machine_exception_needs_disposition(x.event_id)
+                 AND NOT EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = x.event_id)) AS open_exceptions
      FROM machines m JOIN casinos c ON c.id = m.casino_id WHERE m.id = $1`, [ev.machineId, ev.occurredAt])).rows[0];
   if (!m.credit_meter_reliable && ev.creditCents !== 0) return skip('credit meter not reliable and not a zero-credit state');
   if (m.frozen) return skip('machine frozen');

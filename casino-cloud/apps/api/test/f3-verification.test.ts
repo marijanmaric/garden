@@ -185,6 +185,7 @@ describe('F3 verification: financial invariants', () => {
     const f0 = await footprint(o);
     const { payHandpay } = await import('../src/services/handpays');
     const c = await pool.connect();
+    c.on('error', () => {}); // the connection is killed on purpose
     await c.query('BEGIN');
     const pid = (await c.query('SELECT pg_backend_pid() p')).rows[0].p;
     await payHandpay(c, { orgId: o.id, employeeId: o.emp.CASHIER, employeeEmail: 'cashier@verify-b.test' } as never, h.id, { payTo: 'TICKET' });
@@ -259,21 +260,138 @@ describe('F3 verification: customer D', () => {
     explained.gr0 = gr0;
   });
 
-  // KNOWN GAP (pre-existing since 7d, reachable for D via F3): an explanation releases the settlement block,
-  // and there is no four-eyes ledger correction, so the unbooked amount of the event lands in GAMING_RESULT.
-  test('settlement after an explained ticket exception does not book the unbooked voucher as gaming result', { todo: 'needs a booked correction for credit-changing machine exceptions' }, async () => {
+  // V1: an exception is released for settlement only by its financial disposition, never by an explanation.
+  const V = { approvalId: '' };
+  const settle = async (creditCents: number) => { const gr = await raw(O.D, 'GAMING_RESULT'); await event(O.D, 1, 'CREDIT_METER', { creditCents }); return (await raw(O.D, 'GAMING_RESULT')) - gr; };
+  const corrections = (eventId: string) => n(`SELECT count(*)::int n FROM money_transactions WHERE source_event_id = $1 AND type = 'ADJUSTMENT'`, [eventId]);
+  const disposition = (eventId: string) => one('SELECT * FROM machine_event_dispositions WHERE event_id = $1', [eventId]);
+
+  test('V1-A: an explanation is refused and even a forced explanation row does not release the settlement', async () => {
     const o = O.D;
-    const tOut = { eventId: explained.eventId };
-    const gr0 = explained.gr0;
-    const m1 = o.machines[1].id; void m1;
-    const r = ok(await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: `machine_event:${tOut.eventId}`, explanation: 'Ticket printed by mistake, voucher of 25.00 handed to the player' })).json();
-    assert.ok((await post(o.t.MANAGER, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' })).statusCode >= 400, 'no self-approval');
+    for (const key of [`machine_event:${explained.eventId}`, `ticket_event:${explained.eventId}`]) {
+      const r = await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: key, explanation: 'Ticket printed by mistake, voucher of 25.00 handed to the player' });
+      assert.equal(r.statusCode, 409, r.body);
+      assert.equal(r.json().code, 'DISPOSITION_REQUIRED');
+    }
+    // bypass attempt: an approved explanation written straight into the database
+    const ap = await one(`INSERT INTO approvals (org_id, casino_id, action, entity_type, entity_id, status, requested_by, decided_by, decided_at)
+      VALUES ($1, $2, 'RECONCILIATION_RESOLUTION', 'reconciliation_item', $3, 'APPROVED', $4, $5, now()) RETURNING id`, [o.id, o.casino, `machine_event:${explained.eventId}`, o.emp.MANAGER, o.emp.ACCOUNTING]);
+    await pool.query(`INSERT INTO reconciliation_resolutions (org_id, casino_id, item_key, explanation, requested_by, approved_by, approval_id) VALUES ($1,$2,$3,'forced explanation row',$4,$5,$6)`,
+      [o.id, o.casino, `machine_event:${explained.eventId}`, o.emp.MANAGER, o.emp.ACCOUNTING, ap.id]);
+    assert.equal(await settle(2_500), 0, 'settlement still blocked: an explanation books nothing');
+    assert.ok(await one(`SELECT 1 FROM audit_logs WHERE org_id = $1 AND action = 'machine.settlement_skipped' AND details->>'reason' LIKE 'unexplained money event exceptions%' ORDER BY id DESC LIMIT 1`, [o.id]));
+  });
+
+  test('V1-G: only an authorised second person completes a disposition; amount, kind, currency, tenant and scope are validated', async () => {
+    const o = O.D;
+    const url = `/api/v1/machines/event-exceptions/${explained.eventId}/disposition`;
+    const body = { kind: 'CORRECTION', reason: 'Voucher of 25.00 printed while TITO is not purchased', evidenceRef: 'meter photo M2 / incident 17', amountCents: 2_500 };
+    assert.equal((await post(o.t.CASHIER, url, body)).statusCode, 403, 'a cashier cannot request');
+    assert.equal((await post(O.B.t.MANAGER, url, body)).statusCode, 404, 'another tenant cannot see it');
+    assert.equal((await post(o.t.MANAGER, url, { ...body, amountCents: 2_400 })).statusCode, 422, 'the amount must be the reported amount');
+    assert.equal((await post(o.t.MANAGER, url, { ...body, currency: 'USD' })).statusCode, 400);
+    assert.equal((await post(o.t.MANAGER, url, { ...body, evidenceRef: '' })).statusCode, 400, 'evidence is required');
+    const nm = await post(o.t.MANAGER, url, { ...body, kind: 'NO_MONEY_MOVED', amountCents: undefined });
+    assert.equal(nm.json().code, 'DISPOSITION_NOT_ALLOWED', 'the machine reported a ticket: its credit changed');
+    const r = ok(await post(o.t.MANAGER, url, body)).json();
+    V.approvalId = r.id;
+    assert.equal((await post(o.t.MANAGER, url, body)).statusCode, 409, 'one open request per exception');
+    assert.equal((await post(o.t.MANAGER, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' })).statusCode, 409, 'the initiator cannot approve');
+    assert.equal((await post(o.t.CASHIER, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' })).statusCode, 403, 'a cashier cannot approve');
+    assert.equal((await post(O.B.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' })).statusCode, 404, 'another tenant cannot approve');
+    assert.equal(await corrections(explained.eventId), 0);
+    assert.equal(await disposition(explained.eventId), undefined);
+    assert.equal(await settle(2_500), 0, 'requested is not handled: still blocked');
+  });
+
+  test('V1-B + E: an approval whose posting fails, or a crash before COMMIT, leaves no posting, no disposition, the request pending and the settlement blocked', async () => {
+    const o = O.D;
+    const state = async () => [await corrections(explained.eventId), await disposition(explained.eventId), (await one('SELECT status FROM approvals WHERE id = $1', [V.approvalId])).status];
+    // failure after the posting, inside the same transaction
+    await pool.query(`CREATE OR REPLACE FUNCTION v1_probe_fail() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'probe: disposition store failed'; END; $$ LANGUAGE plpgsql`);
+    await pool.query(`CREATE TRIGGER v1_probe_fail BEFORE INSERT ON machine_event_dispositions FOR EACH ROW EXECUTE FUNCTION v1_probe_fail()`);
+    try {
+      const r = await post(o.t.ACCOUNTING, `/api/v1/approvals/${V.approvalId}/decide`, { decision: 'APPROVED' });
+      assert.ok(r.statusCode >= 400, r.body);
+    } finally {
+      await pool.query('DROP TRIGGER v1_probe_fail ON machine_event_dispositions');
+    }
+    assert.deepEqual(await state(), [0, undefined, 'PENDING']);
+    // the process dies before COMMIT
+    const { decideDisposition } = await import('../src/services/exception-dispositions');
+    const c = await pool.connect();
+    c.on('error', () => {}); // the connection is killed on purpose
+    await c.query('BEGIN');
+    const pid = (await c.query('SELECT pg_backend_pid() p')).rows[0].p;
+    const done = await decideDisposition(c, { orgId: o.id, employeeId: o.emp.ACCOUNTING, casinoIds: [o.casino] } as never, V.approvalId, 'APPROVED');
+    assert.ok(done.moneyTransaction, 'posted inside the transaction');
+    await pool.query('SELECT pg_terminate_backend($1)', [pid]);
+    c.release(true);
+    assert.deepEqual(await state(), [0, undefined, 'PENDING']);
+    assert.equal(await settle(2_500), 0, 'still blocked');
+  });
+
+  test('V1-F + C + D: concurrent approvals and settlements: one correction, balanced, attributed; the 25.00 voucher never becomes GAMING_RESULT', async () => {
+    const o = O.D;
+    const gr0 = await raw(o, 'GAMING_RESULT');
+    const credit0 = await raw(o, 'MACHINE_CREDIT', o.machines[1].id);
+    const res = await Promise.all([
+      ...Array.from({ length: 8 }, (_, i) => post(i % 2 ? o.t.ACCOUNTING : o.t.admin, `/api/v1/approvals/${V.approvalId}/decide`, { decision: 'APPROVED' })),
+      ...Array.from({ length: 8 }, () => event(o, 1, 'CREDIT_METER', { creditCents: 2_500 }).then((e) => e.res)),
+    ]);
+    assert.equal(res.slice(0, 8).filter((r) => r.statusCode === 200).length, 1, res.slice(0, 8).map((r) => r.statusCode).join());
+    assert.equal(await corrections(explained.eventId), 1);
+    assert.equal(await raw(o, 'GAMING_RESULT'), gr0, 'whatever the order: the voucher is not a gaming result (no GAMING_RESULT -2500)');
+    // C: exactly the corrective entries, balanced, both people, the source event, the evidence
+    const d = await disposition(explained.eventId);
+    assert.deepEqual([d.kind, d.requested_by, d.approved_by, d.evidence_ref], ['CORRECTION', o.emp.MANAGER, [o.emp.ACCOUNTING, o.emp.admin].includes(d.approved_by) ? d.approved_by : 'x', 'meter photo M2 / incident 17']);
+    const tx = await one('SELECT * FROM money_transactions WHERE id = $1', [d.money_transaction_id]);
+    assert.deepEqual([tx.type, tx.source_event_id, tx.actor_id, tx.approved_by, Number(tx.amount_cents)], ['ADJUSTMENT', explained.eventId, o.emp.MANAGER, d.approved_by, 2_500]);
+    const entries = (await pool.query(`SELECT a.kind, a.machine_id, e.amount_cents::int c FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.account_id WHERE e.transaction_id = $1 ORDER BY e.amount_cents DESC`, [tx.id])).rows;
+    assert.deepEqual(entries, [{ kind: 'MACHINE_CREDIT', machine_id: o.machines[1].id, c: 2_500 }, { kind: 'TITO_EXCEPTION', machine_id: null, c: -2_500 }]);
+    assert.equal(await raw(o, 'MACHINE_CREDIT', o.machines[1].id), credit0 + 2_500, 'machine credit = meter (25.00)');
+    assert.equal(await raw(o, 'TITO_EXCEPTION'), -2_500, 'the voucher value is visible under investigation');
+    const audit = await one(`SELECT details FROM audit_logs WHERE org_id = $1 AND action = 'machine_event.disposition' AND entity_id = $2`, [o.id, explained.eventId]);
+    assert.deepEqual([audit.details.moneyTransactionId, audit.details.requestedBy, audit.details.evidenceRef], [tx.id, o.emp.MANAGER, 'meter photo M2 / incident 17']);
+    assert.equal((await one('SELECT status, money_transaction_id FROM approvals WHERE id = $1', [V.approvalId])).status, 'EXECUTED');
+    // D: settlement works again, on the corrected credit only (players lost 5.00 of the 25.00)
+    assert.equal(await settle(2_500), 0);
+    assert.equal(await settle(2_000), -500);
+    // no second correction: API, service and database
+    const again = await post(o.t.MANAGER, `/api/v1/machines/event-exceptions/${explained.eventId}/disposition`, { kind: 'CORRECTION', reason: 'second try at a correction', evidenceRef: 'x-1', amountCents: 2_500 });
+    assert.equal(again.statusCode, 409);
+    const { executeMoneyTransaction } = await import('../src/services/ledger');
+    const { withTransaction } = await import('@m1/database');
+    const direct = await withTransaction(pool, (db) => executeMoneyTransaction(db, {
+      orgId: o.id, type: 'ADJUSTMENT', dedupeKey: `probe-${randomUUID()}`, actor: { type: 'EMPLOYEE', employeeId: o.emp.MANAGER }, approvedBy: o.emp.ACCOUNTING, sourceEventId: explained.eventId,
+      ctx: { casinoId: o.casino, amountCents: 2_500 as never, machineId: o.machines[1].id, debit: { kind: 'MACHINE_CREDIT', machineId: o.machines[1].id }, credit: { kind: 'TITO_EXCEPTION' } },
+    })).then(() => 'booked', (e) => (e as Error).message);
+    assert.match(direct, /one_event_correction|duplicate key/);
+    const lonely = await withTransaction(pool, (db) => executeMoneyTransaction(db, {
+      orgId: o.id, type: 'ADJUSTMENT', dedupeKey: `probe-${randomUUID()}`, actor: { type: 'EMPLOYEE', employeeId: o.emp.MANAGER },
+      ctx: { casinoId: o.casino, amountCents: 100 as never, debit: { kind: 'TITO_EXCEPTION' }, credit: { kind: 'TITO_ADJUSTMENT' } },
+    })).then(() => 'booked', (e) => (e as Error).message);
+    assert.match(lonely, /four eyes/);
+    await assert.rejects(pool.query(`INSERT INTO money_transactions (org_id, casino_id, type, amount_cents, dedupe_key, request_hash, actor_type, actor_id, business_date) VALUES ($1,$2,'ADJUSTMENT',1,$3,'x','EMPLOYEE',$4,current_date)`,
+      [o.id, o.casino, `probe-${randomUUID()}`, o.emp.MANAGER]), /adjustment_four_eyes/);
+    await assert.rejects(pool.query(`UPDATE machine_event_dispositions SET reason = 'rewritten history' WHERE event_id = $1`, [explained.eventId]));
+    await assert.rejects(pool.query(`DELETE FROM machine_event_dispositions WHERE event_id = $1`, [explained.eventId]));
+  });
+
+  test('V1: a duplicate wallet ack moved no money: attested NO_MONEY_MOVED (four eyes, no posting); a correction has no rule for it', async () => {
+    const o = O.D;
+    const e = await event(o, 0, 'CASHLESS_IN', { amount: 10, transferId: randomUUID() });
+    assert.equal(e.body.exceptions.length, 1, e.res.body);
+    const url = `/api/v1/machines/event-exceptions/${e.eventId}/disposition`;
+    const corr = await post(o.t.MANAGER, url, { kind: 'CORRECTION', reason: 'unknown transfer acknowledged', evidenceRef: 'gw log 4711', amountCents: 1_000 });
+    assert.equal(corr.json().code, 'DISPOSITION_NOT_ALLOWED');
+    const r = ok(await post(o.t.MANAGER, url, { kind: 'NO_MONEY_MOVED', reason: 'Ack of an unknown transfer, credit meter unchanged', evidenceRef: 'credit meter M1 before/after' })).json();
+    const tx0 = await n(`SELECT count(*)::int n FROM money_transactions WHERE org_id = $1`, [o.id]);
     ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' }));
-    for (const f of (await pool.query(`SELECT id FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL`, [o.id])).rows)
-      ok(await post(o.t.admin, `/api/v1/money/freezes/${f.id}/lift`, { reason: 'explained with four eyes' }));
-    await event(o, 1, 'CREDIT_METER', { creditCents: 2_500 });
-    const settled = await raw(o, 'GAMING_RESULT') - gr0;
-    // physical truth: 50 in, 25 left as a voucher outside the system, 25 credit remain -> the players lost nothing.
-    assert.equal(settled, 0, `after the explanation the unbooked 25.00 voucher must not be booked as gaming result (booked ${settled})`);
+    assert.equal(await n(`SELECT count(*)::int n FROM money_transactions WHERE org_id = $1`, [o.id]), tx0, 'nothing is booked');
+    assert.equal((await disposition(e.eventId)).kind, 'NO_MONEY_MOVED');
+    const run = ok(await post(o.t.MANAGER, '/api/v1/money/reconciliation', { casinoId: o.casino })).json();
+    const items = run.checks.filter((x: { ok: boolean }) => !x.ok).flatMap((x: { items: string[] }) => x.items);
+    assert.ok(!items.includes(`machine_event:${e.eventId}`) && !items.includes(`machine_event:${explained.eventId}`), items.join());
   });
 });

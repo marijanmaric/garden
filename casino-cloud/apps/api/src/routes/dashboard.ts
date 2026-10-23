@@ -124,7 +124,8 @@ export async function dashboardRoutes(app: FastifyInstance) {
            (SELECT count(*)::int FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID') AS outstanding,
            (SELECT COALESCE(sum(amount), 0) FROM tickets WHERE org_id = $1 AND casino_id = $2 AND status = 'VALID') AS liability,
            (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.org_id = $1 AND x.casino_id = $2 AND x.rail = 'TITO'
-              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('ticket_event:' || x.event_id, 'machine_event:' || x.event_id))) AS exceptions`) : null,
+              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key IN ('ticket_event:' || x.event_id, 'machine_event:' || x.event_id))
+              AND NOT EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = x.event_id)) AS exceptions`) : null,
       uses('HANDPAY') ? one(
         `SELECT count(*) FILTER (WHERE h.status IN ('PENDING', 'APPROVED'))::int AS open, COALESCE(sum(h.amount_cents) FILTER (WHERE h.status IN ('PENDING', 'APPROVED')), 0)::bigint AS open_cents,
            count(*) FILTER (WHERE h.paid_at >= ${TODAY})::int AS paid_today, COALESCE(sum(h.amount_cents) FILTER (WHERE h.paid_at >= ${TODAY}), 0)::bigint AS paid_today_cents
@@ -137,8 +138,9 @@ export async function dashboardRoutes(app: FastifyInstance) {
       uses('MACHINE') ? one(
         `SELECT (SELECT count(*)::int FROM money_rail_cutovers WHERE org_id = $1 AND casino_id = $2 AND rail = 'MACHINE') AS on_ledger,
            (SELECT count(*)::int FROM money_rail_freezes WHERE org_id = $1 AND casino_id = $2 AND rail = 'MACHINE' AND machine_id IS NOT NULL AND lifted_at IS NULL) AS frozen,
-           (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.org_id = $1 AND x.casino_id = $2 AND x.rail IN ('MACHINE', 'CASHLESS')
-              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key = 'machine_event:' || x.event_id)) AS exceptions`) : null,
+           (SELECT count(*)::int FROM machine_event_exceptions x WHERE x.org_id = $1 AND x.casino_id = $2 AND (x.rail IN ('MACHINE', 'CASHLESS') OR machine_exception_needs_disposition(x.event_id))
+              AND NOT EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key = 'machine_event:' || x.event_id)
+              AND NOT EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = x.event_id)) AS exceptions`) : null,
       uses('VAULT') ? one(
         `SELECT (SELECT status FROM vault_sessions WHERE org_id = $1 AND casino_id = $2 AND status IN ('OPEN', 'COUNTING') ORDER BY opened_at DESC LIMIT 1) AS session_status,
            (SELECT count(*)::int FROM cash_movements WHERE org_id = $1 AND casino_id = $2 AND status = 'REQUESTED') AS open_movements`) : null,

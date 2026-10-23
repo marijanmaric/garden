@@ -5,6 +5,7 @@ import { bus, type BusMessage } from '../bus';
 import { pool } from '../db';
 import { idempotent } from '../services/idempotency';
 import { requestLateEventBooking } from '../services/late-events';
+import { requestDisposition } from '../services/exception-dispositions';
 import { confirmHopperFill, recordCollectionCount, requestHopperFill, verifyCollectionCount } from '../services/machine-ops';
 import { requireUsableCard } from '../services/players';
 import { requestWalletCashApproval, walletCash } from '../services/wallet-cash';
@@ -75,10 +76,26 @@ export async function machineMoneyRoutes(app: FastifyInstance) {
     return (await pool.query(
       `SELECT x.*, m.asset_no, e.amount, e.occurred_at,
          EXISTS (SELECT 1 FROM reconciliation_resolutions r WHERE r.org_id = x.org_id AND r.item_key = 'machine_event:' || x.event_id) AS explained,
-         (SELECT a.status FROM approvals a WHERE a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id ORDER BY a.created_at DESC LIMIT 1) AS explanation_status
+         (SELECT a.status FROM approvals a WHERE a.action = 'RECONCILIATION_RESOLUTION' AND a.entity_id = 'machine_event:' || x.event_id ORDER BY a.created_at DESC LIMIT 1) AS explanation_status,
+         machine_exception_needs_disposition(x.event_id) AS needs_disposition,
+         (SELECT d.kind FROM machine_event_dispositions d WHERE d.event_id = x.event_id) AS disposition,
+         (SELECT a.status FROM approvals a WHERE a.action = 'MACHINE_EXCEPTION_DISPOSITION' AND a.entity_id = x.event_id::text ORDER BY a.created_at DESC LIMIT 1) AS disposition_status
        FROM machine_event_exceptions x JOIN machines m ON m.id = x.machine_id JOIN machine_events e ON e.event_id = x.event_id
        WHERE x.org_id = $1 AND x.casino_id = $2 ORDER BY x.created_at DESC LIMIT 200`,
       [req.auth.orgId, casinoId])).rows;
+  });
+
+  /**
+   * V1: financial disposition of an exception that changed a ledger machine's credit (four eyes; executed when a
+   * different person approves under /api/v1/approvals/:id/decide). Settlement of the machine waits for it.
+   */
+  app.post('/api/v1/machines/event-exceptions/:eventId/disposition', { config: { feature: 'reconciliation' }, preHandler: guard('cashier.supervise') }, async (req, reply) => {
+    const { eventId } = z.object({ eventId: z.string().uuid() }).parse(req.params);
+    const body = z.object({
+      kind: z.enum(['CORRECTION', 'NO_MONEY_MOVED']), reason: z.string().trim().min(10).max(1000), evidenceRef: z.string().trim().min(3).max(300),
+      amountCents: z.number().int().positive().max(1e13).optional(), currency: z.literal('EUR').default('EUR'),
+    }).parse(req.body);
+    return idempotent(req, reply, (db) => requestDisposition(db, actorOf(req), eventId, body));
   });
 
   // ---- late-event booking of a deferred event whose business date is closed (four eyes) ----

@@ -1,6 +1,6 @@
 import { withTransaction, writeAudit, type Pool, type PoolClient } from '@m1/database';
 import { RAIL_MODULE, type FreezeRail } from '@m1/shared';
-import { HttpError } from '../auth';
+import { HttpError, stateError } from '../auth';
 import type { BusMessage } from '../bus';
 import { openAlert } from './alerts';
 import { consumeApproval, decideApproval, requestApproval } from './approvals';
@@ -241,6 +241,7 @@ async function titoChecks(db: Db, casinoId: string, since: string) {
         `SELECT e.event_id AS id FROM machine_events e WHERE e.casino_id = $1 AND e.received_at > $2
            AND e.type IN ('TITO_OUT', 'TITO_IN') AND e.payload->>'ticketBarcode' IS NOT NULL AND (e.type = 'TITO_IN' OR e.amount > 0)
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
+           AND NOT EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = e.event_id)
            AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
                 OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
          ORDER BY e.event_id`, 'ticket_event'),
@@ -294,6 +295,7 @@ async function machineChecks(db: Db, casinoId: string, machineOf: Map<string, st
                 OR (e.type IN ('TITO_IN', 'TITO_OUT', 'JACKPOT') AND EXISTS (SELECT 1 FROM machine_event_exceptions x
                       WHERE x.event_id = e.event_id AND x.code IN ('TITO_NOT_ON_LEDGER', 'HANDPAY_NOT_ON_LEDGER'))))
            AND NOT EXISTS (SELECT 1 FROM money_transactions t WHERE t.source_event_id = e.event_id)
+           AND NOT EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = e.event_id)
            AND (NOT EXISTS (SELECT 1 FROM deferred_money_events d WHERE d.event_id = e.event_id)
                 OR EXISTS (SELECT 1 FROM machine_event_exceptions x WHERE x.event_id = e.event_id))
          ORDER BY e.event_id`, 'machine_event'),
@@ -483,6 +485,10 @@ export async function requestResolution(db: Db, a: CashActor, input: { casinoId:
   if (!a.casinoIds.includes(input.casinoId)) throw new HttpError(404, 'Casino not found');
   if (!input.explanation || input.explanation.trim().length < 10) throw new HttpError(400, 'An explanation of at least 10 characters is required');
   if ((await rows(db, 'SELECT 1 FROM reconciliation_resolutions WHERE org_id = $1 AND item_key = $2', [a.orgId, input.itemKey])).length) throw new HttpError(409, 'Item already resolved');
+  // V1: an exception whose money changed a ledger machine's credit is settled by a disposition, not an explanation
+  const ev = /^(?:machine_event|ticket_event):([0-9a-f-]{36})$/.exec(input.itemKey)?.[1];
+  if (ev && (await rows(db, 'SELECT machine_exception_needs_disposition($1::uuid) AS needs', [ev]))[0].needs)
+    throw stateError(409, 'DISPOSITION_REQUIRED', 'This exception changed a machine credit on the ledger: it needs a disposition (correction or no-money attestation, four eyes), an explanation books nothing');
   return requestApproval(db, a, { casinoId: input.casinoId, action: 'RECONCILIATION_RESOLUTION', entityType: 'reconciliation_item', entityId: input.itemKey, payload: { explanation: input.explanation } });
 }
 

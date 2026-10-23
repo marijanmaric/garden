@@ -535,11 +535,15 @@ describe('Final acceptance: five customers', () => {
     assert.deepEqual(failed(run), [`machine.events_accounted: ${[`machine_event:${tOut.eventId}`, `machine_event:${jp.eventId}`].sort().join(',')}`]);
     const frozen = await q(`SELECT machine_id FROM money_rail_freezes WHERE org_id = $1 AND rail = 'MACHINE' AND lifted_at IS NULL`, [o.id]);
     assert.deepEqual(frozen.map((f) => f.machine_id).sort(), [m2, m3].sort());
-    // explained with four eyes, then clean; freezes lifted
-    for (const key of [`machine_event:${tOut.eventId}`, `machine_event:${jp.eventId}`]) {
-      const r = ok(await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: key, explanation: 'Event of a module this casino does not run; machine disabled for tickets / jackpots by the operator' })).json();
-      ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' }));
-    }
+    // V1: the ticket changed the machine's credit: an explanation is refused, the four-eyes correction books it
+    // (MACHINE_CREDIT -> TITO_EXCEPTION, ticket value under investigation); the jackpot moved no credit: explained
+    const refusedExplanation = await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: `machine_event:${tOut.eventId}`, explanation: 'A voucher of 25.00 left the machine' });
+    assert.equal(refusedExplanation.json().code, 'DISPOSITION_REQUIRED');
+    const corr = ok(await post(o.t.MANAGER, `/api/v1/machines/event-exceptions/${tOut.eventId}/disposition`, { kind: 'CORRECTION', reason: 'Voucher of 25.00 printed while TITO is not purchased', evidenceRef: 'meter photo M4', amountCents: 2_500 })).json();
+    ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${corr.id}/decide`, { decision: 'APPROVED' }));
+    assert.deepEqual(await postingsOf(o, `t.source_event_id = $2`, [tOut.eventId]), ['ADJUSTMENT MACHINE_CREDIT+2500', 'ADJUSTMENT TITO_EXCEPTION-2500']);
+    const r = ok(await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: `machine_event:${jp.eventId}`, explanation: 'Jackpot of a module this casino does not run; handpay jackpots disabled at the machine' })).json();
+    ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' }));
     run = await reconcile(o);
     assert.equal(run.ok, true, failed(run).join('; '));
     for (const f of await q(`SELECT id FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL`, [o.id]))
@@ -658,8 +662,9 @@ describe('Final acceptance: five customers', () => {
     const frozen = await q(`SELECT rail, machine_id FROM money_rail_freezes WHERE org_id = $1 AND lifted_at IS NULL`, [o.id]);
     assert.deepEqual(frozen.map((f) => [f.rail, f.machine_id]), [['MACHINE', o.machines[0].id]], 'only the affected machine is frozen');
     // explanation with four eyes (the requester cannot approve), then clean and lifted
+    // V1: they reached a ledger machine, so the four-eyes disposition (no money moved) settles them, not an explanation
     for (const key of items) {
-      const r = ok(await post(o.t.MANAGER, '/api/v1/money/resolutions', { casinoId: o.casino, itemKey: key, explanation: 'Duplicate machine ack, transfer already confirmed, no money moved' })).json();
+      const r = ok(await post(o.t.MANAGER, `/api/v1/machines/event-exceptions/${key.split(':')[1]}/disposition`, { kind: 'NO_MONEY_MOVED', reason: 'Duplicate machine ack, transfer already confirmed, no money moved', evidenceRef: 'transfer log' })).json();
       assert.equal((await post(o.t.MANAGER, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' })).statusCode >= 400, true);
       ok(await post(o.t.ACCOUNTING, `/api/v1/approvals/${r.id}/decide`, { decision: 'APPROVED' }));
     }

@@ -46,7 +46,8 @@ export class HttpError extends Error {
  * Machine-readable operational states (the entitlement codes live in services/entitlements.ts): the operator
  * sees whether a rail is still on legacy money, already on the ledger, frozen by reconciliation, or the date closed.
  */
-export type StateCode = 'RAIL_LEGACY' | 'RAIL_ON_LEDGER' | 'RAIL_FROZEN' | 'BUSINESS_DATE_CLOSED' | 'INSUFFICIENT_BALANCE' | 'IDEMPOTENCY_CONFLICT';
+export type StateCode = 'RAIL_LEGACY' | 'RAIL_ON_LEDGER' | 'RAIL_FROZEN' | 'BUSINESS_DATE_CLOSED' | 'INSUFFICIENT_BALANCE' | 'IDEMPOTENCY_CONFLICT'
+  | 'APPROVAL_REQUIRED' | 'DISPOSITION_REQUIRED' | 'DISPOSITION_NOT_ALLOWED';
 export function stateError(status: number, code: StateCode, message: string) {
   const e = new HttpError(status, message);
   e.body = { code };

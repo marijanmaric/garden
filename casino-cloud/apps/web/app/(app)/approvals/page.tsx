@@ -36,6 +36,10 @@ function entityLines(a: Approval): Array<[string, React.ReactNode]> {
     out.push(['Event', `${p.rail} ${p.kind}`], ['Occurred (economic time)', p.occurredAt ? formatDateTime(p.occurredAt) : '-'], ['Received', p.receivedAt ? formatDateTime(p.receivedAt) : '-'],
       ['Original business date (closed)', p.originalBusinessDate ?? '-'], ['Posting date', "today's open business date, referencing the original"], ['Reason', p.reason]);
   }
+  if (a.action === 'MACHINE_EXCEPTION_DISPOSITION') {
+    out.push(['Event', `${p.eventType} ${p.code}`], ['Disposition', p.kind === 'CORRECTION' ? 'Correction booking (ADJUSTMENT on approval)' : 'No money moved (nothing booked)'],
+      ['Reason', p.reason], ['Evidence', p.evidenceRef]);
+  }
   if (a.action === 'HANDPAY_EXCEPTION') out.push(['Resolution', p.resolution], ...(p.jackpotEventId ? [['Linked jackpot event', p.jackpotEventId] as [string, string]] : []));
   if (a.action === 'TITO_CANCEL' || a.action === 'TITO_VOID') out.push(['Reason', p.reason]);
   return out;

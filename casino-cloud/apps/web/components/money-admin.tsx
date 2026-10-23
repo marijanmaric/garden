@@ -67,6 +67,35 @@ export function ExplainButton({ itemKey, label, onDone }: { itemKey: string; lab
   );
 }
 
+/** V1: the financial disposition of an exception that changed a ledger machine's credit (four eyes, books on approval). */
+export function DispositionButton({ x, onDone }: { x: any; onDone?: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [evidence, setEvidence] = useState('');
+  const confirm = useConfirm(() => { setOpen(false); onDone?.(); });
+  const cents = x.amount !== null ? Math.round(Number(x.amount) * 100) : 0;
+  const correction = (x.event_type === 'TITO_OUT' || x.event_type === 'TITO_IN') && cents > 0;
+  if (!open) return <button className="btn py-1 text-xs" onClick={() => setOpen(true)} data-testid="disposition">{correction ? 'Book correction' : 'No money moved'}</button>;
+  return (
+    <div className="flex flex-col gap-1">
+      <input className="input py-1 text-xs" placeholder="Reason (10+ chars)" value={reason} onChange={(e) => setReason(e.target.value)} data-testid="disposition-reason" />
+      <input className="input py-1 text-xs" placeholder="Evidence reference (meter photo, report no.)" value={evidence} onChange={(e) => setEvidence(e.target.value)} data-testid="disposition-evidence" />
+      <button className="btn py-1 text-xs" disabled={reason.trim().length < 10 || evidence.trim().length < 3} data-testid="disposition-submit" onClick={() => confirm.ask({
+        title: correction ? 'Book correction of a machine event' : 'Attest: no money moved',
+        summary: correction
+          ? `A different person must approve. On approval the ${x.event_type === 'TITO_OUT' ? 'ticket printed' : 'ticket accepted'} by the machine is booked against TITO_EXCEPTION (ticket value under investigation); then the machine can be settled.`
+          : 'A different person must approve. Nothing is booked; the event is excluded from settlement. Only if you verified that no money moved.',
+        amountCents: correction ? cents : undefined,
+        details: [['Machine', x.asset_no], ['Event', `${x.event_type} ${x.code}`], ['Reason', reason], ['Evidence', evidence]],
+        path: `/machines/event-exceptions/${x.event_id}/disposition`,
+        body: { kind: correction ? 'CORRECTION' : 'NO_MONEY_MOVED', reason, evidenceRef: evidence, amountCents: correction ? cents : undefined },
+        describe: () => 'Disposition requested: waits for the second person (Approvals).',
+      })}>Send</button>
+      {confirm.dialog}
+    </div>
+  );
+}
+
 export function EventExceptions({ limit }: { limit?: number }) {
   const { casino } = useSession();
   const list = useApi<any[]>(`/machines/event-exceptions?casinoId=${casino.id}`, { refreshMs: 10000 });
@@ -84,7 +113,9 @@ export function EventExceptions({ limit }: { limit?: number }) {
               <td>{x.rail} · {MACHINE_MONEY_LABEL[x.event_type] ?? x.event_type}<div className="max-w-xs truncate text-xs text-sub" title={x.message}>{x.message}</div></td>
               <td className="text-xs font-mono">{x.code}</td>
               <td className="text-right tabular-nums">{x.amount !== null ? formatCents(Math.round(Number(x.amount) * 100)) : '-'}</td>
-              <td className="text-xs">{x.explained ? 'explained' : x.explanation_status === 'PENDING' ? 'explanation pending' : <ExplainButton itemKey={`machine_event:${x.event_id}`} onDone={() => void list.reload()} />}</td>
+              <td className="text-xs">{x.needs_disposition
+                ? (x.disposition ? `disposition: ${String(x.disposition).toLowerCase().replace(/_/g, ' ')}` : x.disposition_status === 'PENDING' ? 'disposition pending (four eyes)' : <DispositionButton x={x} onDone={() => void list.reload()} />)
+                : x.explained ? 'explained' : x.explanation_status === 'PENDING' ? 'explanation pending' : <ExplainButton itemKey={`machine_event:${x.event_id}`} onDone={() => void list.reload()} />}</td>
             </tr>
           ))}
         </tbody>

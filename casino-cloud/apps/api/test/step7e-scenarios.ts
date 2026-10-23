@@ -244,8 +244,11 @@ export function registerStep7eScenarios(get: () => Ctx7e) {
       let run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
       assert.equal(run.checks.find((x: any) => x.key === 'machine.ledger_matches_meters').ok, true);
       // explain the exception (four eyes) so the casino reconciles clean again
-      const r = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: cid(), itemKey: `machine_event:${e2.eventId}`, explanation: 'Hopper was empty; attendant paid nothing, verified' });
-      await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' });
+      // V1: it changed a ledger machine's credit, so an explanation is refused; the attestation is a disposition
+      const refusedExplanation = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: cid(), itemKey: `machine_event:${e2.eventId}`, explanation: 'Hopper was empty; attendant paid nothing, verified' });
+      assert.equal(refusedExplanation.json().code, 'DISPOSITION_REQUIRED');
+      const r = await post('manager@example.com', `/api/v1/machines/event-exceptions/${e2.eventId}/disposition`, { kind: 'NO_MONEY_MOVED', reason: 'Hopper was empty; attendant paid nothing, verified', evidenceRef: 'hopper count sheet 2' });
+      assert.ok((await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' })).json().disposition);
       run = (await post('floor@example.com', '/api/v1/money/reconciliation', { casinoId: cid() })).json();
       assert.equal(run.ok, true, JSON.stringify(run.checks.filter((x: any) => !x.ok)));
       // the first run froze machine 2 (unexplained exception at that time): lifted now that the run is clean

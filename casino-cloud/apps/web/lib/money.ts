@@ -66,6 +66,7 @@ export const APPROVAL_LABEL: Record<string, string> = {
   CASH_WITHDRAWAL: 'CASHLESS wallet withdrawal',
   DRAWER_SHORT_OVER: 'Drawer short / over',
   RECONCILIATION_RESOLUTION: 'Reconciliation explanation',
+  MACHINE_EXCEPTION_DISPOSITION: 'Machine exception disposition',
   LATE_EVENT_BOOKING: 'Late event booking',
 };
 

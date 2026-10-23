@@ -66,9 +66,23 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
   const lift = (freezeId: string, reason = 'test over') => post('admin@example.com', `/api/v1/money/freezes/${freezeId}/lift`, { reason });
   const day = async (offset: number, casinoId = c.casino.id) => (await one(`SELECT ((now() AT TIME ZONE timezone)::date + $2::int)::text AS d FROM casinos WHERE id = $1`, [casinoId, offset])).d as string;
   /** Four-eyes explanation of reconciliation items (manager requests, accounting approves). */
-  async function explain(keys: string[], casinoId = c.casino.id) {
+  async function explain(keys: string[], casinoId = c.casino.id, explanation = 'Investigated: duplicate machine ack, no money moved') {
     for (const key of keys) {
-      const r = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId, itemKey: key, explanation: 'Investigated: duplicate machine ack, no money moved' });
+      // V1 (migration 014): an exception that changed a ledger machine's credit needs a disposition, not an explanation
+      const eventId = /^(?:machine_event|ticket_event):(.+)$/.exec(key)?.[1];
+      const x = eventId ? await one(`SELECT x.event_type, e.amount, machine_exception_needs_disposition(x.event_id) AS needs,
+          EXISTS (SELECT 1 FROM machine_event_dispositions d WHERE d.event_id = x.event_id) AS done
+        FROM machine_event_exceptions x JOIN machine_events e ON e.event_id = x.event_id WHERE x.event_id = $1`, [eventId]) : null;
+      if (x?.needs) {
+        if (x.done) continue;
+        const cents = Math.round(Number(x.amount ?? 0) * 100);
+        const kind = ['TITO_IN', 'TITO_OUT'].includes(x.event_type) && cents > 0 ? 'CORRECTION' : 'NO_MONEY_MOVED';
+        const r = await post('manager@example.com', `/api/v1/machines/event-exceptions/${eventId}/disposition`, { kind, reason: explanation, evidenceRef: 'meters and gateway log checked', amountCents: kind === 'CORRECTION' ? cents : undefined });
+        assert.equal(r.statusCode, 200, r.body);
+        assert.ok((await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' })).json().disposition, key);
+        continue;
+      }
+      const r = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId, itemKey: key, explanation });
       assert.ok((await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' })).json().resolution, key);
     }
   }
@@ -157,10 +171,7 @@ export function registerStep7dScenarios(get: () => Ctx7d) {
       const other = await event(2, 'CASH_IN', { amount: 1 });
       assert.equal((await txOf(other.eventId))[0].type, 'MACHINE_CASH_IN');
       // explained by four eyes -> lifted
-      for (const key of [`machine_event:${unknown.eventId}`, `machine_event:${st.exceptionEvent}`, `machine_event:${noAmount.eventId}`, `ticket_event:${dup.eventId}`]) {
-        const r = await post('manager@example.com', '/api/v1/money/resolutions', { casinoId: c.casino.id, itemKey: key, explanation: 'Investigated: no money moved, physical cash counted' });
-        assert.ok((await post('accounting@example.com', `/api/v1/approvals/${r.json().id}/decide`, { decision: 'APPROVED' })).json().resolution, key);
-      }
+      await explain([`machine_event:${unknown.eventId}`, `machine_event:${st.exceptionEvent}`, `machine_event:${noAmount.eventId}`, `ticket_event:${dup.eventId}`], c.casino.id, 'Investigated: no money moved, physical cash counted');
       for (const f of await q(`SELECT id FROM money_rail_freezes WHERE casino_id = $1 AND lifted_at IS NULL`, [c.casino.id]))
         assert.equal((await lift(f.id, 'explained')).json().lifted, true);
     });
