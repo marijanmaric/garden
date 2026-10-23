@@ -302,7 +302,7 @@ reported in the cutover checks (`prerequisite:<rail>` or `not_in_use:<rail>`). I
 - Wallets are funded only through machines (bill acceptor -> cashbox -> vault) without Cash: Cashless + Machine needs
   the vault as count room (plan CASHLESS_MACHINE contains it).
 - A ticket or jackpot on a machine of a casino without TITO / HANDPAY is a physical fact the system cannot book: it is
-  reported until explained by two people (and corrected with a four-eyes adjustment where money moved).
+  quarantined (recorded exception, no money, settlement of that machine blocked) and reported until explained by two people.
 
 ### Five customers after F3
 
@@ -324,3 +324,40 @@ reported in the cutover checks (`prerequisite:<rail>` or `not_in_use:<rail>`). I
 | Docker upgrades 006, 7b, 7c, 7d, 7e and c836ea1 (012) to 013 | money fingerprint identical for each |
 | Browser: SaaS matrix incl. B voucher payout | 17 / 17, 0 browser errors, only the intended 409 (Cash without Vault refused) |
 | Browser: Enterprise operator flows | 16 / 16 |
+
+## Part 6: F3 independent verification (October 2026)
+
+Repository: branch `claude/casino-management-saas-v6ekzj`, `6632f9b` and `dec180f` present locally and on the remote,
+working tree clean. Re-run from scratch, not taken from earlier reports.
+
+| Check | Result |
+|---|---|
+| API suite (PostgreSQL 16) | 361 / 361 |
+| `test/f3-verification.test.ts` (database-level probes, customers B, D and a TITO-legacy org) | 6 / 6, plus 1 `todo` that reproduces finding V1 |
+| Docker upgrades 006 and c836ea1 -> 013 | money fingerprint identical |
+| Application rollback: c836ea1 code on a database with 013 | starts, money endpoints 200 (013 is additive: a check widened, one nullable column, one partial unique index) |
+
+Proven at database level: an entry on a legacy rail is refused (rail guard); an unbalanced or single-entry
+transaction never commits; a second voucher booking for a handpay, removing the voucher link, a second redemption and
+20 parallel payouts all fail or book nothing; a payout that fails midway (frozen TITO) and a connection killed before
+COMMIT leave no ticket, no booking and no handpay change; another tenant cannot read, pay or redeem a voucher; in D a
+ticket / jackpot event is quarantined and settlement is skipped at a reliable meter, at zero credit and on a direct
+service call.
+
+### Findings
+
+| ID | Severity | Finding | Status |
+|---|---|---|---|
+| V1 | HIGH | Explaining a credit-changing machine exception (four eyes) releases the settlement block; no ledger correction exists, so the unbooked amount is booked as GAMING_RESULT at the next settlement (proven: a 25.00 voucher printed in D became a 25.00 gaming win). Pre-existing since 7d for every MACHINE customer (e.g. a hopper payout exception), reachable for D through F3 | open: needs a decision (see below) |
+| V2 | MEDIUM | There is no four-eyes manual ledger correction at all. `POST /transactions/adjustments` writes only the legacy `gaming_transactions` table, by one person (audited) | open |
+| V3 | LOW | Part 5 said a four-eyes adjustment corrects such cases: that function does not exist (text corrected) | fixed (docs) |
+| V4 | LOW | A handpay voucher follows every ticket rule: it can expire (EXPIRED_TICKET_INCOME) and be cancelled with four eyes; a lost voucher cannot be reissued for the paid handpay | open, operational rule needed |
+
+### Customer D: operating procedure for machine event exceptions (until V1 is fixed)
+
+1. Machines of a Cashless + Machine casino must have ticket printing and handpay jackpots disabled at the machine.
+2. `TITO_NOT_ON_LEDGER` / `HANDPAY_NOT_ON_LEDGER`: the event is kept, no money is booked, an alert is raised,
+   reconciliation lists it (`machine.events_accounted`), the machine is frozen and its settlement is skipped.
+3. If no money moved (test print, voucher destroyed in front of two people): explain with four eyes, lift the freeze.
+4. If money moved (a voucher left the floor, a jackpot was paid by hand): do NOT explain it; escalate. Explaining
+   would let the next settlement book the amount as gaming result (V1).
